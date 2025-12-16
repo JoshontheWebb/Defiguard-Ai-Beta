@@ -1853,26 +1853,19 @@ def run_echidna(temp_path: str) -> list[dict[str, str]]:
     except FileNotFoundError:
         logger.info("Docker not found—using cloud fallback")
     
-    # AWS Lambda fallback (configure env vars: AWS_ACCESS_KEY_ID, etc.)
-    try:
-        lambda_client = boto3.client('lambda',
-            aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
-            aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
-            region_name=os.getenv('AWS_REGION', 'us-east-1')
-        )
-        with open(temp_path, 'rb') as f:
-            payload = json.dumps({'contract': f.read().decode('utf-8')})
-        response = lambda_client.invoke(
-            FunctionName=os.getenv('ECHIDNA_LAMBDA_NAME', 'echidna-fuzzer'),
-            Payload=payload
-        )
-        result = json.loads(response['Payload'].read())
-        issues = result.get('issues', [])
-        logger.info(f"Echidna cloud found {len(issues)} issues")
-        return [{"vulnerability": i['type'], "description": i['desc']} for i in issues]
+# Fallback to simple cloud endpoint
     except Exception as e:
-        logger.error(f"Echidna fallback failed: {str(e)}")
-        return [{"vulnerability": "Echidna error", "description": str(e)}]
+        logger.error(f"Echidna fuzzing failed: {str(e)}")
+        try:
+            with open(temp_path, 'rb') as f:
+                response = requests.post('https://your-cloud-fuzzing-endpoint', files={'file': f})
+            if response.ok:
+                return response.json()
+            else:
+                return [{"vulnerability": "Fallback failed", "description": response.text}]
+        except Exception as fallback_e:
+            logger.error(f"Fuzzing fallback failed: {str(fallback_e)}")
+            return [{"vulnerability": "Fuzzing failed", "description": str(e)}]
     finally:
         if config_path and os.path.exists(config_path):
             os.unlink(config_path)
@@ -1880,21 +1873,37 @@ def run_echidna(temp_path: str) -> list[dict[str, str]]:
             os.unlink(output_path)
 
 def run_mythril(temp_path: str) -> list[dict[str, str]]:
-    """Run Mythril analysis using the library (better than subprocess)."""
-    env = os.getenv('ENV', 'dev')
-    if env == 'dev' and platform.system() == 'Windows':
-        logger.info("Mythril skipped in Windows dev env")
-        return [{"vulnerability": "Mythril unavailable", "description": "Skipped in dev"}]
-    
+    """Run mythril analysis with Windows fallback."""
+    if not os.path.exists(temp_path):
+        return []
+   
     try:
-        analyzer = MythrilAnalyzer(solc_version="0.8.24")  # Use installed solc
-        report = analyzer.analyze(temp_path)
-        issues = [{"vulnerability": issue.title, "description": issue.description} for issue in report.issues]
-        logger.info(f"Mythril found {len(issues)} issues")
-        return issues or [{"vulnerability": "No issues", "description": "Mythril found no vulnerabilities"}]
+        logger.info("Starting Mythril analysis")
+        result = subprocess.run(
+            ["myth", "analyze", temp_path, "--json"],
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+       
+        if result.returncode == 0:
+            issues = json.loads(result.stdout).get("issues", [])
+            formatted = [{
+                "vulnerability": issue.get("title", "Unknown"),
+                "description": issue.get("description", "No description")
+            } for issue in issues]
+            logger.info(f"Mythril found {len(formatted)} issues")
+            return formatted or [{"vulnerability": "No issues", "description": "Mythril found no vulnerabilities"}]
+        else:
+            logger.warning(f"Mythril failed: {result.stderr[:200]}")
+            return [{"vulnerability": "Mythril error", "description": result.stderr[:500]}]
+   
+    except FileNotFoundError:
+        logger.info("Mythril not available on this system (Windows dev) – skipping")
+        return [{"vulnerability": "Mythril unavailable", "description": "Local mythril not installed – Grok will still analyze"}]
     except Exception as e:
-        logger.error(f"Mythril failed: {str(e)}")
-        return [{"vulnerability": "Mythril error", "description": str(e)}]
+        logger.error(f"Mythril crashed: {str(e)}")
+        return [{"vulnerability": "Mythril failed", "description": str(e)}]
 
 def filter_issues_for_free_tier(report: dict[str, Any], tier: str) -> dict[str, Any]:
     """
