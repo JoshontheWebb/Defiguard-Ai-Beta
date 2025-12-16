@@ -1804,71 +1804,64 @@ usage_tracker.set_tier("free")
 ## Section 3
 
 def run_echidna(temp_path: str) -> list[dict[str, str]]:
-    """Run Echidna with Docker or simple fallback."""
+    """Run Echidna fuzzing - binary or Docker."""
     env = os.getenv('ENV', 'dev')
     if env == 'dev' and platform.system() == 'Windows':
         logger.info("Echidna skipped in Windows dev env")
         return [{"vulnerability": "Echidna unavailable", "description": "Skipped in dev"}]
     
-    config_path = None
-    output_path = None
+    # Try binary first (Render)
     try:
-        subprocess.run(["docker", "--version"], check=True, capture_output=True, text=True)
-        logger.info("Docker is available, attempting to pull Echidna image")
+        result = subprocess.run(
+            ["echidna", temp_path, "--test-mode", "assertion"],
+            capture_output=True,
+            text=True,
+            timeout=180
+        )
         
-        @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-        def pull_echidna():
-            subprocess.run(["docker", "pull", "trailofbits/echidna"], check=True, capture_output=True, text=True)
-            logger.info("Echidna image pulled successfully")
-        
-        pull_echidna()
-        
-        config_path = os.path.join(DATA_DIR, "echidna_config.yaml")
-        output_path = os.path.join(DATA_DIR, "echidna_output")
-        
-        with open(config_path, "w") as f:
-            f.write("format: text\ntestLimit: 10000\nseqLen: 100\ncoverage: true")
-        
-        cmd = [
-            "docker", "run", "--rm",
-            "-v", f"{DATA_DIR}:/app",
-            "trailofbits/echidna",
-            f"/app/{os.path.basename(temp_path)}",
-            "--config", "/app/echidna_config.yaml",
-            "--output", "/app/echidna_output"
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        
-        if os.path.exists(output_path):
-            with open(output_path, "r") as f:
-                echidna_results = f.read()
+        if result.returncode == 0 or result.stdout:
+            logger.info(f"Echidna binary completed: {result.stdout[:200]}")
+            return [{"vulnerability": "Fuzzing complete", "description": result.stdout or "No issues found"}]
         else:
-            echidna_results = result.stdout
-        
-        logger.info("Echidna fuzzing completed successfully")
-        logger.debug(f"Echidna results: {echidna_results}")
-        return [{"vulnerability": "Fuzzing result", "description": echidna_results or "No vulnerabilities found by Echidna"}]
+            logger.warning(f"Echidna binary failed: {result.stderr[:200]}")
+            return [{"vulnerability": "Echidna failed", "description": result.stderr[:200]}]
     
     except FileNotFoundError:
-        logger.info("Docker not found—skipping Echidna")
-        return [{"vulnerability": "Echidna unavailable", "description": "Docker not available on this system"}]
-    
-    except Exception as e:
-        logger.error(f"Echidna fuzzing failed: {str(e)}")
-        return [{"vulnerability": "Echidna failed", "description": str(e)}]
-    
-    finally:
-        if config_path and os.path.exists(config_path):
+        logger.info("Echidna binary not found, trying Docker...")
+        
+        # Try Docker (local dev)
+        try:
+            subprocess.run(["docker", "--version"], check=True, capture_output=True, text=True)
+            
+            config_path = os.path.join(DATA_DIR, "echidna_config.yaml")
+            with open(config_path, "w") as f:
+                f.write("format: text\ntestLimit: 10000\nseqLen: 100\ncoverage: true")
+            
+            cmd = [
+                "docker", "run", "--rm",
+                "-v", f"{DATA_DIR}:/src",
+                "trailofbits/echidna",
+                f"/src/{os.path.basename(temp_path)}",
+                "--config", "/src/echidna_config.yaml"
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            logger.info(f"Echidna Docker completed: {result.stdout[:200]}")
+            
             try:
                 os.unlink(config_path)
             except:
                 pass
-        if output_path and os.path.exists(output_path):
-            try:
-                os.unlink(output_path)
-            except:
-                pass
+            
+            return [{"vulnerability": "Fuzzing complete", "description": result.stdout or "No issues found"}]
+        
+        except FileNotFoundError:
+            logger.info("Echidna unavailable: no binary or Docker")
+            return [{"vulnerability": "Echidna unavailable", "description": "Install Echidna binary or Docker to enable fuzzing"}]
+    
+    except Exception as e:
+        logger.error(f"Echidna failed: {str(e)}")
+        return [{"vulnerability": "Echidna error", "description": str(e)}]
 
 def run_mythril(temp_path: str) -> list[dict[str, str]]:
     """Run mythril analysis with Windows fallback."""
