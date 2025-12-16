@@ -1,1 +1,111 @@
- 
+services:
+  - type: web
+    name: defiguard-ai-beta
+    env: python
+    region: oregon
+    plan: starter
+    branch: main
+    
+    buildCommand: |
+      echo "=========================================="
+      echo "🔧 Installing Python dependencies..."
+      echo "=========================================="
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      
+      echo "=========================================="
+      echo "🔧 Installing solc compiler for Slither..."
+      echo "=========================================="
+      pip install solc-select
+      solc-select install 0.8.24
+      solc-select use 0.8.24
+      
+      echo "=========================================="
+      echo "🔧 Installing Echidna fuzzer..."
+      echo "=========================================="
+      curl -L https://github.com/crytic/echidna/releases/download/v2.2.1/echidna-2.2.1-Linux.tar.gz -o echidna.tar.gz
+      tar -xzf echidna.tar.gz
+      chmod +x echidna
+      mkdir -p $HOME/.local/bin
+      mv echidna $HOME/.local/bin/
+      export PATH="$HOME/.local/bin:$PATH"
+      echo "Echidna installed: $(which echidna || echo 'NOT FOUND')"
+      
+      echo "=========================================="
+      echo "✅ Build complete!"
+      echo "=========================================="
+    
+    startCommand: |
+      export PATH="$HOME/.local/bin:$PATH"
+      /opt/render/project/src/.venv/bin/python -m gunicorn main:app --workers 1 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 120 --log-level info
+    
+    healthCheckPath: /
+    
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      
+      - key: RENDER
+        value: true
+      
+      - key: ENV
+        value: production
+      
+      # Auth0 (from Render dashboard - mark as secret)
+      - key: AUTH0_DOMAIN
+        sync: false
+      
+      - key: AUTH0_CLIENT_ID
+        sync: false
+      
+      - key: AUTH0_CLIENT_SECRET
+        sync: false
+      
+      - key: AUTH0_AUDIENCE
+        sync: false
+      
+      # Stripe (from Render dashboard - mark as secret)
+      - key: STRIPE_API_KEY
+        sync: false
+      
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      
+      - key: STRIPE_PRICE_STARTER
+        sync: false
+      
+      - key: STRIPE_PRICE_PRO
+        sync: false
+      
+      - key: STRIPE_PRICE_ENTERPRISE
+        sync: false
+      
+      # Legacy Stripe prices (for backward compatibility)
+      - key: STRIPE_PRICE_BEGINNER
+        sync: false
+      
+      - key: STRIPE_PRICE_DIAMOND
+        sync: false
+      
+      - key: STRIPE_METERED_PRICE_DIAMOND
+        sync: false
+      
+      # Grok AI (from Render dashboard - mark as secret)
+      - key: GROK_API_KEY
+        sync: false
+      
+      # Infura (from Render dashboard - mark as secret)
+      - key: INFURA_PROJECT_ID
+        sync: false
+      
+      # Redis (from Render dashboard - mark as secret)
+      - key: REDIS_URL
+        sync: false
+      
+      # App Secret (from Render dashboard - mark as secret)
+      - key: APP_SECRET_KEY
+        sync: false
+      
+      # Admin Key (from Render dashboard - mark as secret)
+      - key: ADMIN_KEY
+        sync: false
