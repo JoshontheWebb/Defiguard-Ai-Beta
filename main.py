@@ -256,7 +256,7 @@ from pathlib import Path
 
 # Use local path for development, Render path for production
 if os.getenv("RENDER"):
-    DATABASE_URL = "sqlite:////opt/render/project/data/users.db"
+    DATABASE_URL = "sqlite:////tmp/users.db"
 else:
     # Create instance folder if it doesn't exist
     Path("./instance").mkdir(exist_ok=True)
