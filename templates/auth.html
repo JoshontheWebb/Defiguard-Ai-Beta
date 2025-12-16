@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeFiGuard AI - Authentication</title>
+    <meta name="description" content="Sign in or create your DeFiGuard AI account for advanced smart contract auditing">
+    <link rel="icon" href="/static/images/favicon-32x32.png" sizes="32x32" type="image/png">
+    <link rel="stylesheet" href="/static/styles.css">
+    
+    <style>
+        /* Auth page specific styles */
+        body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: var(--space-4);
+        }
+        
+        .auth-container {
+            background: var(--glass-bg);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-xl);
+            padding: var(--space-6);
+            max-width: 500px;
+            width: 100%;
+            box-shadow: var(--shadow-xl);
+            text-align: center;
+            animation: fadeInUp 0.6s ease-out;
+        }
+        
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .auth-container h1 {
+            font-size: clamp(1.5rem, 3vw, 2rem);
+            margin-bottom: var(--space-2);
+            background: var(--gradient-accent);
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .auth-container p {
+            color: var(--text-secondary);
+            margin-bottom: var(--space-4);
+            font-size: 1.1rem;
+        }
+        
+        .auth-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: var(--space-3);
+            margin-bottom: var(--space-4);
+        }
+        
+        .auth-buttons button {
+            width: 100%;
+            padding: var(--space-3);
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+        
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            gap: var(--space-1);
+            color: var(--text-tertiary);
+            text-decoration: none;
+            transition: color var(--transition-base);
+        }
+        
+        .back-link:hover {
+            color: var(--accent-teal);
+        }
+    </style>
+</head>
+<body>
+    <div class="auth-container" role="region" aria-label="Authentication options">
+        <h1>🛡️ Welcome to DeFiGuard AI</h1>
+        <p>Secure authentication via Auth0</p>
+        
+        <div class="auth-buttons">
+            <form action="/login" method="GET">
+                <button type="submit" class="cta-button">
+                    🔐 Sign In
+                </button>
+            </form>
+
+            <form action="/login" method="GET">
+                <input type="hidden" name="screen_hint" value="signup">
+                <button type="submit" class="cta-button">
+                    ✨ Create Account
+                </button>
+            </form>
+        </div>
+
+        <a href="/ui" class="back-link">
+            ← Back to Home
+        </a>
+    </div>
+</body>
+</html>

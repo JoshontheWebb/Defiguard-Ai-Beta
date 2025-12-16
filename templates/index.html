@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeFiGuard AI - Predictive DeFi Compliance Auditor</title>
+    <meta name="description" content="Advanced AI-powered smart contract audits for DeFi protocols. Outperform industry standards with real-time insights and 2025 regulatory compliance (MiCA/SEC FIT21).">
+    
+    <!-- Favicons - Progressive enhancement -->
+    <link rel="icon" href="/static/images/favicon-32x32.png" sizes="32x32" type="image/png">
+    <link rel="icon" href="/static/images/favicon-16x16.png" sizes="16x16" type="image/png">
+    <link rel="apple-touch-icon" href="/static/images/favicon-512x512.png" sizes="512x512">
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#00d1b2">
+    
+    <!-- Preload critical assets -->
+    <link rel="preload" href="/static/styles.css" as="style">
+    <link rel="preload" href="/static/script.js" as="script">
+    
+    <!-- Stylesheet -->
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+
+<body {% if session %}class="logged-in" {% endif %}>
+    
+    <!-- Hamburger Menu Button -->
+    <div class="hamburger" id="hamburger" role="button" aria-label="Toggle navigation menu" tabindex="0">
+        <div class="bar1"></div>
+        <div class="bar2"></div>
+        <div class="bar3"></div>
+    </div>
+
+    <!-- Header -->
+    <header role="banner">
+        <div class="logo-container">
+            <div class="logo-wrapper">
+                <img src="/static/images/defiguard-logo.png" alt="DeFiGuard AI - Smart Contract Auditing Platform" class="logo-image">
+            </div>
+        </div>
+    </header>
+
+    <!-- Sidebar Navigation -->
+    <nav class="sidebar" id="sidebar" role="navigation" aria-label="Main navigation">
+        <ul>
+            <li><a href="#home">🏠 Home</a></li>
+            <li><a href="#audit">🔍 Audit Contract</a></li>
+            <li><a href="#results">📊 Results Dashboard</a></li>
+            <li><a href="#settings">⚙️ Settings <span style="color: var(--text-tertiary); font-size: 0.8em;">(⌘,)</span></a></li>
+            <li id="auth-status"><a href="/auth">🔐 Sign In / Create Account</a></li>
+            <li class="logout-container">
+                <a href="#" id="logout-sidebar" class="logout-link">🚪 Log Out</a>
+            </li>
+            <li><a href="https://discord.gg/defiguard" target="_blank" rel="noopener noreferrer">💬 Community Support</a></li>
+            <li class="priority-support" style="display: none;">
+                <a href="/cdn-cgi/l/email-protection#cdbeb8bdbda2bfb98da9a8aba4aab8acbfa9e3aca4">⭐ Priority Support (Paid Tiers)</a>
+            </li>
+        </ul>
+        
+        <!-- Tier Display -->
+        <div class="tier-info-card" aria-live="polite" aria-atomic="true">
+            <div class="tier-header">
+                <span class="tier-icon">💎</span>
+                <h4>Your Plan</h4>
+            </div>
+            <div class="tier-name" id="sidebar-tier-name">Loading...</div>
+            <div class="tier-usage" id="sidebar-tier-usage">Checking usage...</div>
+            <div class="tier-features" id="sidebar-tier-features">
+                <div class="feature-loading">Loading features...</div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main-content">
+
+        <!-- Welcome Message -->
+        <div class="welcome-message has-text-centered" id="welcome" 
+             data-sub="{% if userinfo.sub %}{{ userinfo.sub[:10] }}...{% endif %}"
+             role="status" aria-live="polite">
+            {% if session %}
+                {% if userinfo.name %}
+                    Welcome back, {{ userinfo.name }}! 🚀
+                {% elif userinfo.email %}
+                    Welcome back, {{ userinfo.email }}! 🚀
+                {% else %}
+                    Welcome back, Guest! 🚀
+                {% endif %}
+            {% else %}
+                Welcome to DeFiGuard AI! 🛡️
+            {% endif %}
+        </div>
+
+        <!-- Hero Section -->
+        <section id="home" class="hero">
+            <h1>Secure Your DeFi Future with AI-Driven Audits</h1>
+            <p>
+                Outperform CertiK & ConsenSys: Analyze Solidity code against MiCA/SEC FIT21 regulations, 
+                predict vulnerabilities before they happen, and get actionable fixes—faster and smarter.
+            </p>
+            <a href="#audit" class="cta-button">Start Free Audit Now →</a>
+        </section>
+
+        <!-- Progress Tracker -->
+        <section id="progress" class="progress-tracker" aria-label="Audit workflow steps">
+            <h3>📋 How It Works</h3>
+            <ol>
+                <li><strong>Upload Contract</strong> - Drop your Solidity file</li>
+                <li><strong>Optional:</strong> Add contract address for on-chain analysis</li>
+                <li><strong>AI Analysis</strong> - Slither, Mythril, Echidna + Grok AI</li>
+                <li><strong>Get Results</strong> - Detailed report with fixes & compliance insights</li>
+            </ol>
+        </section>
+
+        <!-- Audit Submission Form -->
+        <section id="audit" class="audit-section">
+            <h2>🔍 Submit Smart Contract for Audit</h2>
+            
+            <form action="/audit" method="post" enctype="multipart/form-data" id="audit-form">
+                <!-- File Upload -->
+                <div class="form-group">
+                    <label for="file">Upload Solidity File (.sol) *</label>
+                    <input 
+                        type="file" 
+                        id="file" 
+                        name="file" 
+                        accept=".sol" 
+                        required 
+                        aria-describedby="file-help"
+                    >
+                    <small id="file-help">
+                        Max size: <span id="size-limit">Loading...</span> | 
+                        Supported: Solidity smart contracts (.sol)
+                    </small>
+                </div>
+
+                <!-- Wallet Connect (Optional) -->
+                <div class="form-group">
+                    <button id="wallet-connect" type="button">
+                        🔗 Connect Wallet (Optional)
+                    </button>
+                </div>
+
+                <!-- Contract Address (Pro/Enterprise) -->
+                <div class="form-group pro-enterprise-only" style="display: none;">
+                    <label for="contract_address">
+                        Ethereum Contract Address (Optional) 
+                        <span class="badge">Pro/Enterprise</span>
+                    </label>
+                    <input 
+                        type="text" 
+                        id="contract_address" 
+                        name="contract_address" 
+                        placeholder="0x..." 
+                        pattern="^0x[a-fA-F0-9]{40}$"
+                        aria-describedby="contract-help"
+                    >
+                    <small id="contract-help">
+                        Enables on-chain analysis and facet pattern detection
+                    </small>
+                </div>
+
+                <!-- Custom Report (Enterprise) -->
+                <div class="form-group enterprise-only" style="display: none;">
+                    <label for="custom_report">
+                        Custom Report Instructions (Optional)
+                        <span class="badge">Enterprise</span>
+                    </label>
+                    <textarea 
+                        id="custom_report" 
+                        name="custom_report" 
+                        placeholder="E.g., Focus on reentrancy risks, gas optimization, regulatory compliance..."
+                        aria-describedby="custom-help"
+                    ></textarea>
+                    <small id="custom-help">
+                        Tell our AI what to focus on in your audit
+                    </small>
+                </div>
+
+                <!-- Submit Button -->
+                <button type="submit" id="submit-audit">
+                    🚀 Analyze Contract
+                </button>
+            </form>
+
+            <!-- Loading State -->
+            <div class="loading" aria-live="assertive" aria-atomic="true">
+                <div class="spinner"></div>
+                <p>Analyzing your contract with AI...</p>
+            </div>
+
+            <!-- Usage Warning -->
+            <div class="usage-warning is-hidden" role="alert" aria-live="assertive"></div>
+
+            <!-- Pending Upgrade Message -->
+            <div id="pending-message" class="loading" style="display:none;" aria-live="polite">
+                <div class="spinner"></div>
+                <p>Audit pending - complete your tier upgrade...</p>
+            </div>
+
+            <!-- Audit Log (Real-time) -->
+            <div id="audit-log" 
+                 role="log" 
+                 aria-live="polite" 
+                 aria-atomic="false"
+                 aria-label="Real-time audit progress log">
+            </div>
+
+            <!-- Tier Benefits & Upgrade -->
+            <div class="tier-benefits" aria-live="polite">
+                <h3>💎 Your Current Plan</h3>
+                <p id="tier-description">Loading tier information...</p>
+                <p id="features">Features: Loading...</p>
+            </div>
+
+            <!-- Pricing Table -->
+            <div class="upgrade-prompt" aria-live="polite">
+                <h3>🎯 Subscription Tiers</h3>
+                <table class="pricing-table" id="pricing-table">
+                    <thead>
+                        <tr>
+                            <th>Tier</th>
+                            <th>Price</th>
+                            <th>Features</th>
+                            <th>Best For</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Free</strong></td>
+                            <td>$0/month</td>
+                            <td>
+                                3 audits/month<br>
+                                500KB max<br>
+                                Top 3 critical issues<br>
+                                Community support
+                            </td>
+                            <td>Testing the platform</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Starter</strong> ⭐</td>
+                            <td>$29/month</td>
+                            <td>
+                                50 audits/month<br>
+                                1MB max files<br>
+                                Full analysis<br>
+                                All recommendations
+                            </td>
+                            <td>Individual developers</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Pro</strong> 🔥</td>
+                            <td>$149/month</td>
+                            <td>
+                                Unlimited audits<br>
+                                5MB max files<br>
+                                API access<br>
+                                Fuzzing + on-chain data<br>
+                                Priority support
+                            </td>
+                            <td>Professional teams</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Enterprise</strong> 💼</td>
+                            <td>$499/month</td>
+                            <td>
+                                Everything in Pro<br>
+                                Unlimited file size<br>
+                                White-label reports<br>
+                                Team accounts<br>
+                                Dedicated support<br>
+                                Custom integrations
+                            </td>
+                            <td>Organizations</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <!-- Tier Selector -->
+                <div class="form-group">
+                    <label for="tier-select">Select Your Plan:</label>
+                    <select id="tier-select" aria-label="Select subscription tier">
+                        <option value="starter">Starter - $29/month</option>
+                        <option value="pro">Pro - $149/month</option>
+                        <option value="enterprise">Enterprise - $499/month</option>
+                    </select>
+                </div>
+
+                <button id="tier-switch" class="upgrade-button" aria-label="Upgrade to selected tier">
+                    ⬆️ Upgrade Now
+                </button>
+                
+                <a id="upgrade-link" href="/upgrade" style="display: none;">
+                    Need more features? Upgrade here →
+                </a>
+            </div>
+
+            <!-- Diamond Pattern Preview (Pro/Enterprise) -->
+            <div id="facet-preview" 
+                 class="box pro-enterprise-only" 
+                 style="display: none;" 
+                 role="region"
+                 aria-label="Contract facet preview">
+            </div>
+
+            <!-- Download Buttons -->
+            <div class="download-buttons" style="display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 1.5rem;">
+                <button id="download-report" class="btn btn-secondary" style="display: none;">
+                    📄 Download JSON Report
+                </button>
+                <button id="pdf-download" class="btn" style="display: none;">
+                    📑 Download Compliance PDF
+                </button>
+                <button id="mint-nft" class="btn btn-outline" style="display: none;">
+                    🎨 Mint NFT Reward
+                </button>
+                <button id="x-alerts" class="btn btn-ghost" style="display: none;">
+                    🐦 Check X Alerts
+                </button>
+            </div>
+        </section>
+
+        <!-- Results Dashboard -->
+        <section id="results" class="results-dashboard" aria-label="Audit results and findings">
+            <h3>📊 Audit Results</h3>
+            
+            <!-- Risk Score -->
+            <div class="risk-score-placeholder" role="status" aria-live="polite">
+                <p>
+                    Risk Score: <span id="risk-score" aria-label="Risk score out of 100">N/A</span>/100
+                </p>
+            </div>
+
+            <!-- Executive Summary (Pro+) -->
+            <div id="executive-summary" class="executive-summary-box" style="display: none; margin: var(--space-6) 0; padding: var(--space-5); background: var(--glass-bg); border-left: 4px solid var(--accent-teal); border-radius: var(--radius-lg);">
+                <!-- Content populated by JavaScript -->
+            </div>
+
+            <!-- Severity Counts -->
+            <div id="severity-counts" class="severity-counts-container" style="display: none; margin: var(--space-4) 0; display: flex; gap: var(--space-3); flex-wrap: wrap;">
+                <!-- Content populated by JavaScript -->
+            </div>
+
+            <!-- Upgrade Prompt (Free Tier) -->
+            <div id="upgrade-prompt" class="upgrade-prompt-container" style="display: none; margin: var(--space-6) 0;">
+                <!-- Content populated by JavaScript -->
+            </div>
+
+            <!-- Issues Table - Enhanced for Pro/Enterprise -->
+            <div class="issues-table-placeholder">
+                <h4>🐛 Identified Issues</h4>
+                <div class="table-responsive">
+                    <table role="table" aria-describedby="issues-desc" class="issues-table-enhanced">
+                        <thead>
+                            <tr>
+                                <th scope="col" style="width: 100px;">Severity</th>
+                                <th scope="col" style="width: 150px;">Type</th>
+                                <th scope="col">Description</th>
+                                <th scope="col" style="width: 200px;">Quick Fix</th>
+                                <th scope="col" style="width: 100px;">Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="issues-body">
+                            <tr>
+                                <td colspan="5" style="text-align: center; color: var(--text-tertiary); padding: var(--space-8);">
+                                    No issues yet. Submit an audit to see results.
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <small id="issues-desc">
+                    Vulnerabilities classified by severity: Low (🟢) | Medium (🟡) | High (🔴) | Critical (⚠️)
+                    <br>
+                    <strong>Pro/Enterprise:</strong> Click "Details" on any issue for line-by-line analysis, exploit scenarios, and code fixes
+                </small>
+            </div>
+
+            <!-- Code Quality Metrics (Pro+) -->
+            <div id="code-quality-metrics" class="code-quality-section" style="display: none; margin: var(--space-6) 0;">
+                <h4>📈 Code Quality Metrics</h4>
+                <!-- Content populated by JavaScript -->
+            </div>
+
+            <!-- Risk Predictions -->
+            <div class="predictions-placeholder">
+                <h4>🔮 Risk Predictions</h4>
+                <ul id="predictions-list" role="list">
+                    <li>No predictions yet. Results will appear after analysis.</li>
+                </ul>
+            </div>
+
+            <!-- Recommendations - Categorized by Urgency -->
+            <div class="recommendations-placeholder">
+                <h4>💡 Security Recommendations</h4>
+                <div id="recommendations-list" role="list" class="recommendations-container">
+                    <p style="color: var(--text-tertiary); padding: var(--space-4);">No recommendations yet. Results will appear after analysis.</p>
+                </div>
+                <small style="color: var(--text-tertiary); font-size: var(--text-sm);">
+                    Recommendations are prioritized: 🚨 Immediate → ⚠️ Short-term → 💡 Long-term
+                </small>
+            </div>
+
+            <!-- Fuzzing Results (Pro/Enterprise) -->
+            <div class="fuzzing-placeholder pro-enterprise-only" style="display: none;">
+                <h4>🧪 Fuzzing Results</h4>
+                <ul id="fuzzing-list" role="list">
+                    <li>No fuzzing results yet.</li>
+                </ul>
+            </div>
+
+            <!-- Remediation Roadmap (Enterprise) -->
+            <div class="remediation-placeholder enterprise-only" style="display: none;">
+                <h4>🗺️ Remediation Roadmap</h4>
+                <ul id="remediation-roadmap" role="list" aria-label="Security remediation steps">
+                    <li>No roadmap yet. Results will appear after analysis.</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- Settings Section -->
+        <section id="settings" aria-label="Account settings and preferences">
+            <h3>⚙️ Account Settings</h3>
+            <p>Manage your account, API keys, and preferences.</p>
+            <button id="open-settings-modal" class="btn">
+                ⚙️ Open Settings
+            </button>
+        </section>
+
+    </main>
+
+    <!-- Settings Modal (Outside main content, before footer) -->
+    <div class="modal-backdrop" id="settings-modal-backdrop"></div>
+    <div class="modal" id="settings-modal" role="dialog" aria-labelledby="settings-modal-title" aria-modal="true">
+        <button class="modal-close" id="settings-modal-close" aria-label="Close settings">×</button>
+        
+        <div class="modal-header">
+            <h2 class="modal-title" id="settings-modal-title">⚙️ Account Settings</h2>
+        </div>
+        
+        <div class="modal-body">
+            <!-- Account Info -->
+            <div class="settings-section">
+                <h3>👤 Account Information</h3>
+                <div class="settings-grid">
+                    <div class="settings-item">
+                        <label>Username:</label>
+                        <span id="modal-username">Loading...</span>
+                    </div>
+                    <div class="settings-item">
+                        <label>Email:</label>
+                        <span id="modal-email">Loading...</span>
+                    </div>
+                    <div class="settings-item">
+                        <label>Current Tier:</label>
+                        <span id="modal-tier" class="badge">Loading...</span>
+                    </div>
+                    <div class="settings-item">
+                        <label>Member Since:</label>
+                        <span id="modal-member-since">Loading...</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Usage Statistics -->
+            <div class="settings-section">
+                <h3>📊 Usage Statistics</h3>
+                <div class="settings-grid">
+                    <div class="settings-item">
+                        <label>Audits Used:</label>
+                        <span id="modal-audits-used">Loading...</span>
+                    </div>
+                    <div class="settings-item">
+                        <label>Audits Remaining:</label>
+                        <span id="modal-audits-remaining">Loading...</span>
+                    </div>
+                    <div class="settings-item">
+                        <label>File Size Limit:</label>
+                        <span id="modal-size-limit">Loading...</span>
+                    </div>
+                </div>
+                
+                <!-- Usage Progress Bar -->
+                <div class="usage-progress-container">
+                    <div class="usage-progress-bar">
+                        <div class="usage-progress-fill" id="modal-usage-progress"></div>
+                    </div>
+                    <small id="modal-usage-text" class="text-tertiary">0% used</small>
+                </div>
+            </div>
+            
+            <!-- API Key Management (Pro/Enterprise only) -->
+            <div class="settings-section" id="modal-api-section" style="display: none;">
+                <h3>🔑 API Key Management</h3>
+                
+                <!-- Tier limit info -->
+                <div class="api-key-limit-info" style="margin-bottom: var(--space-4); padding: var(--space-3); background: var(--glass-bg); border-radius: var(--radius-md); font-size: var(--text-sm); color: var(--text-tertiary);">
+                    <span id="api-key-count-display">Loading...</span>
+                </div>
+                
+                <!-- API Keys Table -->
+                <div class="api-keys-table-container" style="margin-bottom: var(--space-6);">
+                    <table class="api-keys-table" style="width: 100%; border-collapse: collapse;">
+                        <thead>
+                            <tr style="border-bottom: 1px solid var(--glass-border);">
+                                <th style="padding: var(--space-3); text-align: left; font-size: var(--text-sm); color: var(--text-tertiary);">Label</th>
+                                <th style="padding: var(--space-3); text-align: left; font-size: var(--text-sm); color: var(--text-tertiary);">Key</th>
+                                <th style="padding: var(--space-3); text-align: left; font-size: var(--text-sm); color: var(--text-tertiary);">Created</th>
+                                <th style="padding: var(--space-3); text-align: left; font-size: var(--text-sm); color: var(--text-tertiary);">Last Used</th>
+                                <th style="padding: var(--space-3); text-align: right; font-size: var(--text-sm); color: var(--text-tertiary);">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="api-keys-table-body">
+                            <tr>
+                                <td colspan="5" style="padding: var(--space-6); text-align: center; color: var(--text-tertiary);">
+                                    Loading API keys...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                
+                <!-- Create New Key Button -->
+                <button id="create-api-key" class="btn" style="width: 100%;">
+                    ➕ Create New API Key
+                </button>
+                
+                <small class="text-tertiary" style="display: block; margin-top: var(--space-4);">
+                    Keep your API keys secure. Don't share them publicly. Each key can be used independently for different projects or environments.
+                </small>
+            </div>
+            
+            <!-- Create API Key Modal (nested) -->
+            <div class="modal-backdrop" id="create-key-modal-backdrop" style="display: none; z-index: calc(var(--z-modal) + 1);"></div>
+            <div class="modal" id="create-key-modal" style="display: none; z-index: calc(var(--z-modal) + 2); max-width: 500px;">
+                <button class="modal-close" id="create-key-modal-close">×</button>
+                <div class="modal-header">
+                    <h3 class="modal-title">Create New API Key</h3>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label for="new-key-label">Key Label</label>
+                        <input type="text" id="new-key-label" placeholder="e.g., Production, Development, CI/CD" style="width: 100%; padding: var(--space-3); background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-md); color: var(--text-primary);">
+                        <small class="text-tertiary">Give this key a descriptive name to remember where it's used.</small>
+                    </div>
+                    <div style="display: flex; gap: var(--space-3); margin-top: var(--space-6);">
+                        <button id="create-key-confirm" class="btn" style="flex: 1;">Create Key</button>
+                        <button id="create-key-cancel" class="btn btn-secondary" style="flex: 1;">Cancel</button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Theme Selection -->
+            <div class="settings-section">
+                <h3>🎨 Theme & Appearance</h3>
+                <div class="theme-selector">
+                    <label for="theme-select">Choose Theme:</label>
+                    <select id="theme-select" class="theme-dropdown">
+                        <option value="default">Default Dark (Teal & Pink)</option>
+                        <option value="ocean">Ocean Blue</option>
+                        <option value="purple">Purple Haze</option>
+                        <option value="matrix">Matrix Green</option>
+                        <option value="midnight">Midnight Black</option>
+                    </select>
+                </div>
+                <div class="theme-preview-container">
+                    <div class="theme-preview-card">
+                        <div class="theme-preview-header">Preview</div>
+                        <div class="theme-preview-content">
+                            <div class="theme-preview-accent"></div>
+                            <div class="theme-preview-text">Sample text in selected theme</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Quick Actions -->            
+            <div class="settings-section">
+                <h3>⚡ Quick Actions</h3>
+                <div class="settings-actions">
+                    <button id="modal-upgrade" class="btn btn-outline">
+                        ⬆️ Upgrade Plan
+                    </button>
+                    <button id="modal-logout" class="btn btn-secondary">
+                        🚪 Log Out
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer role="contentinfo">
+        <p>&copy; 2025 DeFiGuard AI. Built with FastAPI, Grok AI & ❤️</p>
+        <p>
+            <a href="/privacy" style="color: var(--accent-teal);">Privacy Policy</a> | 
+            <a href="/terms" style="color: var(--accent-teal);">Terms of Service</a>
+        </p>
+    </footer>
+
+    <!-- Scripts - Cache-busted dynamic loading -->
+    <script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script>
+    <script>
+        // Cache-bust CSS and JS
+        const timestamp = new Date().getTime();
+        document.write(`<link rel="stylesheet" href="/static/styles.css?v=${timestamp}">`);
+        document.write(`<script src="/static/script.js?v=${timestamp}"><\/script>`);
+    </script>
+    <!-- Legal Acceptance Modal (First-Time Users) -->
+    <div id="legal-modal-backdrop" class="modal-backdrop" style="display: none;"></div>
+    <div id="legal-modal" class="settings-modal" style="display: none; z-index: 10001;">
+        <div class="settings-modal-content" style="max-width: 800px; max-height: 90vh;">
+            <!-- Header -->
+            <div class="settings-modal-header">
+                <h2>📄 Welcome to DeFiGuard AI</h2>
+                <p style="margin-top: 8px; color: var(--text-tertiary); font-size: var(--text-sm);">
+                    Before you begin, please review and accept our legal agreements
+                </p>
+            </div>
+
+            <!-- Scrollable Content -->
+            <div class="settings-modal-body" style="max-height: 60vh; overflow-y: auto; padding: var(--space-6);" id="legal-scroll-container">
+                <!-- Terms of Service Section -->
+                <div style="margin-bottom: var(--space-8);">
+                    <h3 style="display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-4);">
+                        <input type="checkbox" id="accept-terms-checkbox" style="width: 20px; height: 20px; cursor: pointer;">
+                        <label for="accept-terms-checkbox" style="cursor: pointer; font-weight: 600;">
+                            I have read and agree to the Terms of Service
+                        </label>
+                    </h3>
+                    <div style="background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-lg); padding: var(--space-4); max-height: 300px; overflow-y: auto;">
+                        <iframe src="/static/terms-of-service.html" style="width: 100%; height: 250px; border: none;"></iframe>
+                        <a href="/static/terms-of-service.html" target="_blank" style="display: block; margin-top: var(--space-2); color: var(--accent-teal); text-decoration: none; font-size: var(--text-sm);">
+                            📄 Open in new tab
+                        </a>
+                    </div>
+                </div>
+
+                <!-- Privacy Policy Section -->
+                <div style="margin-bottom: var(--space-6);">
+                    <h3 style="display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-4);">
+                        <input type="checkbox" id="accept-privacy-checkbox" style="width: 20px; height: 20px; cursor: pointer;">
+                        <label for="accept-privacy-checkbox" style="cursor: pointer; font-weight: 600;">
+                            I have read and agree to the Privacy Policy
+                        </label>
+                    </h3>
+                    <div style="background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-lg); padding: var(--space-4); max-height: 300px; overflow-y: auto;">
+                        <iframe src="/static/privacy-policy.html" style="width: 100%; height: 250px; border: none;"></iframe>
+                        <a href="/static/privacy-policy.html" target="_blank" style="display: block; margin-top: var(--space-2); color: var(--accent-teal); text-decoration: none; font-size: var(--text-sm);">
+                            🔒 Open in new tab
+                        </a>
+                    </div>
+                </div>
+
+                <!-- Important Notice -->
+                <div style="background: var(--glass-bg); border-left: 4px solid var(--accent-purple); padding: var(--space-4); border-radius: var(--radius-md); margin-bottom: var(--space-6);">
+                    <p style="margin: 0; font-size: var(--text-sm); color: var(--text-secondary);">
+                        <strong>⚠️ Important:</strong> By checking the boxes above and clicking "I Accept," you acknowledge that:
+                    </p>
+                    <ul style="margin: var(--space-2) 0 0 var(--space-5); font-size: var(--text-sm); color: var(--text-tertiary);">
+                        <li>You have read and understood both documents</li>
+                        <li>You agree to be legally bound by these terms</li>
+                        <li>DeFiGuard AI provides automated analysis tools, not security guarantees</li>
+                        <li>You are solely responsible for code you deploy to production</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Footer with Action Buttons -->
+            <div class="settings-modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
+                <button id="legal-decline" class="btn btn-secondary">
+                    Decline
+                </button>
+                <button id="legal-accept" class="btn" disabled style="opacity: 0.5; cursor: not-allowed;">
+                    I Accept
+                </button>
+            </div>
+        </div>
+    </div>
+
+</body>
+</body>
+</html>

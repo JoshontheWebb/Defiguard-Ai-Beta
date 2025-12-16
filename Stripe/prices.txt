@@ -1,0 +1,5 @@
+Price ID,Product ID,Product Name,Product Statement Descriptor,Product Tax Code,Description,Created (UTC),Amount,Currency,Interval,Interval Count,Usage Type,Aggregate Usage,Billing Scheme,Trial Period Days,Tax Behavior
+price_1SKBM0EqXlKjClpjnuZ6R5pi,prod_TGinNcrFgbvRXs,DeFiGuard Pro Tier,DeFiGuard Pro,txcd_10000000,Subscription for DeFiGuard Pro Tier,2025-10-20 05:09,200.00,usd,month,1,licensed,,per_unit,,unspecified
+price_1SFpPTEqXlKjClpjeGFNYSgF,prod_TCDr6qMjMaWi5g,DeFiGuard Diamond Overage,DeFiGuard Overage,txcd_10000000,Overage billing for DeFiGuard Diamond,2025-10-08 04:55,,usd,month,1,licensed,,tiered,,unspecified
+price_1SFoVMEqXlKjClpjTyRtHJcD,prod_TCCv4vWBb22k5A,Diamond Tier add-on,DeFiGuard Diamond,txcd_10000000,Add-on subscription for Diamond Tier,2025-10-08 03:57,50.00,usd,month,1,licensed,,per_unit,,unspecified
+price_1SFoJGEqXlKjClpjj2RZ10bf,prod_TCCiJnXSb8vsG7,DeFiGuard Beginner Tier,DeFiGuard Beginner,txcd_10000000,Subscription for DeFiGuard Beginner Tier,2025-10-08 03:45,50.00,usd,month,1,licensed,,per_unit,,unspecified
