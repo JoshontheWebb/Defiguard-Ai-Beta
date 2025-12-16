@@ -3476,11 +3476,12 @@ async def audit_contract(
                 tier=tier_for_flags,
             )
             
-            response = await asyncio.to_thread(
-                client.chat.completions.create,
-                model="grok-4",
+            # Direct synchronous call - OpenAI SDK handles this properly
+            response = client.chat.completions.create(
+                model="grok-beta",  # Use grok-beta instead of grok-4
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
+                stream=False,  # Explicitly disable streaming
                 response_format={
                     "type": "json_schema",
                     "json_schema": {
@@ -3490,8 +3491,8 @@ async def audit_contract(
                     }
                 }
             )
-            
-            raw_response = response.choices[0].message.content
+
+            raw_response = response.choices[0].message.content or ""
             # === CRITICAL DEBUG LOGGING ===
             logger.info(f"[GROK_DEBUG] ===== RAW RESPONSE START =====")
             logger.info(f"[GROK_DEBUG] Length: {len(raw_response)} characters")
