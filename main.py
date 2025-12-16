@@ -131,6 +131,9 @@ except Exception:
             raise RuntimeError("Celery is not installed in this environment")
 
 import requests  # For cloud fallback
+import asyncio
+import boto3  # For Echidna AWS fallback
+from mythril.mythril import MythrilAnalyzer  # For Mythril analysis
 from jose import jwt, JWTError
 
 # === JINJA2 TEMPLATE SETUP (required for /ui and /auth) ===
@@ -1803,11 +1806,15 @@ usage_tracker.set_tier("free")
 ## Section 3
 
 def run_echidna(temp_path: str) -> list[dict[str, str]]:
-    """Run Echidna fuzzing on the Solidity file and return results."""
+    """Run Echidna with Docker or AWS fallback."""
+    env = os.getenv('ENV', 'dev')
+    if env == 'dev' and platform.system() == 'Windows':
+        logger.info("Echidna skipped in Windows dev env")
+        return [{"vulnerability": "Echidna unavailable", "description": "Skipped in dev"}]
+    
     config_path = None
     output_path = None
     try:
-        import subprocess
         subprocess.run(["docker", "--version"], check=True, capture_output=True, text=True)
         logger.info("Docker is available, attempting to pull Echidna image")
         
@@ -1845,18 +1852,29 @@ def run_echidna(temp_path: str) -> list[dict[str, str]]:
         logger.debug(f"Echidna results: {echidna_results}")
         return [{"vulnerability": "Fuzzing result", "description": echidna_results or "No vulnerabilities found by Echidna"}]
     
+    except FileNotFoundError:
+        logger.info("Docker not found—using cloud fallback")
+    
+    # AWS Lambda fallback (configure env vars: AWS_ACCESS_KEY_ID, etc.)
+    try:
+        lambda_client = boto3.client('lambda',
+            aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+            aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+            region_name=os.getenv('AWS_REGION', 'us-east-1')
+        )
+        with open(temp_path, 'rb') as f:
+            payload = json.dumps({'contract': f.read().decode('utf-8')})
+        response = lambda_client.invoke(
+            FunctionName=os.getenv('ECHIDNA_LAMBDA_NAME', 'echidna-fuzzer'),
+            Payload=payload
+        )
+        result = json.loads(response['Payload'].read())
+        issues = result.get('issues', [])
+        logger.info(f"Echidna cloud found {len(issues)} issues")
+        return [{"vulnerability": i['type'], "description": i['desc']} for i in issues]
     except Exception as e:
-        logger.error(f"Echidna fuzzing failed: {str(e)}")
-        try:
-            with open(temp_path, 'rb') as f:
-                response = requests.post('https://your-cloud-fuzzing-endpoint', files={'file': f})
-            if response.ok:
-                return response.json()
-            else:
-                return [{"vulnerability": "Fallback failed", "description": response.text}]
-        except Exception as fallback_e:
-            logger.error(f"Fuzzing fallback failed: {str(fallback_e)}")
-            return [{"vulnerability": "Fuzzing failed", "description": str(e)}]
+        logger.error(f"Echidna fallback failed: {str(e)}")
+        return [{"vulnerability": "Echidna error", "description": str(e)}]
     finally:
         if config_path and os.path.exists(config_path):
             os.unlink(config_path)
@@ -1864,37 +1882,21 @@ def run_echidna(temp_path: str) -> list[dict[str, str]]:
             os.unlink(output_path)
 
 def run_mythril(temp_path: str) -> list[dict[str, str]]:
-    """Run Mythril analysis with Windows fallback."""
-    if not os.path.exists(temp_path):
-        return []
+    """Run Mythril analysis using the library (better than subprocess)."""
+    env = os.getenv('ENV', 'dev')
+    if env == 'dev' and platform.system() == 'Windows':
+        logger.info("Mythril skipped in Windows dev env")
+        return [{"vulnerability": "Mythril unavailable", "description": "Skipped in dev"}]
     
     try:
-        logger.info("Starting Mythril analysis")
-        result = subprocess.run(
-            ["myth", "analyze", temp_path, "--json"],
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-        
-        if result.returncode == 0:
-            issues = json.loads(result.stdout).get("issues", [])
-            formatted = [{
-                "vulnerability": issue.get("title", "Unknown"),
-                "description": issue.get("description", "No description")
-            } for issue in issues]
-            logger.info(f"Mythril found {len(formatted)} issues")
-            return formatted or [{"vulnerability": "No issues", "description": "Mythril found no vulnerabilities"}]
-        else:
-            logger.warning(f"Mythril failed: {result.stderr[:200]}")
-            return [{"vulnerability": "Mythril error", "description": result.stderr[:500]}]
-    
-    except FileNotFoundError:
-        logger.info("Mythril not available on this system (Windows dev) – skipping")
-        return [{"vulnerability": "Mythril unavailable", "description": "Local Mythril not installed – Grok will still analyze"}]
+        analyzer = MythrilAnalyzer(solc_version="0.8.24")  # Use installed solc
+        report = analyzer.analyze(temp_path)
+        issues = [{"vulnerability": issue.title, "description": issue.description} for issue in report.issues]
+        logger.info(f"Mythril found {len(issues)} issues")
+        return issues or [{"vulnerability": "No issues", "description": "Mythril found no vulnerabilities"}]
     except Exception as e:
-        logger.error(f"Mythril crashed: {str(e)}")
-        return [{"vulnerability": "Mythril failed", "description": str(e)}]
+        logger.error(f"Mythril failed: {str(e)}")
+        return [{"vulnerability": "Mythril error", "description": str(e)}]
 
 def filter_issues_for_free_tier(report: dict[str, Any], tier: str) -> dict[str, Any]:
     """
@@ -3123,35 +3125,21 @@ def run_certora(temp_path: str) -> list[dict[str, str]]:
     return [{"rule": "Sample rule", "status": "Passed (dummy)"}]
 
 def analyze_slither(temp_path: str) -> list[dict[str, Any]]:
-    """Run Slither on the given file path with Windows fallback."""
+    """Run Slither with installed solc."""
     if not os.path.exists(temp_path):
         logger.error(f"Slither failed: file not found at {temp_path}")
         return []
     
     try:
-        sl = Slither(temp_path)
-        try:
-            sl.run_detectors()
-        except Exception:
-            logger.debug("sl.run_detectors() failed – proceeding with available detectors")
-        
-        raw_detectors = getattr(sl, "detectors", []) or []
-        results: list[dict[str, Any]] = []
-        
-        for d in raw_detectors:
-            try:
-                det = {
-                    "name": getattr(d, "name", str(d.__class__.__name__)),
-                    "details": getattr(d, "to_dict", lambda: getattr(d, "__dict__", str(d)))()
-                }
-                results.append(det)
-            except Exception as inner:
-                results.append({"name": "Unknown detector", "details": str(inner)})
-        
-        logger.info(f"Slither found {len(results)} issues")
-        return results
-    except Exception as e:
-        logger.error(f"Slither failed on Windows (normal): {str(e)} – returning empty results")
+        sl = Slither(temp_path, solc="solc")  # Explicitly use PATH solc
+        sl.register_detector(*all_detectors)  # Register all detectors
+        detection_results = sl.run_detectors()  # Run them
+        findings = [det for dets in detection_results for det in dets if det]  # Flatten
+        formatted = [{"name": det.get("check"), "details": det.get("description")} for det in findings]
+        logger.info(f"Slither found {len(formatted)} issues")
+        return formatted
+    except SlitherError as e:
+        logger.error(f"Slither failed: {str(e)}")
         return []
 
 def summarize_context(context: str) -> str:
@@ -3392,19 +3380,19 @@ async def audit_contract(
         # Parallel static analysis
         await broadcast_audit_log(effective_username, "Running Slither analysis")
         slither_task = asyncio.create_task(asyncio.to_thread(analyze_slither, temp_path))
-        
+
         await broadcast_audit_log(effective_username, "Running Mythril analysis")
         mythril_task = asyncio.create_task(asyncio.to_thread(run_mythril, temp_path))
-        
+
         slither_findings, mythril_results = await asyncio.gather(slither_task, mythril_task, return_exceptions=True)
-        
+
         if isinstance(slither_findings, Exception):
             logger.error(f"Slither failed: {slither_findings}")
             await broadcast_audit_log(effective_username, "Slither failed")
             slither_findings = []
         else:
             await broadcast_audit_log(effective_username, f"Slither found {len(slither_findings)} issues")
-        
+
         if isinstance(mythril_results, Exception):
             logger.error(f"Mythril failed: {mythril_results}")
             await broadcast_audit_log(effective_username, "Mythril failed")
