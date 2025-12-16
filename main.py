@@ -1804,7 +1804,7 @@ usage_tracker.set_tier("free")
 ## Section 3
 
 def run_echidna(temp_path: str) -> list[dict[str, str]]:
-    """Run Echidna with Docker or AWS fallback."""
+    """Run Echidna with Docker or simple fallback."""
     env = os.getenv('ENV', 'dev')
     if env == 'dev' and platform.system() == 'Windows':
         logger.info("Echidna skipped in Windows dev env")
@@ -1851,26 +1851,24 @@ def run_echidna(temp_path: str) -> list[dict[str, str]]:
         return [{"vulnerability": "Fuzzing result", "description": echidna_results or "No vulnerabilities found by Echidna"}]
     
     except FileNotFoundError:
-        logger.info("Docker not found—using cloud fallback")
+        logger.info("Docker not found—skipping Echidna")
+        return [{"vulnerability": "Echidna unavailable", "description": "Docker not available on this system"}]
     
-# Fallback to simple cloud endpoint
     except Exception as e:
         logger.error(f"Echidna fuzzing failed: {str(e)}")
-        try:
-            with open(temp_path, 'rb') as f:
-                response = requests.post('https://your-cloud-fuzzing-endpoint', files={'file': f})
-            if response.ok:
-                return response.json()
-            else:
-                return [{"vulnerability": "Fallback failed", "description": response.text}]
-        except Exception as fallback_e:
-            logger.error(f"Fuzzing fallback failed: {str(fallback_e)}")
-            return [{"vulnerability": "Fuzzing failed", "description": str(e)}]
+        return [{"vulnerability": "Echidna failed", "description": str(e)}]
+    
     finally:
         if config_path and os.path.exists(config_path):
-            os.unlink(config_path)
+            try:
+                os.unlink(config_path)
+            except:
+                pass
         if output_path and os.path.exists(output_path):
-            os.unlink(output_path)
+            try:
+                os.unlink(output_path)
+            except:
+                pass
 
 def run_mythril(temp_path: str) -> list[dict[str, str]]:
     """Run mythril analysis with Windows fallback."""
@@ -3132,21 +3130,30 @@ def run_certora(temp_path: str) -> list[dict[str, str]]:
     return [{"rule": "Sample rule", "status": "Passed (dummy)"}]
 
 def analyze_slither(temp_path: str) -> list[dict[str, Any]]:
-    """Run Slither with installed solc."""
+    """Run Slither with installed solc, skip gracefully if missing."""
     if not os.path.exists(temp_path):
         logger.error(f"Slither failed: file not found at {temp_path}")
         return []
     
     try:
-        sl = Slither(temp_path, solc="solc")  # Explicitly use PATH solc
-        sl.register_detector(*all_detectors)  # Register all detectors
-        detection_results = sl.run_detectors()  # Run them
-        findings = [det for dets in detection_results for det in dets if det]  # Flatten
+        # Check if solc is available
+        try:
+            subprocess.run(["solc", "--version"], check=True, capture_output=True, text=True)
+        except FileNotFoundError:
+            logger.info("Slither skipped: solc not installed on this system")
+            return [{"name": "Slither unavailable", "details": "solc compiler not installed"}]
+        
+        sl = Slither(temp_path, solc="solc")
+        detection_results = sl.run_detectors()
+        findings = [det for dets in detection_results for det in dets if det]
         formatted = [{"name": det.get("check"), "details": det.get("description")} for det in findings]
         logger.info(f"Slither found {len(formatted)} issues")
         return formatted
     except SlitherError as e:
         logger.error(f"Slither failed: {str(e)}")
+        return []
+    except Exception as e:
+        logger.error(f"Slither crashed: {str(e)}")
         return []
 
 def summarize_context(context: str) -> str:
@@ -3424,7 +3431,10 @@ async def audit_contract(
             await broadcast_audit_log(effective_username, "Starting Echidna fuzzing")
             try:
                 fuzzing_results = await asyncio.to_thread(run_echidna, temp_path)
-                await broadcast_audit_log(effective_username, f"Echidna completed with {len(fuzzing_results)} results")
+                if fuzzing_results:
+                    await broadcast_audit_log(effective_username, f"Echidna completed with {len(fuzzing_results)} results")
+                else:
+                    await broadcast_audit_log(effective_username, "Echidna completed with no results")
             except Exception as e:
                 logger.exception(f"Echidna fuzzing failed for {effective_username}: {e}")
                 await broadcast_audit_log(effective_username, "Echidna fuzzing failed")
