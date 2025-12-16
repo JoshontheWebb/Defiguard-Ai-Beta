@@ -132,8 +132,6 @@ except Exception:
 
 import requests  # For cloud fallback
 import asyncio
-import boto3  # For Echidna AWS fallback
-from mythril.mythril import MythrilAnalyzer  # For Mythril analysis
 from jose import jwt, JWTError
 
 # === JINJA2 TEMPLATE SETUP (required for /ui and /auth) ===
