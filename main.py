@@ -3478,7 +3478,7 @@ async def audit_contract(
             
             # Direct synchronous call - OpenAI SDK handles this properly
             response = client.chat.completions.create(
-                model="grok-beta",  # Use grok-beta instead of grok-4
+                model="grok-4-fast-reasoning",  # Best for security analysis
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
                 stream=False,  # Explicitly disable streaming
