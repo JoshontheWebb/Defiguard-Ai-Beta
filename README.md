@@ -1,2 +1,2 @@
-# Defiguard-Ai-Beta
-DefiGuard-Ai Solidity Contract Auditor beta
+# defiguard-ai-fresh-private
+DeFiGuard AI fresh private deploy for Stripe testing
