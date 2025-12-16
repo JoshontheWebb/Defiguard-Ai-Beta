@@ -116,6 +116,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Flowable
 from reportlab.lib.styles import getSampleStyleSheet
 from jinja2 import Environment, FileSystemLoader
+from compliance_checker import get_compliance_analysis, ComplianceChecker
 
 try:
     from celery import Celery  # type: ignore[reportMissingTypeStubs]
@@ -1299,84 +1300,218 @@ AUDIT_SCHEMA: dict[str, Any] = {
 
 # Define PROMPT_TEMPLATE for audit endpoint
 PROMPT_TEMPLATE = """
-You are an expert Solidity security auditor analyzing smart contract code.
+You are an elite smart contract security auditor with expertise in:
+- Solidity security (10+ years experience)
+- DeFi protocol design and attack vectors
+- Regulatory compliance (EU MiCA, SEC FIT21, AML/KYC)
+- Formal verification and cryptographic security
 
+Your analysis MUST be comprehensive, precise, and actionable.
+
+═══════════════════════════════════════════════════════════════════
 TIER: {tier}
-CONTEXT: {context}
+CONTRACT TYPE: {contract_type}
+STATIC ANALYSIS CONTEXT: {context}
 FUZZING RESULTS: {fuzzing_results}
-CODE:
+COMPLIANCE PRE-SCAN: {compliance_scan}
+═══════════════════════════════════════════════════════════════════
+
+CODE TO AUDIT:
 {code}
 
 PROTOCOL DETAILS: {details}
 
+═══════════════════════════════════════════════════════════════════
+CRITICAL AUDIT METHODOLOGY (FOLLOW STRICTLY):
+═══════════════════════════════════════════════════════════════════
+
+PHASE 1: STATIC VULNERABILITY ANALYSIS
+1. Reentrancy attacks (CEI pattern violations)
+2. Integer overflow/underflow (even with Solidity 0.8+)
+3. Access control bypasses (role-based security)
+4. Unchecked external calls (return value validation)
+5. Gas optimization issues (DoS via gas limits)
+6. Delegate call injection (proxy vulnerabilities)
+7. Flash loan attack vectors (price manipulation)
+8. Oracle manipulation (TWAP, multi-source validation)
+9. Front-running vulnerabilities (MEV protection)
+10. Timestamp dependence (miner manipulation)
+
+PHASE 2: DEFI-SPECIFIC ATTACK VECTORS
+11. Liquidity pool attacks (sandwich attacks, IL)
+12. Governance attacks (voting manipulation, flash loans)
+13. Cross-chain bridge vulnerabilities
+14. MEV extraction opportunities
+15. Composability risks (protocol integration failures)
+
+PHASE 3: REGULATORY COMPLIANCE ANALYSIS
+═══════════════════════════════════════════════════════════════════
+EU MiCA COMPLIANCE (Markets in Crypto-Assets Regulation):
+
+Article 50 - Custody & Safeguarding:
+- Are withdrawal functions protected by access control?
+- Is multi-signature custody implemented for high-value assets?
+- Does the contract have emergency pause functionality?
+- Are user funds segregated from operational funds?
+
+Article 30 - Market Abuse Prevention:
+- Are there slippage limits to prevent price manipulation?
+- Does the contract protect against front-running attacks?
+- Are there circuit breakers for abnormal price movements?
+
+Article 68 - Whitepaper Requirements:
+- Does code match documented tokenomics?
+- Are all risks adequately disclosed in comments?
+- Is technical architecture clearly documented?
+
+Article 120 - AML/KYC Requirements (if applicable):
+- Does contract handle user identification requirements?
+- Are transaction monitoring hooks present?
+- Can suspicious activity be flagged/paused?
+
+═══════════════════════════════════════════════════════════════════
+US SEC COMPLIANCE (FIT21 & Howey Test):
+
+Howey Test Analysis (Is this a security?):
+1. Investment of money? (Does user contribute assets?)
+2. Common enterprise? (Pooled assets/shared outcome?)
+3. Expectation of profits? (Yield farming, staking rewards?)
+4. Efforts of others? (Centralized team control?)
+
+If 3+ factors present → Likely a SECURITY → Recommend:
+- Increase decentralization (reduce admin powers)
+- Consider Reg D (accredited investors) or Reg A+ exemptions
+- Evaluate SEC registration requirements
+
+FIT21 Decentralization Threshold:
+- Is governance sufficiently decentralized?
+- Are admin keys timelocked or multi-sig?
+- Can the protocol function without the founding team?
+
+═══════════════════════════════════════════════════════════════════
+
+PHASE 4: CODE QUALITY & GAS OPTIMIZATION
+- Contract complexity (cyclomatic complexity score)
+- Gas efficiency (expensive operations, storage optimization)
+- Code maintainability (comments, naming conventions)
+- Upgrade safety (proxy patterns, storage collisions)
+
+═══════════════════════════════════════════════════════════════════
 ANALYSIS REQUIREMENTS BY TIER:
+═══════════════════════════════════════════════════════════════════
 
 FREE TIER:
-- Provide risk_score (0-100)
-- Identify top 3 CRITICAL or HIGH severity issues only
-- For each issue: type, severity, basic description (2-3 sentences)
-- NO fix recommendations (they need to upgrade)
-- Calculate the total number of critical and high severity issues found
-- Include upgrade_prompt with actual numeric counts in this format: "⚠️ X critical and Y high-severity issues detected. Upgrade to Starter ($29/mo) to get fix recommendations and see all Z issues." where X, Y, and Z are replaced with actual numbers you calculated
-- Keep executive_summary under 100 words
+- Risk score (0-100) with justification
+- Top 3 CRITICAL or HIGH severity issues ONLY
+- For each issue: type, severity, 2-3 sentence description
+- NO fix recommendations (upgrade required)
+- Calculate exact counts: critical_count, high_count, medium_count, low_count
+- Set upgrade_prompt: "⚠️ [X] critical and [Y] high-severity issues detected. [Z] total issues found. Upgrade to Starter ($29/mo) to get fix recommendations and see all issues."
+- Executive summary under 100 words focusing on most critical risk
 
-STARTER TIER:
-- Full executive_summary (2-3 paragraphs summarizing key findings)
-- List ALL issues with: type (e.g., "Reentrancy Vulnerability"), severity (Critical/High/Medium/Low), description (detailed explanation), basic fix recommendation
-- Fixes should be generic and actionable. Examples: "Use OpenZeppelin's ReentrancyGuard contract", "Add require(msg.sender == owner) access control", "Validate user inputs with require() statements"
-- Include predictions array: 3-5 realistic attack scenarios with impact assessments
-- Categorize recommendations into THREE categories:
-  * immediate: Array of strings - Actions to take before deployment
-  * short_term: Array of strings - Actions for next 7-30 days
-  * long_term: Array of strings - Strategic improvements for future versions
-- NO line numbers, code snippets, exploit scenarios, or code diffs (those are Pro+ features)
-- Focus on identifying issues clearly and providing actionable next steps
+STARTER TIER ($29/mo):
+- Full executive summary (2-3 paragraphs with regulatory context)
+- ALL issues with: type, severity, detailed description (4-5 sentences), basic fix
+- Fix recommendations must be SPECIFIC and ACTIONABLE:
+  ✅ GOOD: "Use OpenZeppelin's ReentrancyGuard by importing '@openzeppelin/contracts/security/ReentrancyGuard.sol' and adding 'nonReentrant' modifier to withdraw()"
+  ❌ BAD: "Add reentrancy protection"
+- Predictions: 3-5 realistic attack scenarios with quantified impact
+- Recommendations in THREE categories:
+  * immediate: Actions before deployment (fix critical bugs)
+  * short_term: Actions for next 7-30 days (audits, testing)
+  * long_term: Strategic improvements (formal verification, monitoring)
+- Basic MiCA/SEC compliance analysis (high-level only)
+- NO line numbers, code snippets, or PoC exploits (Pro+ features)
 
-PRO TIER (Advanced Analysis):
+PRO TIER ($149/mo):
 - Everything in Starter PLUS:
-- MANDATORY REQUIREMENT: For EVERY SINGLE issue you identify, you MUST include ALL of these fields without exception:
-  * line_number: INTEGER - Parse the code and return the EXACT line number (1-indexed). Example: If "function withdraw() public" appears on line 15, return 15
-  * function_name: STRING - Full function name including parentheses. Example: "withdraw()"
-  * vulnerable_code: STRING - Extract EXACTLY 3-5 lines of actual Solidity code showing the vulnerability. Must be valid code from the file
-  * exploit_scenario: STRING - Write a detailed, realistic attack scenario (MINIMUM 50 words) explaining step-by-step HOW an attacker would exploit this vulnerability
-  * estimated_impact: STRING - Quantify financial impact. Examples: "$500,000 at risk", "100% of TVL vulnerable", "All 1,000 ETH in contract"
-  * code_fix: OBJECT (REQUIRED) with three mandatory fields:
-    - before: STRING - The vulnerable code (must be valid Solidity, 5-10 lines)
-    - after: STRING - The fixed code (must be valid Solidity, 5-10 lines)
-    - explanation: STRING - Explain what changed and WHY it fixes the vulnerability (minimum 30 words)
-  * alternatives: ARRAY of EXACTLY 2-3 objects, each containing:
-    - approach: STRING - Alternative fix method
+- MANDATORY FOR EVERY ISSUE - ALL fields required:
+  * line_number: INTEGER - Exact line number (1-indexed) where vulnerability exists
+  * function_name: STRING - Full function signature (e.g., "withdraw(uint256 amount)")
+  * vulnerable_code: STRING - Extract 3-5 lines of actual Solidity code showing the vulnerability
+  * exploit_scenario: STRING - Detailed attack walkthrough (MINIMUM 50 words) with step-by-step exploitation
+  * estimated_impact: STRING - Quantified financial impact (e.g., "$500K at risk", "100% of TVL vulnerable")
+  * code_fix: OBJECT with three MANDATORY fields:
+    - before: STRING - Vulnerable code (5-10 lines of valid Solidity)
+    - after: STRING - Fixed code (5-10 lines of valid Solidity)
+    - explanation: STRING - Why this fixes it (minimum 30 words)
+  * alternatives: ARRAY of 2-3 alternative fix approaches, each with:
+    - approach: STRING - Alternative method
     - pros: STRING - Advantages (minimum 20 words)
     - cons: STRING - Disadvantages (minimum 20 words)
-    - gas_impact: STRING - Quantified gas impact. Examples: "+15% gas cost", "-20% gas savings", "negligible (~1% increase)"
-- CRITICAL: Do NOT skip any fields. If you cannot determine a field, make your best estimate based on code analysis
-- Regulatory compliance analysis (MiCA, SEC FIT21, RWA tokenization)
-- Code quality metrics: lines_of_code (INTEGER count), functions_count (INTEGER count), complexity_score (FLOAT 0.0-10.0)
-- Detailed remediation roadmap with specific timeline estimates
+    - gas_impact: STRING - Quantified gas cost (e.g., "+15%", "-20%", "negligible")
 
-ENTERPRISE TIER (Maximum Detail):
+- COMPREHENSIVE REGULATORY COMPLIANCE:
+  * MiCA compliance score (0-100) with specific article violations
+  * SEC Howey Test analysis with decentralization recommendations
+  * Specific regulatory risks with mitigation strategies
+
+- CODE QUALITY METRICS (REQUIRED):
+  * lines_of_code: INTEGER - Exact count
+  * functions_count: INTEGER - Number of functions
+  * complexity_score: FLOAT (0.0-10.0) - Cyclomatic complexity
+
+- DETAILED REMEDIATION ROADMAP:
+  * Day-by-day fix schedule with priorities
+  * Testing strategy (unit tests, integration tests, fuzz tests)
+  * External audit recommendations
+
+ENTERPRISE TIER ($499/mo):
 - Everything in Pro PLUS:
-- For EVERY CRITICAL or HIGH severity issue, you MUST include:
-  * proof_of_concept: STRING - Complete, runnable Solidity or JavaScript code demonstrating the exploit. Must be syntactically valid and include comments explaining each step. Minimum 15 lines of code
-  * references: ARRAY of 2-3 objects, each with:
-    - title: STRING - Title of reference (e.g., "Similar reentrancy exploit on Protocol X")
-    - url: STRING - Full URL to rekt.news article, past audit, or security writeup
-- Multi-AI consensus validation note: "Analysis confirmed by multiple AI models"
-- Formal verification results from Certora (if available)
-- Attack surface analysis: Identify all external entry points and trust boundaries
-- Post-deployment monitoring recommendations: Specific metrics to track
-- CRITICAL: proof_of_concept code must be complete enough to copy-paste and test
+- PROOF OF CONCEPT (PoC) for EVERY Critical/High issue:
+  * proof_of_concept: STRING - Complete, runnable exploit code (Solidity or JavaScript)
+  * Must be syntactically valid with comments explaining each step
+  * Minimum 15 lines of code demonstrating the exploit
 
-CRITICAL INSTRUCTIONS:
-1. Count issues by severity and include counts in response
-2. If free tier and more than 3 issues found, set upgrade_prompt with exact counts
-3. Use consistent severity levels: "Critical", "High", "Medium", "Low"
-4. For line_number, parse the code and provide actual line numbers (1-indexed)
-5. Make exploit_scenario realistic and specific to THIS code
-6. Ensure all code_fix before/after snippets are valid Solidity
-7. Gas impact should be quantified: "~15% increase", "negligible", "-20% savings"
+- REFERENCES (for every Critical/High issue):
+  * references: ARRAY of 2-3 objects with:
+    - title: STRING - Reference title (e.g., "Similar reentrancy on Protocol X")
+    - url: STRING - Full URL to rekt.news, past audit, or security writeup
 
-Return analysis in the exact JSON schema provided.
+- ADVANCED ANALYSIS:
+  * Multi-AI consensus validation note
+  * Formal verification results (if Certora available)
+  * Attack surface analysis with trust boundaries
+  * Post-deployment monitoring recommendations with specific metrics
+  * Custom alerting rules for runtime protection
+
+═══════════════════════════════════════════════════════════════════
+CRITICAL OUTPUT REQUIREMENTS:
+═══════════════════════════════════════════════════════════════════
+
+1. ALWAYS calculate and include severity counts:
+   - critical_count: INTEGER
+   - high_count: INTEGER  
+   - medium_count: INTEGER
+   - low_count: INTEGER
+
+2. For FREE tier with >3 issues, set upgrade_prompt with EXACT COUNTS
+
+3. Use ONLY these severity levels: "Critical", "High", "Medium", "Low"
+
+4. Line numbers must be ACTUAL parsed line numbers from the code (1-indexed)
+
+5. Exploit scenarios must be REALISTIC and SPECIFIC to THIS code
+
+6. Code fixes must be VALID SOLIDITY that compiles
+
+7. Gas impacts must be QUANTIFIED with percentages or "negligible"
+
+8. Risk score (0-100) calculation:
+   - Critical issues: +30 each
+   - High issues: +15 each
+   - Medium issues: +5 each
+   - Low issues: +1 each
+   - Cap at 100
+
+9. REGULATORY COMPLIANCE is MANDATORY - always include:
+   - MiCA compliance analysis
+   - SEC Howey Test evaluation
+   - Specific article violations with remediation
+
+10. All code_fix examples must show BEFORE and AFTER with clear explanation
+
+Return analysis in the EXACT JSON schema provided. Do not skip any required fields.
 """
 
 ## Section 2
@@ -3461,7 +3596,14 @@ async def audit_contract(
         
         # Grok API call
         await broadcast_audit_log(effective_username, "Sending to Grok AI")
-        
+                # Run compliance pre-scan
+        compliance_scan = {}
+        try:
+            compliance_scan = get_compliance_analysis(code_str, contract_type="defi")
+            logger.info(f"[COMPLIANCE] Pre-scan completed: {len(compliance_scan.get('attack_vectors', []))} attack vectors detected")
+        except Exception as e:
+            logger.warning(f"[COMPLIANCE] Pre-scan failed: {e}")
+            compliance_scan = {"error": str(e)}
         try:
             if not os.getenv("GROK_API_KEY"):
                 raise Exception("GROK_API_KEY not set")
@@ -3472,6 +3614,8 @@ async def audit_contract(
                 code=code_str,
                 details=details,
                 tier=tier_for_flags,
+                contract_type="defi",
+                compliance_scan=json.dumps(compliance_scan, indent=2)
             )
             
             # Direct synchronous call - OpenAI SDK handles this properly
