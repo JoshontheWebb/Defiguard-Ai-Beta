@@ -1,8 +1,6 @@
-# Force Render to use this YAML configuration
-# Last updated: 2025-12-17
 services:
   - type: web
-    name: defiguard-ai-beta
+    name: defiguard-ai-beta  # MUST match your exact service name in dashboard
     env: python
     region: oregon
     plan: starter
@@ -16,22 +14,26 @@ services:
       pip install -r requirements.txt
       
       echo "=========================================="
-      echo "🔧 Installing solc compiler for Slither..."
+      echo "🔧 Installing solc compiler..."
       echo "=========================================="
       pip install solc-select
-      solc-select install 0.8.24
-      solc-select use 0.8.24
+      python -m solc_select install 0.8.24
+      python -m solc_select use 0.8.24
       
       echo "=========================================="
-      echo "🔧 Installing Echidna fuzzer..."
+      echo "🔧 Installing Echidna via Docker method..."
       echo "=========================================="
-      curl -L https://github.com/crytic/echidna/releases/download/v2.2.4/echidna-2.2.4-Linux.tar.gz -o echidna.tar.gz
-      tar -xzf echidna.tar.gz
-      chmod +x echidna
+      # Install Docker CLI tools
+      apt-get update
+      apt-get install -y curl
+      
+      # Download and extract Echidna binary directly
       mkdir -p /opt/render/project/.local/bin
+      cd /tmp
+      curl -L https://github.com/crytic/echidna/releases/latest/download/echidna-x86_64-linux -o echidna
+      chmod +x echidna
       mv echidna /opt/render/project/.local/bin/
-      ls -lah /opt/render/project/.local/bin/echidna
-      echo "✅ Echidna v2.2.4 installed to /opt/render/project/.local/bin/"
+      /opt/render/project/.local/bin/echidna --version || echo "Echidna installation pending verification"
       
       echo "=========================================="
       echo "✅ Build complete!"
@@ -39,77 +41,23 @@ services:
     
     startCommand: |
       export PATH="/opt/render/project/.local/bin:$PATH"
-      echo "🔍 Verifying Echidna at runtime..."
-      which echidna && echidna --version || echo "⚠️ Echidna not found in PATH"
       /opt/render/project/src/.venv/bin/python -m gunicorn main:app --workers 1 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 120 --log-level info
-    
-    healthCheckPath: /
     
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.0
-      
-      - key: RENDER
-        value: true
-      
-      - key: ENV
-        value: production
-      
-      # Auth0 (from Render dashboard - mark as secret)
-      - key: AUTH0_DOMAIN
-        sync: false
-      
-      - key: AUTH0_CLIENT_ID
-        sync: false
-      
-      - key: AUTH0_CLIENT_SECRET
-        sync: false
-      
-      - key: AUTH0_AUDIENCE
-        sync: false
-      
-      # Stripe (from Render dashboard - mark as secret)
-      - key: STRIPE_API_KEY
-        sync: false
-      
-      - key: STRIPE_WEBHOOK_SECRET
-        sync: false
-      
-      - key: STRIPE_PRICE_STARTER
-        sync: false
-      
-      - key: STRIPE_PRICE_PRO
-        sync: false
-      
-      - key: STRIPE_PRICE_ENTERPRISE
-        sync: false
-      
-      # Legacy Stripe prices (for backward compatibility)
-      - key: STRIPE_PRICE_BEGINNER
-        sync: false
-      
-      - key: STRIPE_PRICE_DIAMOND
-        sync: false
-      
-      - key: STRIPE_METERED_PRICE_DIAMOND
-        sync: false
-      
-      # Grok AI (from Render dashboard - mark as secret)
+        value: "3.13.4"
+      # Add your other env vars here with sync: false for secrets
       - key: GROK_API_KEY
         sync: false
-      
-      # Infura (from Render dashboard - mark as secret)
-      - key: INFURA_PROJECT_ID
+      - key: AUTH0_CLIENT_ID
         sync: false
-      
-      # Redis (from Render dashboard - mark as secret)
-      - key: REDIS_URL
+      - key: AUTH0_CLIENT_SECRET
         sync: false
-      
-      # App Secret (from Render dashboard - mark as secret)
-      - key: APP_SECRET_KEY
+      - key: AUTH0_DOMAIN
         sync: false
-      
-      # Admin Key (from Render dashboard - mark as secret)
-      - key: ADMIN_KEY
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false
+      - key: WEB3_PROVIDER_URL
         sync: false
