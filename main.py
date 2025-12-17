@@ -2124,12 +2124,18 @@ def run_mythril(temp_path: str) -> list[dict[str, str]]:
     try:
         logger.info(f"[MYTHRIL] Starting analysis for {temp_path}")
         
-        # Correct Mythril command: myth analyze <file> -o json
+        # Mythril command with execution limits for faster analysis
         result = subprocess.run(
-            ["myth", "analyze", temp_path, "-o", "json"],
+            [
+                "myth", "analyze", temp_path, 
+                "-o", "json",
+                "--execution-timeout", "60",      # Limit symbolic execution
+                "--max-depth", "22",              # Limit search depth
+                "--solver-timeout", "10000"       # 10s solver timeout
+            ],
             capture_output=True,
             text=True,
-            timeout=120
+            timeout=90  # Reduced from 120s
         )
         
         logger.info(f"[MYTHRIL] Return code: {result.returncode}")
@@ -2160,8 +2166,8 @@ def run_mythril(temp_path: str) -> list[dict[str, str]]:
             return [{"vulnerability": "Mythril completed", "description": result.stderr[:500] or "No output"}]
    
     except subprocess.TimeoutExpired:
-        logger.warning("[MYTHRIL] Timed out after 120 seconds")
-        return [{"vulnerability": "Mythril timeout", "description": "Analysis exceeded 120s limit"}]
+        logger.warning("[MYTHRIL] Timed out after 90 seconds")
+        return [{"vulnerability": "Mythril timeout", "description": "Analysis exceeded 90s limit - contract may be complex"}]
     except FileNotFoundError:
         logger.warning("[MYTHRIL] Binary not found")
         return [{"vulnerability": "Mythril unavailable", "description": "Mythril not installed"}]
@@ -3653,14 +3659,35 @@ async def audit_contract(
             return {"report": report, "risk_score": "N/A", "overage_cost": None}
         
         # Parallel static analysis
+        # Determine if fuzzing is enabled BEFORE starting tasks
+        tier_for_flags = "enterprise" if current_tier == "enterprise" else ("diamond" if getattr(user, "has_diamond", False) else current_tier)
+        tier_flags_map = {"beginner": "starter", "diamond": "enterprise"}
+        tier_for_flags = tier_flags_map.get(tier_for_flags, tier_for_flags)
+        fuzzing_enabled = usage_tracker.feature_flags.get(tier_for_flags, {}).get("fuzzing", False)
+        
+        # Start ALL analysis tools in PARALLEL for maximum speed
         await broadcast_audit_log(effective_username, "Running Slither analysis")
         slither_task = asyncio.create_task(asyncio.to_thread(analyze_slither, temp_path))
 
         await broadcast_audit_log(effective_username, "Running Mythril analysis")
         mythril_task = asyncio.create_task(asyncio.to_thread(run_mythril, temp_path))
 
-        slither_findings, mythril_results = await asyncio.gather(slither_task, mythril_task, return_exceptions=True)
+        # Start Echidna immediately if enabled (don't wait for Mythril!)
+        echidna_task = None
+        if fuzzing_enabled:
+            await broadcast_audit_log(effective_username, "Starting Echidna fuzzing")
+            echidna_task = asyncio.create_task(asyncio.to_thread(run_echidna, temp_path))
 
+        # Wait for all tasks to complete in parallel
+        if echidna_task:
+            results = await asyncio.gather(slither_task, mythril_task, echidna_task, return_exceptions=True)
+            slither_findings, mythril_results, fuzzing_results = results
+        else:
+            results = await asyncio.gather(slither_task, mythril_task, return_exceptions=True)
+            slither_findings, mythril_results = results
+            fuzzing_results = []
+
+        # Handle Slither results
         if isinstance(slither_findings, Exception):
             logger.error(f"Slither failed: {slither_findings}")
             await broadcast_audit_log(effective_username, "Slither failed")
@@ -3668,6 +3695,7 @@ async def audit_contract(
         else:
             await broadcast_audit_log(effective_username, f"Slither found {len(slither_findings)} issues")
 
+        # Handle Mythril results
         if isinstance(mythril_results, Exception):
             logger.error(f"Mythril failed: {mythril_results}")
             await broadcast_audit_log(effective_username, "Mythril failed")
@@ -3675,31 +3703,18 @@ async def audit_contract(
         else:
             await broadcast_audit_log(effective_username, f"Mythril found {len(mythril_results)} issues")
         
+        # Handle Echidna results
+        if isinstance(fuzzing_results, Exception):
+            logger.exception(f"Echidna fuzzing failed for {effective_username}: {fuzzing_results}")
+            await broadcast_audit_log(effective_username, "Echidna fuzzing failed")
+            fuzzing_results = []
+        elif fuzzing_results:
+            await broadcast_audit_log(effective_username, f"Echidna completed with {len(fuzzing_results)} results")
+        elif fuzzing_enabled:
+            await broadcast_audit_log(effective_username, "Echidna completed with no results")
+        
         context = json.dumps([f if isinstance(f, dict) else getattr(f, "__dict__", str(f)) for f in slither_findings]).replace('"', '\"') if slither_findings else "No static issues found"
         context = summarize_context(context)
-        
-        # Echidna fuzzing if allowed
-        tier_for_flags = "enterprise" if current_tier == "enterprise" else ("diamond" if getattr(user, "has_diamond", False) else current_tier)
-        
-        # Map legacy tier names for feature flags
-        tier_flags_map = {
-            "beginner": "starter",
-            "diamond": "enterprise"
-        }
-        tier_for_flags = tier_flags_map.get(tier_for_flags, tier_for_flags)
-        
-        if usage_tracker.feature_flags.get(tier_for_flags, {}).get("fuzzing", False):
-            await broadcast_audit_log(effective_username, "Starting Echidna fuzzing")
-            try:
-                fuzzing_results = await asyncio.to_thread(run_echidna, temp_path)
-                if fuzzing_results:
-                    await broadcast_audit_log(effective_username, f"Echidna completed with {len(fuzzing_results)} results")
-                else:
-                    await broadcast_audit_log(effective_username, "Echidna completed with no results")
-            except Exception as e:
-                logger.exception(f"Echidna fuzzing failed for {effective_username}: {e}")
-                await broadcast_audit_log(effective_username, "Echidna fuzzing failed")
-                fuzzing_results = []
         
         # On-chain analysis
         details = "Uploaded Solidity code for analysis."
