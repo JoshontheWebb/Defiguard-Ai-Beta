@@ -1840,56 +1840,73 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           const formData = new FormData(auditForm);
 
           try {
-            // Use queue-based submission for better scalability
-            logMessage("Submitting audit to queue...");
+            logMessage("Submitting audit...");
             
-            // Set up queue tracker callbacks
-            queueTracker.onUpdate = (status) => {
-              logMessage(`Queue status: ${status.status} - ${status.current_phase || 'waiting'}`);
-            };
+            // Submit to /audit - it will either run immediately or queue
+            const response = await fetch(`/audit?username=${encodeURIComponent(username)}`, {
+              method: 'POST',
+              headers: { 'X-CSRFToken': token },
+              body: formData,
+              credentials: 'include'
+            });
             
-            queueTracker.onComplete = async (result) => {
-              logMessage("Audit complete!");
-              queueTracker.hideQueueUI();
-              loading.classList.remove("show");
+            if (!response.ok) {
+              const errorData = await response.json().catch(() => ({}));
+              throw new Error(errorData.detail || 'Audit request failed');
+            }
+            
+            const data = await response.json();
+            
+            // Check if audit was queued or ran immediately
+            if (data.queued) {
+              // QUEUED: Server at capacity, use queue tracker for real-time updates
+              logMessage(`Server busy - queued at position ${data.position}`);
               
-              // Store tier for button rendering
-              if (result.tier) {
-                window.currentAuditTier = result.tier;
-              }
-              handleAuditResponse(result);
-              await fetchTierData();
-            };
-            
-            queueTracker.onError = (error) => {
-              logMessage(`Audit failed: ${error}`);
-              queueTracker.hideQueueUI();
+              queueTracker.jobId = data.job_id;
+              
+              queueTracker.onUpdate = (status) => {
+                logMessage(`Queue status: ${status.status} - ${status.current_phase || 'waiting'}`);
+              };
+              
+              queueTracker.onComplete = async (result) => {
+                logMessage("Audit complete!");
+                queueTracker.hideQueueUI();
+                loading.classList.remove("show");
+                if (result.tier) window.currentAuditTier = result.tier;
+                handleAuditResponse(result);
+                await fetchTierData();
+              };
+              
+              queueTracker.onError = (error) => {
+                logMessage(`Audit failed: ${error}`);
+                queueTracker.hideQueueUI();
+                loading.classList.remove("show");
+                usageWarning.textContent = error || "Audit failed";
+                usageWarning.classList.add("error");
+              };
+              
+              queueTracker.showQueuePosition(data);
+              queueTracker.connectWebSocket();
+              queueTracker.startPolling();
+              
+            } else if (data.session_url) {
+              // UPGRADE REDIRECT: File too large or usage limit
+              logMessage("Redirecting to Stripe for upgrade");
+              window.location.href = data.session_url;
+              
+            } else {
+              // IMMEDIATE: Audit ran and completed
+              logMessage("Audit complete!");
               loading.classList.remove("show");
-              usageWarning.textContent = error || "Audit failed";
-              usageWarning.classList.add("error");
-            };
-            
-            // Submit to queue
-            const submitResult = await queueTracker.submitAudit(formData, token);
-            
-            // Show queue position UI
-            if (submitResult.status === 'queued') {
-              logMessage(`Queued at position ${submitResult.position}`);
-              queueTracker.showQueuePosition(submitResult);
+              if (data.tier) window.currentAuditTier = data.tier;
+              handleAuditResponse(data);
+              await fetchTierData();
             }
             
           } catch (err) {
             console.error(err);
             queueTracker.hideQueueUI();
             loading.classList.remove("show");
-            
-            // Check if it's an upgrade redirect
-            if (err.session_url) {
-              logMessage("Redirecting to Stripe for upgrade");
-              window.location.href = err.session_url;
-              return;
-            }
-            
             usageWarning.textContent = err.message || "Audit error";
             usageWarning.classList.add("error");
           }

@@ -288,8 +288,14 @@ class AuditQueue:
         if to_remove:
             logger.info(f"[QUEUE] Cleaned up {len(to_remove)} old jobs")
 
-# Initialize global audit queue (1 concurrent for 2GB RAM)
-audit_queue = AuditQueue(max_concurrent=1)
+# Initialize global audit queue with admission control
+# For 2GB RAM: Allow 2 concurrent audits before queuing
+audit_queue = AuditQueue(max_concurrent=2)
+
+# Track currently executing audits (for admission control)
+active_audit_count = 0
+active_audit_lock = asyncio.Lock()
+MAX_CONCURRENT_AUDITS = 2  # Safe limit for 2GB RAM
 
 # WebSocket connections for job status updates
 active_job_websockets: dict[str, list[WebSocket]] = {}
@@ -4239,6 +4245,38 @@ async def audit_contract(
         
         raise
     
+    # ADMISSION CONTROL: Check if we have capacity to run immediately
+    global active_audit_count
+    
+    async with active_audit_lock:
+        if active_audit_count >= MAX_CONCURRENT_AUDITS:
+            # At capacity - queue the audit
+            logger.info(f"[ADMISSION] At capacity ({active_audit_count}/{MAX_CONCURRENT_AUDITS}), queuing audit for {effective_username}")
+            
+            job = await audit_queue.submit(
+                username=effective_username,
+                file_content=code_bytes,
+                filename=file.filename or "contract.sol",
+                tier=current_tier,
+                contract_address=contract_address
+            )
+            
+            status = await audit_queue.get_status(job.job_id)
+            
+            return {
+                "queued": True,
+                "job_id": job.job_id,
+                "status": "queued",
+                "position": status["position"],
+                "queue_length": status["queue_length"],
+                "estimated_wait_seconds": status["estimated_wait_seconds"],
+                "message": f"Server busy. Audit queued at position {status['position']}."
+            }
+        
+        # Have capacity - increment counter and proceed
+        active_audit_count += 1
+        logger.info(f"[ADMISSION] Capacity available ({active_audit_count}/{MAX_CONCURRENT_AUDITS}), running immediately for {effective_username}")
+    
     # Main audit processing
     try:
         await broadcast_audit_log(effective_username, "Audit started")
@@ -4712,6 +4750,53 @@ async def audit_contract(
         await broadcast_audit_log(effective_username, "Audit failed: unexpected error")
         report["error"] = f"Audit failed: unexpected error: {exc}"
         return {"report": report, "risk_score": "N/A", "overage_cost": None}
+    
+    finally:
+        # ADMISSION CONTROL: Release slot and process next queued job
+        async with active_audit_lock:
+            active_audit_count = max(0, active_audit_count - 1)
+            logger.info(f"[ADMISSION] Slot released ({active_audit_count}/{MAX_CONCURRENT_AUDITS})")
+        
+        # Try to process next queued job
+        asyncio.create_task(process_one_queued_job())
+
+
+async def process_one_queued_job():
+    """Process one job from queue if capacity available."""
+    global active_audit_count
+    
+    async with active_audit_lock:
+        if active_audit_count >= MAX_CONCURRENT_AUDITS:
+            return  # Still at capacity
+        
+        # Check if there's a queued job
+        try:
+            job = await asyncio.wait_for(audit_queue.queue.get(), timeout=0.1)
+        except asyncio.TimeoutError:
+            return  # Queue empty
+        
+        active_audit_count += 1
+        logger.info(f"[QUEUE_DRAIN] Processing queued job {job.job_id[:8]}... ({active_audit_count}/{MAX_CONCURRENT_AUDITS})")
+    
+    try:
+        job.status = AuditStatus.PROCESSING
+        audit_queue.processing.add(job.job_id)
+        
+        result = await execute_queued_audit(job)
+        await audit_queue.complete(job.job_id, result)
+        await notify_job_subscribers(job.job_id, {"status": "completed", "result": result})
+        
+    except Exception as e:
+        logger.exception(f"[QUEUE_DRAIN] Job {job.job_id[:8]}... failed: {e}")
+        await audit_queue.fail(job.job_id, str(e))
+        await notify_job_subscribers(job.job_id, {"status": "failed", "error": str(e)})
+    
+    finally:
+        async with active_audit_lock:
+            active_audit_count = max(0, active_audit_count - 1)
+        
+        # Recursively drain queue
+        asyncio.create_task(process_one_queued_job())
 
 # ============================================================================
 # GAMIFICATION DEBUG ENDPOINT (Phase 0)
