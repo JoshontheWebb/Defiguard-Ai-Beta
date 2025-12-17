@@ -4049,15 +4049,24 @@ async def audit_contract(
     contract_address: str = Query(None),
     username: str = Query(None),
     db: Session = Depends(get_db),
-    request: Request = None
+    request: Request = None,
+    _from_queue: bool = False
 ):
-    await verify_csrf_token(request)
+    # Skip CSRF for queue-originated requests (no request object)
+    if not _from_queue:
+        await verify_csrf_token(request)
     
-    session_username = request.session.get("username")
-    userinfo = request.session.get("userinfo")
-    session_email = userinfo.get("email") if userinfo else None
+    # Handle request=None for queue-originated requests
+    if request is not None:
+        session_username = request.session.get("username")
+        userinfo = request.session.get("userinfo")
+        session_email = userinfo.get("email") if userinfo else None
+    else:
+        session_username = None
+        userinfo = None
+        session_email = None
     
-    logger.debug(f"Audit request: Query username={username}, Session username={session_username}, Session email={session_email}, session: {request.session}")
+    logger.debug(f"Audit request: Query username={username}, Session username={session_username}, Session email={session_email}, from_queue={_from_queue}")
     
     # Resolve effective username
     effective_username = username or session_username or session_email or "guest"
@@ -4246,36 +4255,40 @@ async def audit_contract(
         raise
     
     # ADMISSION CONTROL: Check if we have capacity to run immediately
+    # Skip when called from queue (process_one_queued_job already acquired the slot)
     global active_audit_count
     
-    async with active_audit_lock:
-        if active_audit_count >= MAX_CONCURRENT_AUDITS:
-            # At capacity - queue the audit
-            logger.info(f"[ADMISSION] At capacity ({active_audit_count}/{MAX_CONCURRENT_AUDITS}), queuing audit for {effective_username}")
+    if not _from_queue:
+        async with active_audit_lock:
+            if active_audit_count >= MAX_CONCURRENT_AUDITS:
+                # At capacity - queue the audit
+                logger.info(f"[ADMISSION] At capacity ({active_audit_count}/{MAX_CONCURRENT_AUDITS}), queuing audit for {effective_username}")
+                
+                job = await audit_queue.submit(
+                    username=effective_username,
+                    file_content=code_bytes,
+                    filename=file.filename or "contract.sol",
+                    tier=current_tier,
+                    contract_address=contract_address
+                )
+                
+                status = await audit_queue.get_status(job.job_id)
+                
+                return {
+                    "queued": True,
+                    "job_id": job.job_id,
+                    "status": "queued",
+                    "position": status["position"],
+                    "queue_length": status["queue_length"],
+                    "estimated_wait_seconds": status["estimated_wait_seconds"],
+                    "message": f"Server busy. Audit queued at position {status['position']}."
+                }
             
-            job = await audit_queue.submit(
-                username=effective_username,
-                file_content=code_bytes,
-                filename=file.filename or "contract.sol",
-                tier=current_tier,
-                contract_address=contract_address
-            )
-            
-            status = await audit_queue.get_status(job.job_id)
-            
-            return {
-                "queued": True,
-                "job_id": job.job_id,
-                "status": "queued",
-                "position": status["position"],
-                "queue_length": status["queue_length"],
-                "estimated_wait_seconds": status["estimated_wait_seconds"],
-                "message": f"Server busy. Audit queued at position {status['position']}."
-            }
-        
-        # Have capacity - increment counter and proceed
-        active_audit_count += 1
-        logger.info(f"[ADMISSION] Capacity available ({active_audit_count}/{MAX_CONCURRENT_AUDITS}), running immediately for {effective_username}")
+            # Have capacity - increment counter and proceed
+            active_audit_count += 1
+            logger.info(f"[ADMISSION] Capacity available ({active_audit_count}/{MAX_CONCURRENT_AUDITS}), running immediately for {effective_username}")
+    else:
+        logger.info(f"[ADMISSION] From queue - slot already acquired for {effective_username}")
     
     # Main audit processing
     try:
@@ -4753,12 +4766,14 @@ async def audit_contract(
     
     finally:
         # ADMISSION CONTROL: Release slot and process next queued job
-        async with active_audit_lock:
-            active_audit_count = max(0, active_audit_count - 1)
-            logger.info(f"[ADMISSION] Slot released ({active_audit_count}/{MAX_CONCURRENT_AUDITS})")
-        
-        # Try to process next queued job
-        asyncio.create_task(process_one_queued_job())
+        # Skip when called from queue (process_one_queued_job handles slot release)
+        if not _from_queue:
+            async with active_audit_lock:
+                active_audit_count = max(0, active_audit_count - 1)
+                logger.info(f"[ADMISSION] Slot released ({active_audit_count}/{MAX_CONCURRENT_AUDITS})")
+            
+            # Try to process next queued job
+            asyncio.create_task(process_one_queued_job())
 
 
 async def process_one_queued_job():
@@ -4782,7 +4797,27 @@ async def process_one_queued_job():
         job.status = AuditStatus.PROCESSING
         audit_queue.processing.add(job.job_id)
         
-        result = await execute_queued_audit(job)
+        # Route through full audit_contract for 100% feature parity
+        from io import BytesIO
+        file_obj = UploadFile(
+            filename=job.filename,
+            file=BytesIO(job.file_content),
+            size=len(job.file_content)
+        )
+        queue_db = SessionLocal()
+        
+        try:
+            result = await audit_contract(
+                file=file_obj,
+                contract_address=job.contract_address,
+                username=job.username,
+                db=queue_db,
+                request=None,
+                _from_queue=True
+            )
+        finally:
+            queue_db.close()
+        
         await audit_queue.complete(job.job_id, result)
         await notify_job_subscribers(job.job_id, {"status": "completed", "result": result})
         
