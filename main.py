@@ -1939,6 +1939,112 @@ usage_tracker.set_tier("free")
 
 ## Section 3
 
+def parse_echidna_output(raw_output: str) -> dict[str, Any]:
+    """
+    Parse raw Echidna output into structured, frontend-friendly JSON.
+    """
+    import re
+    
+    result = {
+        "status": "complete",
+        "all_passed": True,
+        "tests_passed": 0,
+        "tests_failed": 0,
+        "tests_total": 0,
+        "function_tests": [],
+        "coverage": {
+            "instructions": 0,
+            "contracts": 0,
+            "corpus_size": 0,
+            "codehashes": 0
+        },
+        "fuzzing_iterations": 0,
+        "test_limit": 0,
+        "gas_per_second": 0,
+        "compile_time": None,
+        "slither_time": None,
+        "execution_summary": "",
+        "raw_log": raw_output[-500:] if len(raw_output) > 500 else raw_output
+    }
+    
+    if not raw_output:
+        result["status"] = "no_output"
+        return result
+    
+    # Parse function test results
+    test_pattern = r'^([a-zA-Z_][a-zA-Z0-9_]*(?:\([^)]*\))?)\s*:\s*(passing|failed|reverted)$'
+    for line in raw_output.split('\n'):
+        line = line.strip()
+        match = re.match(test_pattern, line)
+        if match:
+            func_name, status = match.groups()
+            is_passed = status == "passing"
+            result["function_tests"].append({
+                "function": func_name,
+                "status": status,
+                "passed": is_passed,
+                "icon": "✅" if is_passed else "❌"
+            })
+            result["tests_total"] += 1
+            if is_passed:
+                result["tests_passed"] += 1
+            else:
+                result["tests_failed"] += 1
+                result["all_passed"] = False
+    
+    # Parse status line
+    status_match = re.search(r'\[status\]\s*tests:\s*(\d+)/(\d+),\s*fuzzing:\s*(\d+)/(\d+).*?cov:\s*(\d+).*?corpus:\s*(\d+).*?gas/s:\s*(\d+)', raw_output)
+    if status_match:
+        result["tests_failed"] = int(status_match.group(1))
+        result["tests_total"] = int(status_match.group(2)) if result["tests_total"] == 0 else result["tests_total"]
+        result["fuzzing_iterations"] = int(status_match.group(3))
+        result["test_limit"] = int(status_match.group(4))
+        result["coverage"]["instructions"] = int(status_match.group(5))
+        result["coverage"]["corpus_size"] = int(status_match.group(6))
+        result["gas_per_second"] = int(status_match.group(7))
+    
+    # Parse coverage details
+    instr_match = re.search(r'Unique instructions:\s*(\d+)', raw_output)
+    if instr_match and result["coverage"]["instructions"] == 0:
+        result["coverage"]["instructions"] = int(instr_match.group(1))
+    
+    codehash_match = re.search(r'Unique codehashes:\s*(\d+)', raw_output)
+    if codehash_match:
+        result["coverage"]["codehashes"] = int(codehash_match.group(1))
+    
+    corpus_match = re.search(r'Corpus size:\s*(\d+)', raw_output)
+    if corpus_match and result["coverage"]["corpus_size"] == 0:
+        result["coverage"]["corpus_size"] = int(corpus_match.group(1))
+    
+    compile_match = re.search(r'Compiling.*?Done!\s*\(([0-9.]+)s\)', raw_output)
+    if compile_match:
+        result["compile_time"] = float(compile_match.group(1))
+    
+    slither_match = re.search(r'Running slither.*?Done!\s*\(([0-9.]+)s\)', raw_output)
+    if slither_match:
+        result["slither_time"] = float(slither_match.group(1))
+    
+    contract_match = re.search(r'Analyzing contract:\s*[^:]+:(\w+)', raw_output)
+    if contract_match:
+        result["contract_name"] = contract_match.group(1)
+    
+    contracts_match = re.search(r'(\d+)\s+contracts', raw_output)
+    if contracts_match:
+        result["coverage"]["contracts"] = int(contracts_match.group(1))
+    
+    # Build execution summary
+    if result["tests_total"] > 0:
+        if result["all_passed"]:
+            result["execution_summary"] = f"All {result['tests_total']} tests passed"
+            result["status"] = "success"
+        else:
+            result["execution_summary"] = f"{result['tests_failed']} of {result['tests_total']} tests failed"
+            result["status"] = "issues_found"
+    else:
+        result["execution_summary"] = "Fuzzing completed"
+        result["status"] = "complete"
+    
+    return result
 def run_echidna(temp_path: str) -> list[dict[str, str]]:
     """Run Echidna fuzzing via Docker image binary with memory limits."""
     logger.info(f"[ECHIDNA] Starting fuzzing for {temp_path}")
@@ -1983,7 +2089,17 @@ def run_echidna(temp_path: str) -> list[dict[str, str]]:
         
         if result.returncode == 0 or result.stdout:
             logger.info(f"[ECHIDNA] Completed successfully")
-            return [{"vulnerability": "Fuzzing complete", "description": result.stdout[:1000] or "No issues found"}]
+            
+            # Parse the output into structured data
+            parsed = parse_echidna_output(result.stdout)
+            
+            logger.info(f"[ECHIDNA] Parsed: {parsed['tests_passed']}/{parsed['tests_total']} tests passed, {parsed['fuzzing_iterations']} iterations")
+            
+            return [{
+                "vulnerability": "Fuzzing complete",
+                "description": parsed["execution_summary"],
+                "parsed": parsed
+            }]
         else:
             logger.warning(f"[ECHIDNA] Failed with code {result.returncode}")
             return [{"vulnerability": "Echidna completed", "description": result.stderr[:500] or "No output"}]

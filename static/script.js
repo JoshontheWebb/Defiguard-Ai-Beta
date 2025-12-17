@@ -1426,9 +1426,99 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           recommendationsList.innerHTML = '<li>No recommendations available.</li>';
         }
         
-        fuzzingList.innerHTML = (report.fuzzing_results || []).length === 0 
-          ? "<li>No fuzzing results available.</li>"
-          : report.fuzzing_results.map(r => `<li tabindex="0">Vulnerability: ${r.vulnerability} | Description: ${r.description}</li>`).join('');
+        // Fuzzing results renderer
+        const renderFuzzingResults = (fuzzingResults) => {
+          if (!fuzzingResults || fuzzingResults.length === 0) {
+            return `<div class="fuzzing-empty"><p>🧪 No fuzzing results available.</p></div>`;
+          }
+          
+          const firstResult = fuzzingResults[0];
+          const parsed = firstResult.parsed;
+          
+          if (!parsed) {
+            return fuzzingResults.map(r => 
+              `<div class="fuzzing-legacy-item"><strong>${escapeHtml(r.vulnerability)}</strong><p>${escapeHtml(r.description)}</p></div>`
+            ).join('');
+          }
+          
+          const statusIcon = {'success': '✅', 'complete': '✅', 'issues_found': '⚠️', 'error': '❌', 'timeout': '⏱️'}[parsed.status] || '🧪';
+          const statusClass = {'success': 'success', 'complete': 'success', 'issues_found': 'warning', 'error': 'error'}[parsed.status] || '';
+          
+          const formatGas = (gas) => {
+            if (!gas) return 'N/A';
+            if (gas >= 1000000) return `${(gas / 1000000).toFixed(1)}M`;
+            if (gas >= 1000) return `${(gas / 1000).toFixed(0)}K`;
+            return gas.toString();
+          };
+          
+          let html = `
+            <div class="fuzzing-results-card">
+              <div class="fuzzing-header ${statusClass}">
+                <div class="fuzzing-status">
+                  <span class="status-icon">${statusIcon}</span>
+                  <span class="status-text">${parsed.execution_summary || 'Fuzzing Complete'}</span>
+                </div>
+                ${parsed.contract_name ? `<span class="contract-badge">${escapeHtml(parsed.contract_name)}</span>` : ''}
+              </div>
+              
+              <div class="fuzzing-stats-grid">
+                <div class="fuzzing-stat">
+                  <div class="stat-value">${parsed.tests_passed || 0}/${parsed.tests_total || 0}</div>
+                  <div class="stat-label">Tests Passed</div>
+                </div>
+                <div class="fuzzing-stat">
+                  <div class="stat-value">${(parsed.fuzzing_iterations || 0).toLocaleString()}</div>
+                  <div class="stat-label">Iterations</div>
+                </div>
+                <div class="fuzzing-stat">
+                  <div class="stat-value">${parsed.coverage?.instructions || 0}</div>
+                  <div class="stat-label">Instructions</div>
+                </div>
+                <div class="fuzzing-stat">
+                  <div class="stat-value">${formatGas(parsed.gas_per_second)}</div>
+                  <div class="stat-label">Gas/sec</div>
+                </div>
+              </div>`;
+          
+          if (parsed.function_tests && parsed.function_tests.length > 0) {
+            html += `
+              <div class="fuzzing-tests-section">
+                <h5>Function Tests</h5>
+                <div class="function-tests-list">
+                  ${parsed.function_tests.map(test => `
+                    <div class="function-test-item ${test.passed ? 'passed' : 'failed'}">
+                      <span class="test-icon">${test.icon}</span>
+                      <code class="test-name">${escapeHtml(test.function)}</code>
+                      <span class="test-status">${test.status}</span>
+                    </div>
+                  `).join('')}
+                </div>
+              </div>`;
+          }
+          
+          if (parsed.coverage && (parsed.coverage.corpus_size > 0 || parsed.coverage.codehashes > 0)) {
+            html += `
+              <div class="fuzzing-coverage-section">
+                <h5>Coverage Details</h5>
+                <div class="coverage-grid">
+                  ${parsed.coverage.corpus_size > 0 ? `<div class="coverage-item"><span class="coverage-label">Corpus:</span><span class="coverage-value">${parsed.coverage.corpus_size}</span></div>` : ''}
+                  ${parsed.coverage.codehashes > 0 ? `<div class="coverage-item"><span class="coverage-label">Codehashes:</span><span class="coverage-value">${parsed.coverage.codehashes}</span></div>` : ''}
+                </div>
+              </div>`;
+          }
+          
+          if (parsed.compile_time || parsed.slither_time) {
+            html += `<div class="fuzzing-timing">
+              ${parsed.compile_time ? `<span>⚡ Compile: ${parsed.compile_time.toFixed(1)}s</span>` : ''}
+              ${parsed.slither_time ? `<span>🔍 Slither: ${parsed.slither_time.toFixed(1)}s</span>` : ''}
+            </div>`;
+          }
+          
+          html += `</div>`;
+          return html;
+        };
+        
+        fuzzingList.innerHTML = renderFuzzingResults(report.fuzzing_results);
         
         // CODE QUALITY METRICS (if available)
         const codeQualityEl = document.getElementById("code-quality-metrics");

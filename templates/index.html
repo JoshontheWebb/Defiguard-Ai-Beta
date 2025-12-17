@@ -403,9 +403,11 @@
             <!-- Fuzzing Results (Pro/Enterprise) -->
             <div class="fuzzing-placeholder pro-enterprise-only" style="display: none;">
                 <h4>🧪 Fuzzing Results</h4>
-                <ul id="fuzzing-list" role="list">
-                    <li>No fuzzing results yet.</li>
-                </ul>
+                <div id="fuzzing-list" role="region" aria-label="Echidna fuzzing results">
+                    <div class="fuzzing-empty">
+                        <p>🧪 No fuzzing results yet.</p>
+                    </div>
+                </div>
             </div>
 
             <!-- Remediation Roadmap (Enterprise) -->
