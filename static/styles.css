@@ -3217,3 +3217,238 @@ a:focus-visible {
     white-space: pre-wrap;
     font-family: var(--font-mono);
 }
+
+/* ============================================================================
+   AUDIT QUEUE STATUS UI - Phase 1 Scaling
+   ============================================================================ */
+
+#queue-status {
+    display: none;
+    margin: var(--space-6) 0;
+}
+
+/* Queue Position Card */
+.queue-card {
+    background: var(--glass-bg);
+    border: 1px solid var(--accent-teal);
+    border-radius: var(--radius-lg);
+    padding: var(--space-6);
+    display: flex;
+    align-items: center;
+    gap: var(--space-5);
+    box-shadow: var(--glow-teal);
+    animation: fadeInQueue 0.3s ease-out;
+}
+
+@keyframes fadeInQueue {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.queue-icon {
+    font-size: 3rem;
+    animation: bounce 2s infinite;
+}
+
+.queue-info {
+    flex: 1;
+}
+
+.queue-info h3 {
+    font-size: var(--text-xl);
+    color: var(--accent-teal);
+    margin: 0 0 var(--space-3) 0;
+    background: var(--gradient-accent);
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.queue-position {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    margin: var(--space-2) 0;
+}
+
+.position-number {
+    font-size: 3rem;
+    font-weight: 800;
+    color: var(--accent-teal);
+    line-height: 1;
+    text-shadow: var(--glow-teal);
+}
+
+.position-label {
+    font-size: var(--text-lg);
+    color: var(--text-secondary);
+}
+
+.estimated-wait {
+    color: var(--text-tertiary);
+    font-size: var(--text-base);
+    margin-top: var(--space-2);
+}
+
+.estimated-wait strong {
+    color: var(--accent-teal);
+}
+
+.queue-stats {
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    margin-top: var(--space-2);
+}
+
+.queue-animation {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.queue-animation .pulse {
+    width: 24px;
+    height: 24px;
+    background: var(--accent-teal);
+    border-radius: 50%;
+    animation: queuePulse 2s infinite;
+    box-shadow: var(--glow-teal);
+}
+
+@keyframes queuePulse {
+    0% { 
+        transform: scale(1); 
+        opacity: 1;
+        box-shadow: 0 0 0 0 rgba(0, 209, 178, 0.4);
+    }
+    50% { 
+        transform: scale(1.2); 
+        opacity: 0.8;
+        box-shadow: 0 0 0 15px rgba(0, 209, 178, 0);
+    }
+    100% { 
+        transform: scale(1); 
+        opacity: 1;
+        box-shadow: 0 0 0 0 rgba(0, 209, 178, 0);
+    }
+}
+
+/* Processing Card */
+.processing-card {
+    background: linear-gradient(135deg, var(--glass-bg), rgba(0, 209, 178, 0.1));
+    border: 1px solid var(--accent-teal);
+    border-radius: var(--radius-lg);
+    padding: var(--space-8);
+    text-align: center;
+    box-shadow: var(--glow-teal);
+    animation: fadeInQueue 0.3s ease-out;
+}
+
+.processing-icon {
+    font-size: 4rem;
+    margin-bottom: var(--space-4);
+    animation: processingBounce 1s infinite;
+}
+
+@keyframes processingBounce {
+    0%, 100% { transform: translateY(0) scale(1); }
+    50% { transform: translateY(-10px) scale(1.1); }
+}
+
+.processing-info h3 {
+    font-size: var(--text-xl);
+    color: var(--text-primary);
+    margin: 0 0 var(--space-4) 0;
+}
+
+.processing-card .progress-bar {
+    background: var(--bg-secondary);
+    border-radius: var(--radius-full);
+    height: 12px;
+    overflow: hidden;
+    margin: var(--space-4) auto;
+    max-width: 400px;
+    border: 1px solid var(--glass-border);
+}
+
+.processing-card .progress-fill {
+    background: var(--gradient-accent);
+    height: 100%;
+    transition: width 0.5s ease;
+    border-radius: var(--radius-full);
+    position: relative;
+    box-shadow: 0 0 15px rgba(0, 209, 178, 0.5);
+}
+
+.processing-card .progress-fill::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+    animation: shimmer 1.5s infinite;
+}
+
+.processing-card .progress-text {
+    font-size: var(--text-sm);
+    color: var(--text-tertiary);
+    margin-top: var(--space-2);
+}
+
+/* Queue Status when multiple audits */
+.queue-multi-status {
+    display: flex;
+    gap: var(--space-4);
+    margin-top: var(--space-4);
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--glass-border);
+}
+
+.queue-multi-item {
+    flex: 1;
+    text-align: center;
+    padding: var(--space-3);
+    background: var(--bg-secondary);
+    border-radius: var(--radius-md);
+}
+
+.queue-multi-item .count {
+    font-size: var(--text-2xl);
+    font-weight: 700;
+    color: var(--accent-teal);
+}
+
+.queue-multi-item .label {
+    font-size: var(--text-xs);
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* Responsive queue UI */
+@media (max-width: 640px) {
+    .queue-card {
+        flex-direction: column;
+        text-align: center;
+    }
+    
+    .queue-position {
+        justify-content: center;
+    }
+    
+    .position-number {
+        font-size: 2.5rem;
+    }
+    
+    .queue-animation {
+        margin-top: var(--space-4);
+    }
+}

@@ -4,6 +4,243 @@
 const log = (label, ...args) => console.log(`[${label}]`, ...args, `time=${new Date().toISOString()}`);
 
 // ---------------------------------------------------------------------
+// AUDIT QUEUE TRACKER - Real-time queue position and status updates
+// ---------------------------------------------------------------------
+class AuditQueueTracker {
+    constructor() {
+        this.jobId = null;
+        this.ws = null;
+        this.onUpdate = null;
+        this.onComplete = null;
+        this.onError = null;
+        this.pollInterval = null;
+    }
+    
+    async submitAudit(formData, csrfToken) {
+        try {
+            const response = await fetch('/audit/submit', {
+                method: 'POST',
+                headers: { 'X-CSRFToken': csrfToken },
+                body: formData,
+                credentials: 'include'
+            });
+            
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.detail || 'Failed to submit audit');
+            }
+            
+            const data = await response.json();
+            this.jobId = data.job_id;
+            
+            log('QUEUE', `Audit submitted: job_id=${this.jobId}, position=${data.position}`);
+            
+            // Start WebSocket connection for real-time updates
+            this.connectWebSocket();
+            
+            // Fallback polling in case WebSocket fails
+            this.startPolling();
+            
+            return data;
+        } catch (error) {
+            log('QUEUE_ERROR', error.message);
+            throw error;
+        }
+    }
+    
+    connectWebSocket() {
+        if (!this.jobId) return;
+        
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${window.location.host}/ws/job/${this.jobId}`;
+        
+        try {
+            this.ws = new WebSocket(wsUrl);
+            
+            this.ws.onopen = () => {
+                log('QUEUE_WS', 'Connected to job status WebSocket');
+                // Stop polling since WebSocket is working
+                this.stopPolling();
+            };
+            
+            this.ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    this.handleStatusUpdate(data);
+                } catch (e) {
+                    log('QUEUE_WS', 'Failed to parse message:', e);
+                }
+            };
+            
+            this.ws.onerror = (error) => {
+                log('QUEUE_WS', 'WebSocket error, falling back to polling');
+                this.startPolling();
+            };
+            
+            this.ws.onclose = () => {
+                log('QUEUE_WS', 'WebSocket closed');
+            };
+            
+            // Keep-alive ping every 25 seconds
+            this.pingInterval = setInterval(() => {
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                    this.ws.send('ping');
+                }
+            }, 25000);
+            
+        } catch (e) {
+            log('QUEUE_WS', 'Failed to connect WebSocket:', e);
+            this.startPolling();
+        }
+    }
+    
+    startPolling() {
+        if (this.pollInterval) return; // Already polling
+        
+        this.pollInterval = setInterval(async () => {
+            if (!this.jobId) return;
+            
+            try {
+                const response = await fetch(`/audit/status/${this.jobId}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    this.handleStatusUpdate(data);
+                }
+            } catch (e) {
+                log('QUEUE_POLL', 'Polling error:', e);
+            }
+        }, 3000); // Poll every 3 seconds
+    }
+    
+    stopPolling() {
+        if (this.pollInterval) {
+            clearInterval(this.pollInterval);
+            this.pollInterval = null;
+        }
+    }
+    
+    handleStatusUpdate(data) {
+        log('QUEUE_STATUS', `Status: ${data.status}, Position: ${data.position}, Phase: ${data.current_phase}`);
+        
+        // Call user-provided update handler
+        if (this.onUpdate) {
+            this.onUpdate(data);
+        }
+        
+        switch (data.status) {
+            case 'queued':
+                this.showQueuePosition(data);
+                break;
+            case 'processing':
+                this.showProcessing(data);
+                break;
+            case 'completed':
+                this.stopPolling();
+                this.disconnect();
+                if (this.onComplete) {
+                    this.onComplete(data.result);
+                }
+                break;
+            case 'failed':
+                this.stopPolling();
+                this.disconnect();
+                if (this.onError) {
+                    this.onError(data.error);
+                }
+                break;
+        }
+    }
+    
+    showQueuePosition(data) {
+        const queueUI = document.getElementById('queue-status');
+        if (!queueUI) return;
+        
+        const waitMinutes = Math.ceil(data.estimated_wait_seconds / 60);
+        const waitText = waitMinutes < 1 ? 'Less than a minute' : 
+                         waitMinutes === 1 ? '~1 minute' : `~${waitMinutes} minutes`;
+        
+        queueUI.innerHTML = `
+            <div class="queue-card">
+                <div class="queue-icon">⏳</div>
+                <div class="queue-info">
+                    <h3>In Queue</h3>
+                    <div class="queue-position">
+                        <span class="position-number">${data.position}</span>
+                        <span class="position-label">${data.position === 1 ? "You're next!" : 'position in line'}</span>
+                    </div>
+                    <div class="estimated-wait">
+                        Estimated wait: <strong>${waitText}</strong>
+                    </div>
+                    <div class="queue-stats">
+                        ${data.queue_length} in queue • ${data.processing_count} processing
+                    </div>
+                </div>
+                <div class="queue-animation">
+                    <div class="pulse"></div>
+                </div>
+            </div>
+        `;
+        queueUI.style.display = 'block';
+    }
+    
+    showProcessing(data) {
+        const queueUI = document.getElementById('queue-status');
+        if (!queueUI) return;
+        
+        const phases = {
+            'slither': { icon: '🔍', label: 'Running Slither Analysis', progress: 10 },
+            'mythril': { icon: '🧠', label: 'Running Mythril Symbolic Analysis', progress: 25 },
+            'echidna': { icon: '🧪', label: 'Running Echidna Fuzzing', progress: 40 },
+            'grok': { icon: '🤖', label: 'AI Analysis & Report Generation', progress: 60 },
+            'finalizing': { icon: '✨', label: 'Finalizing Report', progress: 90 },
+            'complete': { icon: '✅', label: 'Complete!', progress: 100 }
+        };
+        
+        const currentPhase = phases[data.current_phase] || { icon: '⚡', label: 'Processing...', progress: data.progress_percent || 50 };
+        
+        queueUI.innerHTML = `
+            <div class="processing-card">
+                <div class="processing-icon">${currentPhase.icon}</div>
+                <div class="processing-info">
+                    <h3>${currentPhase.label}</h3>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${currentPhase.progress}%"></div>
+                    </div>
+                    <div class="progress-text">${currentPhase.progress}% complete</div>
+                </div>
+            </div>
+        `;
+        queueUI.style.display = 'block';
+    }
+    
+    hideQueueUI() {
+        const queueUI = document.getElementById('queue-status');
+        if (queueUI) {
+            queueUI.style.display = 'none';
+        }
+    }
+    
+    disconnect() {
+        this.stopPolling();
+        
+        if (this.pingInterval) {
+            clearInterval(this.pingInterval);
+            this.pingInterval = null;
+        }
+        
+        if (this.ws) {
+            this.ws.close();
+            this.ws = null;
+        }
+        
+        this.jobId = null;
+    }
+}
+
+// Global queue tracker instance
+const queueTracker = new AuditQueueTracker();
+
+// ---------------------------------------------------------------------
 // UTILITY FUNCTIONS – Must be at top so they're available everywhere
 // ---------------------------------------------------------------------
 
@@ -1603,36 +1840,58 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           const formData = new FormData(auditForm);
 
           try {
-            const response = await fetch(`/audit?username=${encodeURIComponent(username)}`, {
-              method: "POST",
-              headers: { "X-CSRFToken": token },
-              body: formData,
-              credentials: "include"
-            });
-
-            if (!response.ok) {
-              const err = await response.json().catch(() => ({}));
-              if (err.session_url) {
-                logMessage("Redirecting to Stripe for upgrade");
-                window.location.href = err.session_url;
-                return;
+            // Use queue-based submission for better scalability
+            logMessage("Submitting audit to queue...");
+            
+            // Set up queue tracker callbacks
+            queueTracker.onUpdate = (status) => {
+              logMessage(`Queue status: ${status.status} - ${status.current_phase || 'waiting'}`);
+            };
+            
+            queueTracker.onComplete = async (result) => {
+              logMessage("Audit complete!");
+              queueTracker.hideQueueUI();
+              loading.classList.remove("show");
+              
+              // Store tier for button rendering
+              if (result.tier) {
+                window.currentAuditTier = result.tier;
               }
-              throw new Error(err.detail || "Audit failed");
+              handleAuditResponse(result);
+              await fetchTierData();
+            };
+            
+            queueTracker.onError = (error) => {
+              logMessage(`Audit failed: ${error}`);
+              queueTracker.hideQueueUI();
+              loading.classList.remove("show");
+              usageWarning.textContent = error || "Audit failed";
+              usageWarning.classList.add("error");
+            };
+            
+            // Submit to queue
+            const submitResult = await queueTracker.submitAudit(formData, token);
+            
+            // Show queue position UI
+            if (submitResult.status === 'queued') {
+              logMessage(`Queued at position ${submitResult.position}`);
+              queueTracker.showQueuePosition(submitResult);
             }
-
-            const data = await response.json();
-            // Store tier for button rendering (backup if tier is at top level)
-            if (data.tier) {
-              window.currentAuditTier = data.tier;
-            }
-            handleAuditResponse(data);
-            await fetchTierData();
+            
           } catch (err) {
             console.error(err);
+            queueTracker.hideQueueUI();
+            loading.classList.remove("show");
+            
+            // Check if it's an upgrade redirect
+            if (err.session_url) {
+              logMessage("Redirecting to Stripe for upgrade");
+              window.location.href = err.session_url;
+              return;
+            }
+            
             usageWarning.textContent = err.message || "Audit error";
             usageWarning.classList.add("error");
-          } finally {
-            loading.classList.remove("show");
           }
         });
       };

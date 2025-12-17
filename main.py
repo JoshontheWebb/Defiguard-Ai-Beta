@@ -118,6 +118,182 @@ from reportlab.lib.styles import getSampleStyleSheet
 from jinja2 import Environment, FileSystemLoader
 from compliance_checker import get_compliance_analysis, ComplianceChecker
 
+# ============================================================================
+# PHASE 1: IN-MEMORY AUDIT QUEUE SYSTEM
+# ============================================================================
+from dataclasses import dataclass, field
+from typing import Optional
+from enum import Enum
+
+class AuditStatus(str, Enum):
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+@dataclass
+class AuditJob:
+    """Represents a single audit job in the queue."""
+    job_id: str
+    username: str
+    filename: str
+    file_content: bytes
+    tier: str
+    contract_address: Optional[str] = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    status: AuditStatus = AuditStatus.QUEUED
+    position: int = 0
+    result: Optional[dict] = None
+    error: Optional[str] = None
+    current_phase: Optional[str] = None  # For progress tracking
+    progress_percent: int = 0
+
+class AuditQueue:
+    """
+    In-memory queue for managing concurrent audit requests.
+    Phase 1 implementation - handles ~50 audits/hour with 2GB RAM.
+    """
+    def __init__(self, max_concurrent: int = 1):
+        self.queue: asyncio.Queue[AuditJob] = asyncio.Queue()
+        self.jobs: dict[str, AuditJob] = {}
+        self.processing: set[str] = set()
+        self.max_concurrent = max_concurrent
+        self.lock = asyncio.Lock()
+        self._processor_task: Optional[asyncio.Task] = None
+        logger.info(f"[QUEUE] AuditQueue initialized with max_concurrent={max_concurrent}")
+    
+    async def submit(self, username: str, file_content: bytes, 
+                     filename: str, tier: str, contract_address: Optional[str] = None) -> AuditJob:
+        """Submit a new audit job to the queue."""
+        job = AuditJob(
+            job_id=str(uuid.uuid4()),
+            username=username,
+            file_content=file_content,
+            filename=filename,
+            tier=tier,
+            contract_address=contract_address,
+            position=self.queue.qsize() + len(self.processing) + 1
+        )
+        
+        async with self.lock:
+            self.jobs[job.job_id] = job
+            await self.queue.put(job)
+        
+        logger.info(f"[QUEUE] Job {job.job_id[:8]}... submitted for {username}, position {job.position}, queue size: {self.queue.qsize()}")
+        return job
+    
+    async def get_position(self, job_id: str) -> int:
+        """Get current queue position for a job."""
+        job = self.jobs.get(job_id)
+        if not job:
+            return -1
+        if job.status == AuditStatus.PROCESSING:
+            return 0
+        if job.status in (AuditStatus.COMPLETED, AuditStatus.FAILED):
+            return -1
+        
+        # Count jobs ahead in queue
+        position = 1
+        for jid, j in self.jobs.items():
+            if j.status == AuditStatus.QUEUED and j.created_at < job.created_at:
+                position += 1
+        return position
+    
+    async def get_status(self, job_id: str) -> dict:
+        """Get full status of a job."""
+        job = self.jobs.get(job_id)
+        if not job:
+            return {"error": "Job not found", "status": "not_found"}
+        
+        position = await self.get_position(job_id)
+        
+        # Estimate wait time (avg 60s per audit)
+        estimated_wait = max(0, (position - 1) * 60) if position > 0 else 0
+        
+        return {
+            "job_id": job.job_id,
+            "status": job.status.value,
+            "position": position,
+            "queue_length": self.queue.qsize(),
+            "processing_count": len(self.processing),
+            "created_at": job.created_at.isoformat(),
+            "current_phase": job.current_phase,
+            "progress_percent": job.progress_percent,
+            "estimated_wait_seconds": estimated_wait,
+            "result": job.result if job.status == AuditStatus.COMPLETED else None,
+            "error": job.error if job.status == AuditStatus.FAILED else None
+        }
+    
+    async def update_phase(self, job_id: str, phase: str, progress: int):
+        """Update the current processing phase for UI feedback."""
+        if job_id in self.jobs:
+            self.jobs[job_id].current_phase = phase
+            self.jobs[job_id].progress_percent = progress
+            logger.debug(f"[QUEUE] Job {job_id[:8]}... phase: {phase} ({progress}%)")
+    
+    async def process_next(self) -> Optional[AuditJob]:
+        """Get next job from queue if capacity available."""
+        if len(self.processing) >= self.max_concurrent:
+            return None
+        
+        try:
+            job = await asyncio.wait_for(self.queue.get(), timeout=0.1)
+            job.status = AuditStatus.PROCESSING
+            self.processing.add(job.job_id)
+            logger.info(f"[QUEUE] Job {job.job_id[:8]}... started processing")
+            return job
+        except asyncio.TimeoutError:
+            return None
+    
+    async def complete(self, job_id: str, result: dict):
+        """Mark job as completed with results."""
+        if job_id in self.jobs:
+            self.jobs[job_id].status = AuditStatus.COMPLETED
+            self.jobs[job_id].result = result
+            self.jobs[job_id].progress_percent = 100
+            self.jobs[job_id].current_phase = "complete"
+            self.processing.discard(job_id)
+            logger.info(f"[QUEUE] Job {job_id[:8]}... completed successfully")
+    
+    async def fail(self, job_id: str, error: str):
+        """Mark job as failed with error."""
+        if job_id in self.jobs:
+            self.jobs[job_id].status = AuditStatus.FAILED
+            self.jobs[job_id].error = error
+            self.jobs[job_id].current_phase = "failed"
+            self.processing.discard(job_id)
+            logger.error(f"[QUEUE] Job {job_id[:8]}... failed: {error}")
+    
+    def get_stats(self) -> dict:
+        """Get queue statistics for monitoring."""
+        return {
+            "queued": sum(1 for j in self.jobs.values() if j.status == AuditStatus.QUEUED),
+            "processing": len(self.processing),
+            "completed": sum(1 for j in self.jobs.values() if j.status == AuditStatus.COMPLETED),
+            "failed": sum(1 for j in self.jobs.values() if j.status == AuditStatus.FAILED),
+            "total": len(self.jobs),
+            "max_concurrent": self.max_concurrent
+        }
+    
+    def cleanup_old_jobs(self, max_age_hours: int = 1):
+        """Remove completed/failed jobs older than max_age_hours."""
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+        to_remove = [
+            jid for jid, job in self.jobs.items()
+            if job.status in (AuditStatus.COMPLETED, AuditStatus.FAILED)
+            and job.created_at < cutoff
+        ]
+        for jid in to_remove:
+            del self.jobs[jid]
+        if to_remove:
+            logger.info(f"[QUEUE] Cleaned up {len(to_remove)} old jobs")
+
+# Initialize global audit queue (1 concurrent for 2GB RAM)
+audit_queue = AuditQueue(max_concurrent=1)
+
+# WebSocket connections for job status updates
+active_job_websockets: dict[str, list[WebSocket]] = {}
+
 try:
     from celery import Celery  # type: ignore[reportMissingTypeStubs]
 except Exception:
@@ -142,6 +318,10 @@ jinja_env = Environment(loader=FileSystemLoader(templates_dir))
 # === FASTAPI APP INSTANCE (MUST COME BEFORE ANY @app ROUTES) ===
 app = FastAPI()
 
+# Trust proxy headers from Render (ensures HTTPS URLs are generated correctly)
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=["*"])
+
 # CRITICAL: Session middleware for Auth0
 _secret_key = os.getenv("APP_SECRET_KEY")
 if not _secret_key:
@@ -164,7 +344,8 @@ app.add_middleware(
         "http://127.0.0.1:8000",
         "http://localhost:8000",
         "https://defiguard-ai-fresh-private-test.onrender.com",
-        "https://defiguard-ai-fresh-private.onrender.com"
+        "https://defiguard-ai-fresh-private.onrender.com",
+        "https://defiguard-ai-beta.onrender.com"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -465,7 +646,20 @@ async def lifespan(app: FastAPI):
     global client, w3
     client, w3 = initialize_client()
     
+    # Start background queue processor
+    processor_task = asyncio.create_task(process_audit_queue())
+    logger.info("[QUEUE] Background audit queue processor started")
+    
+    # Start periodic cleanup task
+    cleanup_task = asyncio.create_task(periodic_queue_cleanup())
+    logger.info("[QUEUE] Periodic cleanup task started")
+    
     yield  # App running
+    
+    # Cleanup on shutdown
+    processor_task.cancel()
+    cleanup_task.cancel()
+    logger.info("[QUEUE] Background tasks cancelled")
 
 from fastapi import Request
 
@@ -3427,6 +3621,421 @@ def summarize_context(context: str) -> str:
     if len(context) > 5000:
         return context[:5000] + " ... summarized top findings"
     return context
+
+# ============================================================================
+# QUEUE PROCESSING SYSTEM
+# ============================================================================
+
+async def process_audit_queue():
+    """Background task that continuously processes the audit queue."""
+    logger.info("[QUEUE_PROCESSOR] Starting background queue processor")
+    
+    while True:
+        try:
+            job = await audit_queue.process_next()
+            if job:
+                try:
+                    # Process the audit
+                    result = await execute_queued_audit(job)
+                    await audit_queue.complete(job.job_id, result)
+                    
+                    # Notify WebSocket subscribers
+                    await notify_job_subscribers(job.job_id, {
+                        "status": "completed",
+                        "result": result
+                    })
+                    
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.exception(f"[QUEUE_PROCESSOR] Audit failed for job {job.job_id[:8]}...")
+                    await audit_queue.fail(job.job_id, error_msg)
+                    
+                    # Notify WebSocket subscribers
+                    await notify_job_subscribers(job.job_id, {
+                        "status": "failed",
+                        "error": error_msg
+                    })
+            else:
+                # No jobs available, wait before checking again
+                await asyncio.sleep(1)
+                
+        except asyncio.CancelledError:
+            logger.info("[QUEUE_PROCESSOR] Queue processor cancelled")
+            break
+        except Exception as e:
+            logger.error(f"[QUEUE_PROCESSOR] Unexpected error: {e}")
+            await asyncio.sleep(5)  # Wait before retrying
+
+
+async def periodic_queue_cleanup():
+    """Periodically clean up old completed/failed jobs."""
+    while True:
+        try:
+            await asyncio.sleep(3600)  # Every hour
+            audit_queue.cleanup_old_jobs(max_age_hours=1)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"[QUEUE_CLEANUP] Error: {e}")
+
+
+async def notify_job_subscribers(job_id: str, data: dict):
+    """Send update to all WebSocket subscribers for a job."""
+    if job_id in active_job_websockets:
+        dead_connections = []
+        for ws in active_job_websockets[job_id]:
+            try:
+                if ws.application_state == WebSocketState.CONNECTED:
+                    await ws.send_json(data)
+            except Exception:
+                dead_connections.append(ws)
+        
+        # Clean up dead connections
+        for ws in dead_connections:
+            active_job_websockets[job_id].remove(ws)
+        
+        if not active_job_websockets[job_id]:
+            del active_job_websockets[job_id]
+
+
+async def execute_queued_audit(job: AuditJob) -> dict:
+    """
+    Execute a queued audit job. This is the core audit logic extracted
+    for queue-based processing.
+    """
+    from io import BytesIO
+    
+    username = job.username
+    file_content = job.file_content
+    filename = job.filename
+    tier = job.tier
+    contract_address = job.contract_address
+    
+    # Create temp file
+    temp_id = str(uuid.uuid4())
+    temp_dir = os.path.join(DATA_DIR, "temp_files")
+    os.makedirs(temp_dir, exist_ok=True)
+    temp_path = os.path.join(temp_dir, f"{temp_id}.sol")
+    
+    try:
+        with open(temp_path, "wb") as f:
+            f.write(file_content)
+        
+        file_size = len(file_content)
+        code_str = file_content.decode("utf-8")
+        
+        # Phase 1: Static Analysis
+        await audit_queue.update_phase(job.job_id, "slither", 10)
+        await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "slither", "progress": 10})
+        
+        slither_task = asyncio.create_task(asyncio.to_thread(analyze_slither, temp_path))
+        
+        # Phase 2: Mythril (parallel with Slither completion)
+        await audit_queue.update_phase(job.job_id, "mythril", 25)
+        await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "mythril", "progress": 25})
+        
+        mythril_task = asyncio.create_task(asyncio.to_thread(run_mythril, temp_path))
+        
+        # Phase 3: Echidna (if enabled)
+        tier_for_flags = tier
+        tier_flags_map = {"beginner": "starter", "diamond": "enterprise"}
+        tier_for_flags = tier_flags_map.get(tier_for_flags, tier_for_flags)
+        fuzzing_enabled = usage_tracker.feature_flags.get(tier_for_flags, {}).get("fuzzing", False)
+        
+        echidna_task = None
+        if fuzzing_enabled:
+            await audit_queue.update_phase(job.job_id, "echidna", 40)
+            await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "echidna", "progress": 40})
+            echidna_task = asyncio.create_task(asyncio.to_thread(run_echidna, temp_path))
+        
+        # Wait for all analysis tasks
+        if echidna_task:
+            results = await asyncio.gather(slither_task, mythril_task, echidna_task, return_exceptions=True)
+            slither_findings, mythril_results, fuzzing_results = results
+        else:
+            results = await asyncio.gather(slither_task, mythril_task, return_exceptions=True)
+            slither_findings, mythril_results = results
+            fuzzing_results = []
+        
+        # Handle exceptions
+        if isinstance(slither_findings, Exception):
+            logger.error(f"Slither failed: {slither_findings}")
+            slither_findings = []
+        if isinstance(mythril_results, Exception):
+            logger.error(f"Mythril failed: {mythril_results}")
+            mythril_results = []
+        if isinstance(fuzzing_results, Exception):
+            logger.error(f"Echidna failed: {fuzzing_results}")
+            fuzzing_results = []
+        
+        # Build context
+        context = json.dumps([f if isinstance(f, dict) else getattr(f, "__dict__", str(f)) for f in slither_findings]).replace('"', '\"') if slither_findings else "No static issues found"
+        context = summarize_context(context)
+        
+        # Pre-calculate metrics
+        lines_of_code = len([line for line in code_str.split('\n') if line.strip() and not line.strip().startswith('//')])
+        functions_count = code_str.count('function ') + code_str.count('constructor(')
+        complexity_keywords = ['if', 'for', 'while', 'case', 'catch', '&&', '||', '?']
+        complexity_score = sum(code_str.count(keyword) for keyword in complexity_keywords) / max(functions_count, 1)
+        complexity_score = min(round(complexity_score, 1), 10.0)
+        
+        # Phase 4: AI Analysis
+        await audit_queue.update_phase(job.job_id, "grok", 60)
+        await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "grok", "progress": 60})
+        
+        # Compliance pre-scan
+        compliance_scan = {}
+        try:
+            compliance_scan = get_compliance_analysis(code_str, contract_type="defi")
+        except Exception as e:
+            logger.warning(f"[COMPLIANCE] Pre-scan failed: {e}")
+            compliance_scan = {"error": str(e)}
+        
+        details = "Uploaded Solidity code for analysis."
+        if contract_address:
+            details += f" Contract address: {contract_address}"
+        
+        report: dict = {}
+        
+        try:
+            if not os.getenv("GROK_API_KEY"):
+                raise Exception("GROK_API_KEY not set")
+            
+            prompt = PROMPT_TEMPLATE.format(
+                context=context,
+                fuzzing_results=json.dumps(fuzzing_results),
+                code=code_str,
+                details=details,
+                tier=tier_for_flags,
+                contract_type="defi",
+                compliance_scan=json.dumps(compliance_scan, indent=2)
+            )
+            
+            response = client.chat.completions.create(
+                model="grok-4-1-fast-reasoning",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                stream=False,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "defi_audit_report",
+                        "strict": True,
+                        "schema": AUDIT_SCHEMA
+                    }
+                }
+            )
+            
+            raw_response = response.choices[0].message.content or ""
+            audit_json = json.loads(raw_response)
+            
+            # Calculate severity counts if missing
+            if "critical_count" not in audit_json or audit_json.get("critical_count") is None:
+                issues = audit_json.get("issues", [])
+                audit_json["critical_count"] = sum(1 for i in issues if i.get("severity", "").lower() == "critical")
+                audit_json["high_count"] = sum(1 for i in issues if i.get("severity", "").lower() == "high")
+                audit_json["medium_count"] = sum(1 for i in issues if i.get("severity", "").lower() == "medium")
+                audit_json["low_count"] = sum(1 for i in issues if i.get("severity", "").lower() == "low")
+            
+            # Override metrics
+            audit_json["code_quality_metrics"] = {
+                "lines_of_code": lines_of_code,
+                "functions_count": functions_count,
+                "complexity_score": complexity_score
+            }
+            
+            # Add fuzzing results for enterprise
+            if tier_for_flags in ["enterprise", "diamond"]:
+                audit_json["fuzzing_results"] = fuzzing_results
+            
+            report = audit_json
+            
+        except Exception as e:
+            logger.error(f"Grok analysis failed: {e}")
+            fallback_issues = mythril_results + [
+                {"type": d.get("name", "Slither finding"), "severity": "Medium", "description": str(d.get("details", "N/A")), "fix": "Manual review required"}
+                for d in (slither_findings or [])
+            ]
+            
+            report = {
+                "risk_score": "Unknown (Grok failed)",
+                "critical_count": sum(1 for i in fallback_issues if i.get("severity", "").lower() == "critical"),
+                "high_count": sum(1 for i in fallback_issues if i.get("severity", "").lower() == "high"),
+                "medium_count": sum(1 for i in fallback_issues if i.get("severity", "").lower() == "medium"),
+                "low_count": sum(1 for i in fallback_issues if i.get("severity", "").lower() == "low"),
+                "issues": fallback_issues,
+                "predictions": [],
+                "recommendations": ["Grok analysis unavailable – review static analysis results above"],
+                "error": str(e)
+            }
+        
+        # Phase 5: Finalization
+        await audit_queue.update_phase(job.job_id, "finalizing", 90)
+        await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "finalizing", "progress": 90})
+        
+        # Apply free tier filtering
+        if tier == "free":
+            report = filter_issues_for_free_tier(report, tier)
+        
+        return {
+            "report": report,
+            "risk_score": str(report.get("risk_score", "N/A")),
+            "overage_cost": None,
+            "tier": tier
+        }
+        
+    finally:
+        # Cleanup temp file
+        try:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+        except Exception as e:
+            logger.error(f"Failed to delete temp file: {e}")
+
+
+# ============================================================================
+# QUEUE API ENDPOINTS
+# ============================================================================
+
+@app.post("/audit/submit")
+async def submit_audit_to_queue(
+    request: Request,
+    file: UploadFile = File(...),
+    contract_address: str = Query(None),
+    username: str = Query(None),
+    db: Session = Depends(get_db)
+) -> dict:
+    """
+    Submit an audit to the queue. Returns immediately with job_id.
+    Client should then poll /audit/status/{job_id} or connect to WebSocket.
+    """
+    await verify_csrf_token(request)
+    
+    session_username = request.session.get("username")
+    userinfo = request.session.get("userinfo")
+    session_email = userinfo.get("email") if userinfo else None
+    
+    effective_username = username or session_username or session_email or "guest"
+    
+    # Get user tier
+    user = None
+    tier = "free"
+    if effective_username != "guest":
+        user = db.query(User).filter(
+            (User.username == effective_username) |
+            (User.email == effective_username)
+        ).first()
+        if user:
+            tier = user.tier
+    
+    # Read file
+    code_bytes = await file.read()
+    file_size = len(code_bytes)
+    
+    if file_size == 0:
+        raise HTTPException(status_code=400, detail="Empty file uploaded")
+    
+    # Check file size limits
+    size_limit = usage_tracker.size_limits.get(tier, 500 * 1024)
+    if file_size > size_limit and tier not in ["enterprise", "diamond"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File size ({file_size / 1024:.1f}KB) exceeds {tier} tier limit ({size_limit / 1024:.1f}KB). Upgrade to continue."
+        )
+    
+    # Submit to queue
+    job = await audit_queue.submit(
+        username=effective_username,
+        file_content=code_bytes,
+        filename=file.filename or "contract.sol",
+        tier=tier,
+        contract_address=contract_address
+    )
+    
+    # Get initial status
+    status = await audit_queue.get_status(job.job_id)
+    
+    logger.info(f"[QUEUE_SUBMIT] Job {job.job_id[:8]}... submitted by {effective_username}, position: {status['position']}")
+    
+    return {
+        "job_id": job.job_id,
+        "status": "queued",
+        "position": status["position"],
+        "queue_length": status["queue_length"],
+        "estimated_wait_seconds": status["estimated_wait_seconds"],
+        "message": f"Audit queued successfully. Position: {status['position']}"
+    }
+
+
+@app.get("/audit/status/{job_id}")
+async def get_audit_status(job_id: str) -> dict:
+    """Get the current status of a queued audit job."""
+    status = await audit_queue.get_status(job_id)
+    
+    if status.get("status") == "not_found":
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return status
+
+
+@app.get("/audit/queue-stats")
+async def get_queue_stats() -> dict:
+    """Get current queue statistics (for monitoring/debugging)."""
+    return audit_queue.get_stats()
+
+
+@app.websocket("/ws/job/{job_id}")
+async def websocket_job_status(websocket: WebSocket, job_id: str):
+    """
+    WebSocket endpoint for real-time job status updates.
+    Client connects here after submitting an audit to receive live updates.
+    """
+    await websocket.accept()
+    
+    # Register this WebSocket for the job
+    if job_id not in active_job_websockets:
+        active_job_websockets[job_id] = []
+    active_job_websockets[job_id].append(websocket)
+    
+    logger.debug(f"[WS_JOB] Client connected for job {job_id[:8]}...")
+    
+    try:
+        # Send initial status
+        status = await audit_queue.get_status(job_id)
+        await websocket.send_json(status)
+        
+        # Keep connection alive until job completes or client disconnects
+        while True:
+            try:
+                # Wait for client messages (ping/pong or close)
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30)
+                
+                if data == "ping":
+                    await websocket.send_text("pong")
+                elif data == "status":
+                    status = await audit_queue.get_status(job_id)
+                    await websocket.send_json(status)
+                    
+            except asyncio.TimeoutError:
+                # Send periodic status update
+                status = await audit_queue.get_status(job_id)
+                await websocket.send_json(status)
+                
+                # If job is done, close connection
+                if status.get("status") in ["completed", "failed", "not_found"]:
+                    break
+                    
+    except Exception as e:
+        logger.debug(f"[WS_JOB] Connection closed for job {job_id[:8]}...: {e}")
+    finally:
+        # Unregister WebSocket
+        if job_id in active_job_websockets:
+            try:
+                active_job_websockets[job_id].remove(websocket)
+                if not active_job_websockets[job_id]:
+                    del active_job_websockets[job_id]
+            except ValueError:
+                pass
 
 @app.post("/audit", response_model=None)
 async def audit_contract(
