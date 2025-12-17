@@ -1940,68 +1940,19 @@ usage_tracker.set_tier("free")
 ## Section 3
 
 def run_echidna(temp_path: str) -> list[dict[str, str]]:
-    """Run Echidna fuzzing - binary or Docker."""
+    """Run Echidna fuzzing via Docker image binary."""
     logger.info(f"[ECHIDNA] Starting fuzzing for {temp_path}")
     
+    # Skip on Windows dev environment
     env = os.getenv('ENV', 'dev')
     if env == 'dev' and platform.system() == 'Windows':
         logger.info("[ECHIDNA] Skipped in Windows dev env")
         return [{"vulnerability": "Echidna unavailable", "description": "Skipped in dev"}]
     
-    # Try binary first (Render) - with explicit PATH
-    echidna_paths = [
-        "/opt/render/project/.local/bin/echidna",  # Render production
-        "/usr/local/bin/echidna",                  # System-wide
-        "echidna"                                   # PATH fallback
-    ]
+    # Docker environment: Echidna is in PATH
+    echidna_cmd = "echidna"
     
-    logger.info(f"[ECHIDNA] Checking paths: {echidna_paths}")
-    logger.info(f"[ECHIDNA] Current PATH: {os.environ.get('PATH', 'NOT SET')}")
-    
-    echidna_cmd = None
-    for path in echidna_paths:
-        logger.debug(f"[ECHIDNA] Testing path: {path}")
-        if path == "echidna":
-            # Check if in PATH
-            try:
-                which_result = subprocess.run(["which", "echidna"], capture_output=True, text=True, timeout=5)
-                if which_result.returncode == 0:
-                    echidna_cmd = path
-                    logger.info(f"[ECHIDNA] ✅ Found Echidna in PATH: {which_result.stdout.strip()}")
-                    break
-                else:
-                    logger.debug(f"[ECHIDNA] 'which echidna' returned empty")
-            except Exception as e:
-                logger.debug(f"[ECHIDNA] 'which echidna' failed: {e}")
-        elif os.path.exists(path):
-            echidna_cmd = path
-            logger.info(f"[ECHIDNA] ✅ Found Echidna at: {path}")
-            # Verify it's executable
-            if os.access(path, os.X_OK):
-                logger.info(f"[ECHIDNA] Binary is executable")
-            else:
-                logger.error(f"[ECHIDNA] ❌ Binary exists but is NOT executable!")
-            break
-        else:
-            logger.debug(f"[ECHIDNA] Path does not exist: {path}")
-    
-    if not echidna_cmd:
-        logger.error("[ECHIDNA] ❌ Binary not found in any expected location")
-        logger.error(f"[ECHIDNA] Checked paths: {echidna_paths}")
-        logger.error(f"[ECHIDNA] Directory listing of /opt/render/project/.local/bin/:")
-        try:
-            bin_dir = "/opt/render/project/.local/bin"
-            if os.path.exists(bin_dir):
-                files = os.listdir(bin_dir)
-                logger.error(f"[ECHIDNA] Files in bin: {files}")
-            else:
-                logger.error(f"[ECHIDNA] Directory does not exist: {bin_dir}")
-        except Exception as e:
-            logger.error(f"[ECHIDNA] Failed to list directory: {e}")
-        
-        return [{"vulnerability": "Echidna unavailable", "description": "Binary not found in expected locations"}]
-    
-    logger.info(f"[ECHIDNA] Using binary: {echidna_cmd}")
+    logger.info(f"[ECHIDNA] Using Echidna from Docker image PATH")
     
     try:
         logger.info(f"[ECHIDNA] Running command: {echidna_cmd} {temp_path} --test-mode assertion")
@@ -3325,19 +3276,14 @@ def run_certora(temp_path: str) -> list[dict[str, str]]:
     return [{"rule": "Sample rule", "status": "Passed (dummy)"}]
 
 def analyze_slither(temp_path: str) -> list[dict[str, Any]]:
-    """Run Slither with installed solc, skip gracefully if missing."""
+    """Run Slither via Docker image (solc pre-installed)."""
     if not os.path.exists(temp_path):
         logger.error(f"Slither failed: file not found at {temp_path}")
         return []
     
     try:
-        # Check if solc is available
-        try:
-            subprocess.run(["solc", "--version"], check=True, capture_output=True, text=True)
-        except FileNotFoundError:
-            logger.info("Slither skipped: solc not installed on this system")
-            return [{"name": "Slither unavailable", "details": "solc compiler not installed"}]
-        
+        # Docker environment: solc is pre-installed in Echidna image
+        logger.info("Starting Slither analysis (Docker environment)")
         sl = Slither(temp_path, solc="solc")
         detection_results = sl.run_detectors()
         findings = [det for dets in detection_results for det in dets if det]
