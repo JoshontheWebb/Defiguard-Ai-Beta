@@ -1941,9 +1941,11 @@ usage_tracker.set_tier("free")
 
 def run_echidna(temp_path: str) -> list[dict[str, str]]:
     """Run Echidna fuzzing - binary or Docker."""
+    logger.info(f"[ECHIDNA] Starting fuzzing for {temp_path}")
+    
     env = os.getenv('ENV', 'dev')
     if env == 'dev' and platform.system() == 'Windows':
-        logger.info("Echidna skipped in Windows dev env")
+        logger.info("[ECHIDNA] Skipped in Windows dev env")
         return [{"vulnerability": "Echidna unavailable", "description": "Skipped in dev"}]
     
     # Try binary first (Render) - with explicit PATH
@@ -1953,24 +1955,71 @@ def run_echidna(temp_path: str) -> list[dict[str, str]]:
         "echidna"                                   # PATH fallback
     ]
     
+    logger.info(f"[ECHIDNA] Checking paths: {echidna_paths}")
+    logger.info(f"[ECHIDNA] Current PATH: {os.environ.get('PATH', 'NOT SET')}")
+    
     echidna_cmd = None
     for path in echidna_paths:
-        if os.path.exists(path) or path == "echidna":
+        logger.debug(f"[ECHIDNA] Testing path: {path}")
+        if path == "echidna":
+            # Check if in PATH
+            try:
+                which_result = subprocess.run(["which", "echidna"], capture_output=True, text=True, timeout=5)
+                if which_result.returncode == 0:
+                    echidna_cmd = path
+                    logger.info(f"[ECHIDNA] ✅ Found Echidna in PATH: {which_result.stdout.strip()}")
+                    break
+                else:
+                    logger.debug(f"[ECHIDNA] 'which echidna' returned empty")
+            except Exception as e:
+                logger.debug(f"[ECHIDNA] 'which echidna' failed: {e}")
+        elif os.path.exists(path):
             echidna_cmd = path
-            logger.info(f"Found Echidna at: {path}")
+            logger.info(f"[ECHIDNA] ✅ Found Echidna at: {path}")
+            # Verify it's executable
+            if os.access(path, os.X_OK):
+                logger.info(f"[ECHIDNA] Binary is executable")
+            else:
+                logger.error(f"[ECHIDNA] ❌ Binary exists but is NOT executable!")
             break
+        else:
+            logger.debug(f"[ECHIDNA] Path does not exist: {path}")
     
     if not echidna_cmd:
-        logger.warning("Echidna binary not found in any expected location")
-        return [{"vulnerability": "Echidna unavailable", "description": "Binary not found"}]
+        logger.error("[ECHIDNA] ❌ Binary not found in any expected location")
+        logger.error(f"[ECHIDNA] Checked paths: {echidna_paths}")
+        logger.error(f"[ECHIDNA] Directory listing of /opt/render/project/.local/bin/:")
+        try:
+            bin_dir = "/opt/render/project/.local/bin"
+            if os.path.exists(bin_dir):
+                files = os.listdir(bin_dir)
+                logger.error(f"[ECHIDNA] Files in bin: {files}")
+            else:
+                logger.error(f"[ECHIDNA] Directory does not exist: {bin_dir}")
+        except Exception as e:
+            logger.error(f"[ECHIDNA] Failed to list directory: {e}")
+        
+        return [{"vulnerability": "Echidna unavailable", "description": "Binary not found in expected locations"}]
+    
+    logger.info(f"[ECHIDNA] Using binary: {echidna_cmd}")
     
     try:
+        logger.info(f"[ECHIDNA] Running command: {echidna_cmd} {temp_path} --test-mode assertion")
         result = subprocess.run(
             [echidna_cmd, temp_path, "--test-mode", "assertion"],
             capture_output=True,
             text=True,
             timeout=180
         )
+        
+        logger.info(f"[ECHIDNA] Return code: {result.returncode}")
+        logger.info(f"[ECHIDNA] STDOUT length: {len(result.stdout)} chars")
+        logger.info(f"[ECHIDNA] STDERR length: {len(result.stderr)} chars")
+        
+        if result.stdout:
+            logger.info(f"[ECHIDNA] STDOUT first 500 chars: {result.stdout[:500]}")
+        if result.stderr:
+            logger.warning(f"[ECHIDNA] STDERR first 500 chars: {result.stderr[:500]}")
         
         if result.returncode == 0 or result.stdout:
             logger.info(f"Echidna binary completed: {result.stdout[:200]}")
@@ -4011,7 +4060,7 @@ async def debug_my_stats(
             
             # Gamification stats
             "gamification": {
-                "total_audits": user.total_audits,
+            "total_audits": user.total_audits,
                 "total_issues_found": user.total_issues_found,
                 "total_critical_issues": user.total_critical_issues,
                 "total_high_issues": user.total_high_issues,
@@ -4082,6 +4131,73 @@ async def migrate_tiers(request: Request, db: Session = Depends(get_db), admin_k
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Migration failed: {str(e)}")
+@app.get("/debug/echidna-env")
+async def debug_echidna_env():
+    """Check Echidna installation and environment"""
+    import subprocess
+    
+    checks = {
+        "timestamp": datetime.now().isoformat(),
+        "env": os.getenv("ENV", "unknown"),
+        "path": os.environ.get("PATH", "NOT SET"),
+    }
+    
+    # Check binary locations
+    paths_to_check = [
+        "/opt/render/project/.local/bin/echidna",
+        "/usr/local/bin/echidna",
+        "/usr/bin/echidna"
+    ]
+    
+    checks["paths"] = {}
+    for path in paths_to_check:
+        checks["paths"][path] = {
+            "exists": os.path.exists(path),
+            "is_file": os.path.isfile(path) if os.path.exists(path) else False,
+            "is_executable": os.access(path, os.X_OK) if os.path.exists(path) else False,
+            "size": os.path.getsize(path) if os.path.exists(path) else 0
+        }
+    
+    # Try 'which echidna'
+    try:
+        which_result = subprocess.run(["which", "echidna"], capture_output=True, text=True, timeout=5)
+        checks["which_echidna"] = {
+            "returncode": which_result.returncode,
+            "stdout": which_result.stdout.strip(),
+            "stderr": which_result.stderr.strip()
+        }
+    except Exception as e:
+        checks["which_echidna"] = {"error": str(e)}
+    
+    # List /opt/render/project/.local/bin/
+    try:
+        bin_dir = "/opt/render/project/.local/bin"
+        if os.path.exists(bin_dir):
+            checks["bin_directory"] = {
+                "exists": True,
+                "contents": os.listdir(bin_dir)
+            }
+        else:
+            checks["bin_directory"] = {"exists": False}
+    except Exception as e:
+        checks["bin_directory"] = {"error": str(e)}
+    
+    # Try running echidna --version
+    for path in ["/opt/render/project/.local/bin/echidna", "echidna"]:
+        try:
+            version_result = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=5)
+            checks[f"version_check_{path}"] = {
+                "returncode": version_result.returncode,
+                "stdout": version_result.stdout.strip(),
+                "stderr": version_result.stderr.strip()
+            }
+            break
+        except FileNotFoundError:
+            checks[f"version_check_{path}"] = {"error": "FileNotFoundError"}
+        except Exception as e:
+            checks[f"version_check_{path}"] = {"error": str(e)}
+    
+    return checks
 
 if __name__ == "__main__":
     import uvicorn
