@@ -1447,9 +1447,10 @@ PRO TIER ($149/mo):
   * Specific regulatory risks with mitigation strategies
 
 - CODE QUALITY METRICS (REQUIRED):
-  * lines_of_code: INTEGER - Exact count
-  * functions_count: INTEGER - Number of functions
-  * complexity_score: FLOAT (0.0-10.0) - Cyclomatic complexity
+  * lines_of_code: INTEGER - Count ALL non-empty, non-comment lines in the ENTIRE file
+  * functions_count: INTEGER - Count ALL function declarations in the ENTIRE file
+  * complexity_score: FLOAT (0.0-10.0) - Cyclomatic complexity across ENTIRE file
+  * CRITICAL: Do NOT limit metrics to a single contract - analyze the FULL file
 
 - DETAILED REMEDIATION ROADMAP:
   * Day-by-day fix schedule with priorities
@@ -3594,6 +3595,17 @@ async def audit_contract(
                 logger.error(f"On-chain code fetch failed: {e}")
                 await broadcast_audit_log(effective_username, "No deployed code found")
         
+        # Pre-calculate code metrics (don't rely on Grok)
+        lines_of_code = len([line for line in code_str.split('\n') if line.strip() and not line.strip().startswith('//')])
+        functions_count = code_str.count('function ') + code_str.count('constructor(')
+        
+        # Calculate cyclomatic complexity (simple heuristic)
+        complexity_keywords = ['if', 'for', 'while', 'case', 'catch', '&&', '||', '?']
+        complexity_score = sum(code_str.count(keyword) for keyword in complexity_keywords) / max(functions_count, 1)
+        complexity_score = min(round(complexity_score, 1), 10.0)
+        
+        logger.info(f"[METRICS] Calculated: {lines_of_code} LOC, {functions_count} functions, complexity {complexity_score}")
+        
         # Grok API call
         await broadcast_audit_log(effective_username, "Sending to Grok AI")
                 # Run compliance pre-scan
@@ -3671,6 +3683,19 @@ async def audit_contract(
                 audit_json["low_count"] = low_count
                 
                 logger.info(f"[GROK] Calculated severity counts: C={critical_count}, H={high_count}, M={medium_count}, L={low_count}")
+            
+            # Override code_quality_metrics with our accurate calculation
+            if "code_quality_metrics" in audit_json:
+                audit_json["code_quality_metrics"]["lines_of_code"] = lines_of_code
+                audit_json["code_quality_metrics"]["functions_count"] = functions_count
+                audit_json["code_quality_metrics"]["complexity_score"] = complexity_score
+            else:
+                audit_json["code_quality_metrics"] = {
+                    "lines_of_code": lines_of_code,
+                    "functions_count": functions_count,
+                    "complexity_score": complexity_score
+                }
+            logger.info(f"[METRICS] Overrode Grok metrics with accurate counts: {lines_of_code} LOC")
             
             # Verify Pro+ fields are present
             

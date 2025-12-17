@@ -2468,6 +2468,20 @@ a:focus-visible {
     font-family: 'JetBrains Mono', 'Fira Code', monospace;
     font-size: var(--text-sm);
     line-height: 1.6;
+    max-width: 100%;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    white-space: pre-wrap;
+}
+
+.code-snippet pre,
+.code-snippet code,
+.poc-code pre,
+.poc-code code {
+    max-width: 100%;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
 }
 
 .code-diff {
@@ -2633,6 +2647,9 @@ a:focus-visible {
     padding: var(--space-4);
     border-bottom: 1px solid var(--glass-border);
     vertical-align: top;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    max-width: 100%;
 }
 
 .issues-table-enhanced tr:last-child td {
@@ -2646,6 +2663,9 @@ a:focus-visible {
 .fix-cell {
     font-size: var(--text-sm);
     color: var(--text-secondary);
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    max-width: 400px;
 }
 
 .expand-cell {
@@ -2736,6 +2756,9 @@ a:focus-visible {
 
 #issue-details-modal .modal-body {
     padding: var(--space-6);
+    max-width: 100%;
+    overflow-x: hidden;
+    word-wrap: break-word;
 }
 
 #issue-details-modal .modal-body section {
@@ -2763,6 +2786,9 @@ a:focus-visible {
     margin-bottom: 0;
     color: var(--text-secondary);
     line-height: var(--leading-relaxed);
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    max-width: 100%;
 }
 
 /* Code comparison grid in modal */
