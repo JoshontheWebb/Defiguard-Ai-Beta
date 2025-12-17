@@ -1946,10 +1946,27 @@ def run_echidna(temp_path: str) -> list[dict[str, str]]:
         logger.info("Echidna skipped in Windows dev env")
         return [{"vulnerability": "Echidna unavailable", "description": "Skipped in dev"}]
     
-    # Try binary first (Render)
+    # Try binary first (Render) - with explicit PATH
+    echidna_paths = [
+        "/opt/render/project/.local/bin/echidna",  # Render production
+        "/usr/local/bin/echidna",                  # System-wide
+        "echidna"                                   # PATH fallback
+    ]
+    
+    echidna_cmd = None
+    for path in echidna_paths:
+        if os.path.exists(path) or path == "echidna":
+            echidna_cmd = path
+            logger.info(f"Found Echidna at: {path}")
+            break
+    
+    if not echidna_cmd:
+        logger.warning("Echidna binary not found in any expected location")
+        return [{"vulnerability": "Echidna unavailable", "description": "Binary not found"}]
+    
     try:
         result = subprocess.run(
-            ["echidna", temp_path, "--test-mode", "assertion"],
+            [echidna_cmd, temp_path, "--test-mode", "assertion"],
             capture_output=True,
             text=True,
             timeout=180

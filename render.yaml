@@ -23,20 +23,22 @@ services:
       echo "=========================================="
       echo "🔧 Installing Echidna fuzzer..."
       echo "=========================================="
-      curl -L https://github.com/crytic/echidna/releases/download/v2.2.1/echidna-2.2.1-Linux.tar.gz -o echidna.tar.gz
+      curl -L https://github.com/crytic/echidna/releases/download/v2.2.4/echidna-2.2.4-Linux.tar.gz -o echidna.tar.gz
       tar -xzf echidna.tar.gz
       chmod +x echidna
-      mkdir -p $HOME/.local/bin
-      mv echidna $HOME/.local/bin/
-      export PATH="$HOME/.local/bin:$PATH"
-      echo "Echidna installed: $(which echidna || echo 'NOT FOUND')"
+      mkdir -p /opt/render/project/.local/bin
+      mv echidna /opt/render/project/.local/bin/
+      ls -lah /opt/render/project/.local/bin/echidna
+      echo "✅ Echidna v2.2.4 installed to /opt/render/project/.local/bin/"
       
       echo "=========================================="
       echo "✅ Build complete!"
       echo "=========================================="
     
     startCommand: |
-      export PATH="$HOME/.local/bin:$PATH"
+      export PATH="/opt/render/project/.local/bin:$PATH"
+      echo "🔍 Verifying Echidna at runtime..."
+      which echidna && echidna --version || echo "⚠️ Echidna not found in PATH"
       /opt/render/project/src/.venv/bin/python -m gunicorn main:app --workers 1 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 120 --log-level info
     
     healthCheckPath: /
