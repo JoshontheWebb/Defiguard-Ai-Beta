@@ -1,11 +1,11 @@
 # Start with official Echidna image (includes Echidna + Slither + solc)
 FROM ghcr.io/crytic/echidna/echidna:latest
 
-# Install Python 3.13 and system dependencies
+# Install Python 3.12 (available in Ubuntu 24.04) and system dependencies
 RUN apt-get update && \
     apt-get install -y \
-        python3.13 \
-        python3.13-venv \
+        python3.12 \
+        python3.12-venv \
         python3-pip \
         libssl-dev \
         libffi-dev \
@@ -13,6 +13,9 @@ RUN apt-get update && \
         git && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+# Create symlink so 'python3' points to python3.12
+RUN ln -sf /usr/bin/python3.12 /usr/bin/python3
 
 # Set working directory
 WORKDIR /app
