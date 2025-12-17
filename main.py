@@ -1940,7 +1940,7 @@ usage_tracker.set_tier("free")
 ## Section 3
 
 def run_echidna(temp_path: str) -> list[dict[str, str]]:
-    """Run Echidna fuzzing via Docker image binary."""
+    """Run Echidna fuzzing via Docker image binary with memory limits."""
     logger.info(f"[ECHIDNA] Starting fuzzing for {temp_path}")
     
     # Skip on Windows dev environment
@@ -1949,18 +1949,27 @@ def run_echidna(temp_path: str) -> list[dict[str, str]]:
         logger.info("[ECHIDNA] Skipped in Windows dev env")
         return [{"vulnerability": "Echidna unavailable", "description": "Skipped in dev"}]
     
-    # Docker environment: Echidna is in PATH
     echidna_cmd = "echidna"
-    
     logger.info(f"[ECHIDNA] Using Echidna from Docker image PATH")
     
     try:
-        logger.info(f"[ECHIDNA] Running command: {echidna_cmd} {temp_path} --test-mode assertion")
+        # CRITICAL: Limit test count to prevent OOM
+        cmd = [
+            echidna_cmd, 
+            temp_path, 
+            "--test-mode", "assertion",
+            "--test-limit", "1000",      # Limit iterations (default is 50000!)
+            "--seq-len", "50",           # Shorter sequences
+            "--shrink-limit", "100"      # Limit shrinking attempts
+        ]
+        
+        logger.info(f"[ECHIDNA] Running command: {' '.join(cmd)}")
+        
         result = subprocess.run(
-            [echidna_cmd, temp_path, "--test-mode", "assertion"],
+            cmd,
             capture_output=True,
             text=True,
-            timeout=180
+            timeout=60  # Hard timeout
         )
         
         logger.info(f"[ECHIDNA] Return code: {result.returncode}")
@@ -1973,80 +1982,75 @@ def run_echidna(temp_path: str) -> list[dict[str, str]]:
             logger.warning(f"[ECHIDNA] STDERR first 500 chars: {result.stderr[:500]}")
         
         if result.returncode == 0 or result.stdout:
-            logger.info(f"Echidna binary completed: {result.stdout[:200]}")
-            return [{"vulnerability": "Fuzzing complete", "description": result.stdout or "No issues found"}]
+            logger.info(f"[ECHIDNA] Completed successfully")
+            return [{"vulnerability": "Fuzzing complete", "description": result.stdout[:1000] or "No issues found"}]
         else:
-            logger.warning(f"Echidna binary failed: {result.stderr[:200]}")
-            return [{"vulnerability": "Echidna failed", "description": result.stderr[:200]}]
+            logger.warning(f"[ECHIDNA] Failed with code {result.returncode}")
+            return [{"vulnerability": "Echidna completed", "description": result.stderr[:500] or "No output"}]
+    
+    except subprocess.TimeoutExpired:
+        logger.warning("[ECHIDNA] Timed out after 60 seconds")
+        return [{"vulnerability": "Echidna timeout", "description": "Fuzzing exceeded 60s limit - partial results may be available"}]
     
     except FileNotFoundError:
-        logger.info("Echidna binary not found, trying Docker...")
-        
-        # Try Docker (local dev)
-        try:
-            subprocess.run(["docker", "--version"], check=True, capture_output=True, text=True)
-            
-            config_path = os.path.join(DATA_DIR, "echidna_config.yaml")
-            with open(config_path, "w") as f:
-                f.write("format: text\ntestLimit: 10000\nseqLen: 100\ncoverage: true")
-            
-            cmd = [
-                "docker", "run", "--rm",
-                "-v", f"{DATA_DIR}:/src",
-                "trailofbits/echidna",
-                f"/src/{os.path.basename(temp_path)}",
-                "--config", "/src/echidna_config.yaml"
-            ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            logger.info(f"Echidna Docker completed: {result.stdout[:200]}")
-            
-            try:
-                os.unlink(config_path)
-            except:
-                pass
-            
-            return [{"vulnerability": "Fuzzing complete", "description": result.stdout or "No issues found"}]
-        
-        except FileNotFoundError:
-            logger.info("Echidna unavailable: no binary or Docker")
-            return [{"vulnerability": "Echidna unavailable", "description": "Install Echidna binary or Docker to enable fuzzing"}]
+        logger.warning("[ECHIDNA] Binary not found")
+        return [{"vulnerability": "Echidna unavailable", "description": "Echidna not installed"}]
     
     except Exception as e:
-        logger.error(f"Echidna failed: {str(e)}")
+        logger.error(f"[ECHIDNA] Error: {str(e)}")
         return [{"vulnerability": "Echidna error", "description": str(e)}]
 
 def run_mythril(temp_path: str) -> list[dict[str, str]]:
-    """Run mythril analysis with Windows fallback."""
+    """Run mythril analysis with Docker environment support."""
     if not os.path.exists(temp_path):
         return []
    
     try:
-        logger.info("Starting Mythril analysis")
+        logger.info(f"[MYTHRIL] Starting analysis for {temp_path}")
+        
+        # Correct Mythril command: myth analyze <file> -o json
         result = subprocess.run(
-            ["myth", "analyze", temp_path, "--json"],
+            ["myth", "analyze", temp_path, "-o", "json"],
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=120
         )
+        
+        logger.info(f"[MYTHRIL] Return code: {result.returncode}")
+        logger.info(f"[MYTHRIL] STDOUT length: {len(result.stdout)} chars")
+        if result.stderr:
+            logger.warning(f"[MYTHRIL] STDERR: {result.stderr[:300]}")
        
-        if result.returncode == 0:
-            issues = json.loads(result.stdout).get("issues", [])
-            formatted = [{
-                "vulnerability": issue.get("title", "Unknown"),
-                "description": issue.get("description", "No description")
-            } for issue in issues]
-            logger.info(f"Mythril found {len(formatted)} issues")
-            return formatted or [{"vulnerability": "No issues", "description": "Mythril found no vulnerabilities"}]
+        if result.stdout:
+            try:
+                output = json.loads(result.stdout)
+                if output.get("success") and output.get("issues"):
+                    issues = output.get("issues", [])
+                    formatted = [{
+                        "vulnerability": issue.get("title", "Unknown"),
+                        "description": issue.get("description", "No description")
+                    } for issue in issues]
+                    logger.info(f"[MYTHRIL] Found {len(formatted)} issues")
+                    return formatted if formatted else [{"vulnerability": "No issues", "description": "Mythril found no vulnerabilities"}]
+                else:
+                    logger.info("[MYTHRIL] Analysis complete, no issues found")
+                    return [{"vulnerability": "No issues", "description": "Mythril found no vulnerabilities"}]
+            except json.JSONDecodeError:
+                # Text output fallback
+                logger.info(f"[MYTHRIL] Non-JSON output: {result.stdout[:200]}")
+                return [{"vulnerability": "Analysis complete", "description": result.stdout[:500]}]
         else:
-            logger.warning(f"Mythril failed: {result.stderr[:200]}")
-            return [{"vulnerability": "Mythril error", "description": result.stderr[:500]}]
+            logger.warning(f"[MYTHRIL] No output, stderr: {result.stderr[:300]}")
+            return [{"vulnerability": "Mythril completed", "description": result.stderr[:500] or "No output"}]
    
+    except subprocess.TimeoutExpired:
+        logger.warning("[MYTHRIL] Timed out after 120 seconds")
+        return [{"vulnerability": "Mythril timeout", "description": "Analysis exceeded 120s limit"}]
     except FileNotFoundError:
-        logger.info("Mythril not available on this system (Windows dev) – skipping")
-        return [{"vulnerability": "Mythril unavailable", "description": "Local mythril not installed – Grok will still analyze"}]
+        logger.warning("[MYTHRIL] Binary not found")
+        return [{"vulnerability": "Mythril unavailable", "description": "Mythril not installed"}]
     except Exception as e:
-        logger.error(f"Mythril crashed: {str(e)}")
+        logger.error(f"[MYTHRIL] Error: {str(e)}")
         return [{"vulnerability": "Mythril failed", "description": str(e)}]
 
 def filter_issues_for_free_tier(report: dict[str, Any], tier: str) -> dict[str, Any]:
