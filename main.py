@@ -2719,6 +2719,25 @@ async def read_ui(
         logger.exception(f"Unexpected error in /ui: {e}")
         return HTMLResponse(content=f"<h1>Internal error: {str(e)}</h1>", status_code=500)
 
+
+@app.get("/queue-monitor", response_class=HTMLResponse)
+async def queue_monitor(request: Request):
+    """
+    Queue Monitor Dashboard - Shows real-time audit queue status by tier.
+    Publicly accessible for transparency about system load.
+    """
+    try:
+        template = jinja_env.get_template("queue-monitor.html")
+        html_content = template.render()
+        return HTMLResponse(content=html_content)
+    except FileNotFoundError:
+        logger.error(f"Queue monitor template not found: {os.path.abspath('templates/queue-monitor.html')}")
+        return HTMLResponse(content="<h1>Queue monitor not found. Check templates/queue-monitor.html.</h1>")
+    except Exception as e:
+        logger.exception(f"Unexpected error in /queue-monitor: {e}")
+        return HTMLResponse(content=f"<h1>Internal error: {str(e)}</h1>", status_code=500)
+
+
 @app.get("/auth", response_class=HTMLResponse)
 async def read_auth(request: Request):
     try:

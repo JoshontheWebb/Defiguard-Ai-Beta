@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeFiGuard AI - Queue Monitor</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <style>
+        /* Dashboard-specific styles */
+        .dashboard-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: var(--space-8);
+        }
+
+        .dashboard-header {
+            text-align: center;
+            margin-bottom: var(--space-10);
+        }
+
+        .dashboard-header h1 {
+            font-size: var(--text-4xl);
+            background: var(--gradient-accent);
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: var(--space-2);
+        }
+
+        .dashboard-header p {
+            color: var(--text-tertiary);
+            font-size: var(--text-lg);
+        }
+
+        .refresh-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: var(--space-2);
+            font-size: var(--text-sm);
+            color: var(--text-muted);
+            margin-top: var(--space-4);
+        }
+
+        .refresh-indicator .dot {
+            width: 8px;
+            height: 8px;
+            background: var(--success);
+            border-radius: 50%;
+            animation: blink 2s infinite;
+        }
+
+        @keyframes blink {
+            0%, 50%, 100% { opacity: 1; }
+            25%, 75% { opacity: 0.3; }
+        }
+
+        /* Stats grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: var(--space-6);
+            margin-bottom: var(--space-10);
+        }
+
+        .stat-card {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-xl);
+            padding: var(--space-6);
+            text-align: center;
+            transition: all var(--transition-base);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: var(--gradient-accent);
+            opacity: 0;
+            transition: opacity var(--transition-base);
+        }
+
+        .stat-card:hover {
+            border-color: var(--accent-teal);
+            transform: translateY(-4px);
+            box-shadow: var(--glow-teal);
+        }
+
+        .stat-card:hover::before {
+            opacity: 1;
+        }
+
+        .stat-icon {
+            font-size: 2.5rem;
+            margin-bottom: var(--space-3);
+        }
+
+        .stat-value {
+            font-size: var(--text-4xl);
+            font-weight: 800;
+            background: var(--gradient-accent);
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: var(--space-2);
+        }
+
+        .stat-label {
+            font-size: var(--text-sm);
+            color: var(--text-tertiary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .stat-card.processing .stat-value {
+            color: var(--warning);
+            background: linear-gradient(135deg, var(--warning) 0%, #fbbf24 100%);
+            background-clip: text;
+            -webkit-background-clip: text;
+        }
+
+        .stat-card.queued .stat-value {
+            background: linear-gradient(135deg, var(--accent-pink) 0%, var(--accent-teal) 100%);
+            background-clip: text;
+            -webkit-background-clip: text;
+        }
+
+        /* Tier breakdown section */
+        .tier-section {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-xl);
+            padding: var(--space-8);
+            margin-bottom: var(--space-8);
+        }
+
+        .tier-section h2 {
+            font-size: var(--text-2xl);
+            color: var(--accent-teal);
+            margin-bottom: var(--space-6);
+            display: flex;
+            align-items: center;
+            gap: var(--space-3);
+        }
+
+        .tier-bars {
+            display: flex;
+            flex-direction: column;
+            gap: var(--space-4);
+        }
+
+        .tier-bar-row {
+            display: flex;
+            align-items: center;
+            gap: var(--space-4);
+        }
+
+        .tier-bar-label {
+            width: 100px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            font-size: var(--text-sm);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .tier-bar-track {
+            flex: 1;
+            height: 32px;
+            background: var(--bg-secondary);
+            border-radius: var(--radius-full);
+            overflow: hidden;
+            border: 1px solid var(--glass-border);
+            position: relative;
+        }
+
+        .tier-bar-fill {
+            height: 100%;
+            border-radius: var(--radius-full);
+            transition: width 0.5s ease;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            padding-right: var(--space-3);
+            min-width: 40px;
+        }
+
+        .tier-bar-fill.enterprise {
+            background: linear-gradient(135deg, #a855f7, #ec4899);
+            box-shadow: 0 0 15px rgba(168, 85, 247, 0.4);
+        }
+
+        .tier-bar-fill.pro {
+            background: linear-gradient(135deg, var(--warning), #fbbf24);
+            box-shadow: 0 0 15px rgba(245, 158, 11, 0.4);
+        }
+
+        .tier-bar-fill.starter {
+            background: linear-gradient(135deg, var(--accent-teal), var(--accent-teal-light));
+            box-shadow: 0 0 15px rgba(0, 209, 178, 0.4);
+        }
+
+        .tier-bar-fill.free {
+            background: linear-gradient(135deg, #6b7280, #9ca3af);
+            box-shadow: 0 0 15px rgba(107, 114, 128, 0.4);
+        }
+
+        .tier-bar-count {
+            font-weight: 700;
+            font-size: var(--text-sm);
+            color: white;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+        }
+
+        .tier-bar-value {
+            width: 60px;
+            text-align: right;
+            font-size: var(--text-xl);
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        /* Activity feed */
+        .activity-section {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-xl);
+            padding: var(--space-8);
+            margin-bottom: var(--space-8);
+        }
+
+        .activity-section h2 {
+            font-size: var(--text-2xl);
+            color: var(--accent-teal);
+            margin-bottom: var(--space-6);
+            display: flex;
+            align-items: center;
+            gap: var(--space-3);
+        }
+
+        .activity-log {
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: var(--text-sm);
+            background: var(--bg-primary);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-lg);
+            padding: var(--space-4);
+        }
+
+        .activity-entry {
+            display: flex;
+            align-items: center;
+            gap: var(--space-3);
+            padding: var(--space-2) 0;
+            border-bottom: 1px solid var(--glass-border);
+            animation: slideIn 0.3s ease;
+        }
+
+        .activity-entry:last-child {
+            border-bottom: none;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        .activity-time {
+            color: var(--text-muted);
+            font-size: var(--text-xs);
+            white-space: nowrap;
+        }
+
+        .activity-icon {
+            font-size: var(--text-base);
+        }
+
+        .activity-message {
+            color: var(--text-secondary);
+            flex: 1;
+        }
+
+        .activity-message.success { color: var(--success); }
+        .activity-message.warning { color: var(--warning); }
+        .activity-message.error { color: var(--error); }
+
+        /* System health */
+        .health-section {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: var(--space-6);
+        }
+
+        .health-card {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-xl);
+            padding: var(--space-6);
+        }
+
+        .health-card h3 {
+            font-size: var(--text-lg);
+            color: var(--text-secondary);
+            margin-bottom: var(--space-4);
+            display: flex;
+            align-items: center;
+            gap: var(--space-2);
+        }
+
+        .health-status {
+            display: flex;
+            align-items: center;
+            gap: var(--space-3);
+            font-size: var(--text-xl);
+            font-weight: 600;
+        }
+
+        .health-status.healthy {
+            color: var(--success);
+        }
+
+        .health-status.warning {
+            color: var(--warning);
+        }
+
+        .health-status.critical {
+            color: var(--error);
+        }
+
+        .health-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        .health-indicator.healthy {
+            background: var(--success);
+            box-shadow: 0 0 10px var(--success);
+        }
+
+        .health-indicator.warning {
+            background: var(--warning);
+            box-shadow: 0 0 10px var(--warning);
+        }
+
+        .health-indicator.critical {
+            background: var(--error);
+            box-shadow: 0 0 10px var(--error);
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.2); opacity: 0.7; }
+        }
+
+        .health-details {
+            margin-top: var(--space-4);
+            padding-top: var(--space-4);
+            border-top: 1px solid var(--glass-border);
+            font-size: var(--text-sm);
+            color: var(--text-tertiary);
+        }
+
+        .health-details p {
+            margin-bottom: var(--space-2);
+        }
+
+        /* Back link */
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            gap: var(--space-2);
+            color: var(--text-tertiary);
+            font-size: var(--text-sm);
+            margin-bottom: var(--space-6);
+            transition: color var(--transition-base);
+            text-decoration: none;
+        }
+
+        .back-link:hover {
+            color: var(--accent-teal);
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .dashboard-container {
+                padding: var(--space-4);
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .tier-bar-label {
+                width: 70px;
+                font-size: var(--text-xs);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard-container">
+        <a href="/ui" class="back-link">← Back to Dashboard</a>
+
+        <header class="dashboard-header">
+            <h1>Queue Monitor</h1>
+            <p>Real-time audit queue status and system health</p>
+            <div class="refresh-indicator">
+                <span class="dot"></span>
+                <span>Auto-refresh every 5 seconds</span>
+                <span id="last-update"></span>
+            </div>
+        </header>
+
+        <!-- Main stats -->
+        <div class="stats-grid">
+            <div class="stat-card processing">
+                <div class="stat-icon">⚡</div>
+                <div class="stat-value" id="stat-processing">0</div>
+                <div class="stat-label">Processing Now</div>
+            </div>
+            <div class="stat-card queued">
+                <div class="stat-icon">⏳</div>
+                <div class="stat-value" id="stat-queued">0</div>
+                <div class="stat-label">In Queue</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">✅</div>
+                <div class="stat-value" id="stat-completed">0</div>
+                <div class="stat-label">Completed</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">❌</div>
+                <div class="stat-value" id="stat-failed">0</div>
+                <div class="stat-label">Failed</div>
+            </div>
+        </div>
+
+        <!-- Queue by tier -->
+        <section class="tier-section">
+            <h2>Queue by Tier</h2>
+            <div class="tier-bars">
+                <div class="tier-bar-row">
+                    <span class="tier-bar-label">Enterprise</span>
+                    <div class="tier-bar-track">
+                        <div class="tier-bar-fill enterprise" id="bar-enterprise" style="width: 0%;">
+                            <span class="tier-bar-count" id="count-enterprise">0</span>
+                        </div>
+                    </div>
+                    <span class="tier-bar-value" id="value-enterprise">0</span>
+                </div>
+                <div class="tier-bar-row">
+                    <span class="tier-bar-label">Pro</span>
+                    <div class="tier-bar-track">
+                        <div class="tier-bar-fill pro" id="bar-pro" style="width: 0%;">
+                            <span class="tier-bar-count" id="count-pro">0</span>
+                        </div>
+                    </div>
+                    <span class="tier-bar-value" id="value-pro">0</span>
+                </div>
+                <div class="tier-bar-row">
+                    <span class="tier-bar-label">Starter</span>
+                    <div class="tier-bar-track">
+                        <div class="tier-bar-fill starter" id="bar-starter" style="width: 0%;">
+                            <span class="tier-bar-count" id="count-starter">0</span>
+                        </div>
+                    </div>
+                    <span class="tier-bar-value" id="value-starter">0</span>
+                </div>
+                <div class="tier-bar-row">
+                    <span class="tier-bar-label">Free</span>
+                    <div class="tier-bar-track">
+                        <div class="tier-bar-fill free" id="bar-free" style="width: 0%;">
+                            <span class="tier-bar-count" id="count-free">0</span>
+                        </div>
+                    </div>
+                    <span class="tier-bar-value" id="value-free">0</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Activity log -->
+        <section class="activity-section">
+            <h2>Activity Log</h2>
+            <div class="activity-log" id="activity-log">
+                <div class="activity-entry">
+                    <span class="activity-time">--:--:--</span>
+                    <span class="activity-icon">🔄</span>
+                    <span class="activity-message">Connecting to server...</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- System health -->
+        <div class="health-section">
+            <div class="health-card">
+                <h3>Server Status</h3>
+                <div class="health-status healthy" id="server-status">
+                    <span class="health-indicator healthy"></span>
+                    <span>Healthy</span>
+                </div>
+                <div class="health-details">
+                    <p>Workers: <strong id="worker-count">2</strong></p>
+                    <p>Max Concurrent: <strong id="max-concurrent">1</strong></p>
+                </div>
+            </div>
+            <div class="health-card">
+                <h3>Throughput</h3>
+                <div class="health-status healthy" id="throughput-status">
+                    <span class="health-indicator healthy"></span>
+                    <span id="throughput-value">~25/hr</span>
+                </div>
+                <div class="health-details">
+                    <p>Avg audit time: <strong>~2 min</strong></p>
+                    <p>Plan: <strong>Standard 2GB</strong></p>
+                </div>
+            </div>
+            <div class="health-card">
+                <h3>Queue Alert</h3>
+                <div class="health-status healthy" id="queue-alert-status">
+                    <span class="health-indicator healthy" id="queue-alert-indicator"></span>
+                    <span id="queue-alert-text">Normal</span>
+                </div>
+                <div class="health-details">
+                    <p>Alert threshold: <strong>15 queued</strong></p>
+                    <p id="alert-action">No action needed</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Activity log
+        const activityLog = document.getElementById('activity-log');
+        const maxLogEntries = 50;
+
+        function addActivity(message, type = '') {
+            const now = new Date();
+            const time = now.toTimeString().split(' ')[0];
+
+            const icons = {
+                '': '📝',
+                'success': '✅',
+                'warning': '⚠️',
+                'error': '❌',
+                'queue': '⏳',
+                'process': '⚡',
+                'complete': '🎉'
+            };
+
+            const entry = document.createElement('div');
+            entry.className = 'activity-entry';
+            entry.innerHTML = `
+                <span class="activity-time">${time}</span>
+                <span class="activity-icon">${icons[type] || icons['']}</span>
+                <span class="activity-message ${type}">${message}</span>
+            `;
+
+            activityLog.insertBefore(entry, activityLog.firstChild);
+
+            // Trim old entries
+            while (activityLog.children.length > maxLogEntries) {
+                activityLog.removeChild(activityLog.lastChild);
+            }
+        }
+
+        // Track previous values for change detection
+        let prevStats = null;
+
+        // Fetch and update stats
+        async function updateStats() {
+            try {
+                const response = await fetch('/audit/queue-stats');
+                if (!response.ok) throw new Error('Failed to fetch stats');
+
+                const stats = await response.json();
+
+                // Update main stats
+                document.getElementById('stat-processing').textContent = stats.processing || 0;
+                document.getElementById('stat-queued').textContent = stats.queued || 0;
+                document.getElementById('stat-completed').textContent = stats.completed || 0;
+                document.getElementById('stat-failed').textContent = stats.failed || 0;
+
+                // Update max concurrent
+                document.getElementById('max-concurrent').textContent = stats.max_concurrent || 1;
+
+                // Update tier bars
+                const tiers = stats.queued_by_tier || {};
+                const totalQueued = stats.queued || 0;
+                const maxBar = Math.max(totalQueued, 10); // Min scale of 10
+
+                ['enterprise', 'pro', 'starter', 'free'].forEach(tier => {
+                    const count = tiers[tier] || 0;
+                    const percent = maxBar > 0 ? (count / maxBar) * 100 : 0;
+
+                    document.getElementById(`bar-${tier}`).style.width = `${Math.max(percent, count > 0 ? 10 : 0)}%`;
+                    document.getElementById(`count-${tier}`).textContent = count;
+                    document.getElementById(`value-${tier}`).textContent = count;
+                });
+
+                // Update last update time
+                document.getElementById('last-update').textContent = `• Updated ${new Date().toLocaleTimeString()}`;
+
+                // Detect changes and log activity
+                if (prevStats) {
+                    if (stats.processing > prevStats.processing) {
+                        addActivity(`Audit started processing`, 'process');
+                    }
+                    if (stats.completed > prevStats.completed) {
+                        addActivity(`Audit completed successfully`, 'complete');
+                    }
+                    if (stats.failed > prevStats.failed) {
+                        addActivity(`Audit failed`, 'error');
+                    }
+                    if (stats.queued > prevStats.queued) {
+                        addActivity(`New audit queued (${stats.queued} total)`, 'queue');
+                    }
+                } else {
+                    addActivity(`Connected to server`, 'success');
+                }
+
+                prevStats = { ...stats };
+
+                // Update queue alert status
+                updateQueueAlert(stats.queued);
+
+                // Update server status
+                updateServerStatus(true);
+
+            } catch (error) {
+                console.error('Stats fetch error:', error);
+                addActivity(`Connection error: ${error.message}`, 'error');
+                updateServerStatus(false);
+            }
+        }
+
+        function updateQueueAlert(queueDepth) {
+            const indicator = document.getElementById('queue-alert-indicator');
+            const text = document.getElementById('queue-alert-text');
+            const action = document.getElementById('alert-action');
+            const status = document.getElementById('queue-alert-status');
+
+            if (queueDepth >= 15) {
+                indicator.className = 'health-indicator critical';
+                status.className = 'health-status critical';
+                text.textContent = 'High Load';
+                action.textContent = 'Consider scaling up';
+            } else if (queueDepth >= 8) {
+                indicator.className = 'health-indicator warning';
+                status.className = 'health-status warning';
+                text.textContent = 'Elevated';
+                action.textContent = 'Monitor closely';
+            } else {
+                indicator.className = 'health-indicator healthy';
+                status.className = 'health-status healthy';
+                text.textContent = 'Normal';
+                action.textContent = 'No action needed';
+            }
+        }
+
+        function updateServerStatus(isOnline) {
+            const status = document.getElementById('server-status');
+            const indicator = status.querySelector('.health-indicator');
+            const text = status.querySelector('span:last-child');
+
+            if (isOnline) {
+                indicator.className = 'health-indicator healthy';
+                status.className = 'health-status healthy';
+                text.textContent = 'Healthy';
+            } else {
+                indicator.className = 'health-indicator critical';
+                status.className = 'health-status critical';
+                text.textContent = 'Offline';
+            }
+        }
+
+        // Initial fetch
+        updateStats();
+
+        // Auto-refresh every 5 seconds
+        setInterval(updateStats, 5000);
+
+        // Add initial log entry
+        addActivity('Dashboard initialized', 'success');
+    </script>
+</body>
+</html>
