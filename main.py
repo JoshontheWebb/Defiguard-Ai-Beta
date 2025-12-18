@@ -4327,31 +4327,38 @@ async def audit_contract(
         
         # Run analysis tools SEQUENTIALLY to reduce RAM pressure
         # Each tool uses 300MB-1GB, sequential keeps peak RAM at ~1GB vs ~2.5GB parallel
+        # Yield points (asyncio.sleep(0)) allow event loop to handle other requests
         
         await broadcast_audit_log(effective_username, "Running Slither analysis")
+        await asyncio.sleep(0)  # Yield to event loop
         try:
             slither_findings = await asyncio.to_thread(analyze_slither, temp_path)
         except Exception as e:
             logger.error(f"Slither failed: {e}")
             slither_findings = []
+        await asyncio.sleep(0)  # Yield to event loop
         await broadcast_audit_log(effective_username, f"Slither found {len(slither_findings)} issues")
 
         await broadcast_audit_log(effective_username, "Running Mythril analysis")
+        await asyncio.sleep(0)  # Yield to event loop
         try:
             mythril_results = await asyncio.to_thread(run_mythril, temp_path)
         except Exception as e:
             logger.error(f"Mythril failed: {e}")
             mythril_results = []
+        await asyncio.sleep(0)  # Yield to event loop
         await broadcast_audit_log(effective_username, f"Mythril found {len(mythril_results)} issues")
 
         fuzzing_results = []
         if fuzzing_enabled:
             await broadcast_audit_log(effective_username, "Running Echidna fuzzing")
+            await asyncio.sleep(0)  # Yield to event loop
             try:
                 fuzzing_results = await asyncio.to_thread(run_echidna, temp_path)
             except Exception as e:
                 logger.error(f"Echidna failed: {e}")
                 fuzzing_results = []
+            await asyncio.sleep(0)  # Yield to event loop
             await broadcast_audit_log(effective_username, f"Echidna completed with {len(fuzzing_results)} results")
 
         # Results already handled above in sequential execution
@@ -4397,6 +4404,7 @@ async def audit_contract(
         logger.info(f"[METRICS] Calculated: {lines_of_code} LOC, {functions_count} functions, complexity {complexity_score}")
         
         # Grok API call
+        await asyncio.sleep(0)  # Yield to event loop before heavy API call
         await broadcast_audit_log(effective_username, "Sending to Grok AI")
                 # Run compliance pre-scan
         compliance_scan = {}
