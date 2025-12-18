@@ -112,6 +112,7 @@ from cryptography.hazmat.primitives import serialization
 import requests
 import subprocess
 import asyncio
+import heapq
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Flowable
 from reportlab.lib.styles import getSampleStyleSheet
@@ -150,37 +151,80 @@ class AuditJob:
 
 class AuditQueue:
     """
-    In-memory queue for managing concurrent audit requests.
+    Priority queue for managing concurrent audit requests.
+    Higher tiers (Enterprise > Pro > Starter > Free) get processed first.
     Phase 1 implementation - handles ~50 audits/hour with 2GB RAM.
     """
+    
+    # Priority values (lower number = higher priority = processed first)
+    TIER_PRIORITY = {
+        "enterprise": 0,
+        "diamond": 0,      # Legacy - same as enterprise
+        "pro": 1,
+        "starter": 2,
+        "beginner": 2,     # Legacy - same as starter
+        "free": 3
+    }
+    
     def __init__(self, max_concurrent: int = 1):
-        self.queue: asyncio.Queue[AuditJob] = asyncio.Queue()
+        # Priority queue: list of (priority, counter, job) tuples
+        # Counter ensures FIFO order within same priority tier
+        self.queue: list[tuple[int, int, AuditJob]] = []
         self.jobs: dict[str, AuditJob] = {}
         self.processing: set[str] = set()
         self.max_concurrent = max_concurrent
         self.lock = asyncio.Lock()
         self._processor_task: Optional[asyncio.Task] = None
-        logger.info(f"[QUEUE] AuditQueue initialized with max_concurrent={max_concurrent}")
+        self._counter = 0  # Monotonic counter for tie-breaking
+        logger.info(f"[QUEUE] AuditQueue initialized with max_concurrent={max_concurrent} (PRIORITY ENABLED)")
     
     async def submit(self, username: str, file_content: bytes, 
                      filename: str, tier: str, contract_address: Optional[str] = None) -> AuditJob:
-        """Submit a new audit job to the queue."""
-        job = AuditJob(
-            job_id=str(uuid.uuid4()),
-            username=username,
-            file_content=file_content,
-            filename=filename,
-            tier=tier,
-            contract_address=contract_address,
-            position=self.queue.qsize() + len(self.processing) + 1
-        )
-        
+        """Submit a new audit job to the priority queue."""
         async with self.lock:
+            self._counter += 1
+            counter = self._counter
+            
+            # Calculate position based on priority
+            priority = self.TIER_PRIORITY.get(tier, 3)  # Default to free tier priority
+            
+            job = AuditJob(
+                job_id=str(uuid.uuid4()),
+                username=username,
+                file_content=file_content,
+                filename=filename,
+                tier=tier,
+                contract_address=contract_address,
+                position=0  # Will be calculated dynamically
+            )
+            
             self.jobs[job.job_id] = job
-            await self.queue.put(job)
+            heapq.heappush(self.queue, (priority, counter, job))
+            
+            # Calculate actual position (how many jobs ahead with higher/equal priority)
+            position = self._calculate_position(job.job_id, priority, counter)
+            job.position = position
         
-        logger.info(f"[QUEUE] Job {job.job_id[:8]}... submitted for {username}, position {job.position}, queue size: {self.queue.qsize()}")
+        logger.info(f"[QUEUE] Job {job.job_id[:8]}... submitted for {username} (tier={tier}, priority={priority}), position {position}, queue size: {len(self.queue)}")
         return job
+    
+    def _calculate_position(self, job_id: str, job_priority: int, job_counter: int) -> int:
+        """Calculate queue position based on priority ordering."""
+        position = 1  # Start at 1 (next to be processed)
+        
+        for priority, counter, queued_job in self.queue:
+            if queued_job.job_id == job_id:
+                continue
+            if queued_job.status != AuditStatus.QUEUED:
+                continue
+            # Job is ahead if: lower priority number, OR same priority but earlier submission
+            if priority < job_priority or (priority == job_priority and counter < job_counter):
+                position += 1
+        
+        # Add currently processing jobs
+        position += len(self.processing)
+        
+        return position
     
     async def get_position(self, job_id: str) -> int:
         """Get current queue position for a job."""
@@ -192,12 +236,13 @@ class AuditQueue:
         if job.status in (AuditStatus.COMPLETED, AuditStatus.FAILED):
             return -1
         
-        # Count jobs ahead in queue
-        position = 1
-        for jid, j in self.jobs.items():
-            if j.status == AuditStatus.QUEUED and j.created_at < job.created_at:
-                position += 1
-        return position
+        # Find job in queue and calculate position
+        async with self.lock:
+            for priority, counter, queued_job in self.queue:
+                if queued_job.job_id == job_id:
+                    return self._calculate_position(job_id, priority, counter)
+        
+        return -1
     
     async def get_status(self, job_id: str) -> dict:
         """Get full status of a job."""
@@ -207,19 +252,36 @@ class AuditQueue:
         
         position = await self.get_position(job_id)
         
-        # Estimate wait time (avg 60s per audit)
-        estimated_wait = max(0, (position - 1) * 60) if position > 0 else 0
+        # Estimate wait time based on position (avg 130s per audit)
+        estimated_wait = max(0, (position - 1) * 130) if position > 0 else 0
+        
+        # Count users ahead by tier for transparency
+        users_ahead = {"enterprise": 0, "pro": 0, "starter": 0, "free": 0}
+        async with self.lock:
+            for _, _, queued_job in self.queue:
+                if queued_job.job_id == job_id:
+                    continue
+                if queued_job.status == AuditStatus.QUEUED:
+                    tier_key = queued_job.tier
+                    if tier_key in ["diamond"]:
+                        tier_key = "enterprise"
+                    elif tier_key in ["beginner"]:
+                        tier_key = "starter"
+                    if tier_key in users_ahead:
+                        users_ahead[tier_key] += 1
         
         return {
             "job_id": job.job_id,
             "status": job.status.value,
             "position": position,
-            "queue_length": self.queue.qsize(),
+            "queue_length": len(self.queue),
             "processing_count": len(self.processing),
             "created_at": job.created_at.isoformat(),
             "current_phase": job.current_phase,
             "progress_percent": job.progress_percent,
             "estimated_wait_seconds": estimated_wait,
+            "tier": job.tier,
+            "users_ahead": users_ahead,
             "result": job.result if job.status == AuditStatus.COMPLETED else None,
             "error": job.error if job.status == AuditStatus.FAILED else None
         }
@@ -232,18 +294,29 @@ class AuditQueue:
             logger.debug(f"[QUEUE] Job {job_id[:8]}... phase: {phase} ({progress}%)")
     
     async def process_next(self) -> Optional[AuditJob]:
-        """Get next job from queue if capacity available."""
+        """Get highest priority job from queue if capacity available."""
         if len(self.processing) >= self.max_concurrent:
             return None
         
-        try:
-            job = await asyncio.wait_for(self.queue.get(), timeout=0.1)
-            job.status = AuditStatus.PROCESSING
-            self.processing.add(job.job_id)
-            logger.info(f"[QUEUE] Job {job.job_id[:8]}... started processing")
-            return job
-        except asyncio.TimeoutError:
-            return None
+        async with self.lock:
+            # Find and remove the highest priority QUEUED job
+            while self.queue:
+                try:
+                    priority, counter, job = heapq.heappop(self.queue)
+                    
+                    # Skip if job was already processed/cancelled
+                    if job.status != AuditStatus.QUEUED:
+                        continue
+                    
+                    job.status = AuditStatus.PROCESSING
+                    self.processing.add(job.job_id)
+                    logger.info(f"[QUEUE] Job {job.job_id[:8]}... started processing (tier={job.tier}, priority={priority})")
+                    return job
+                    
+                except IndexError:
+                    return None
+        
+        return None
     
     async def complete(self, job_id: str, result: dict):
         """Mark job as completed with results."""
@@ -266,8 +339,21 @@ class AuditQueue:
     
     def get_stats(self) -> dict:
         """Get queue statistics for monitoring."""
+        # Count by tier
+        by_tier = {"enterprise": 0, "pro": 0, "starter": 0, "free": 0}
+        for _, _, job in self.queue:
+            if job.status == AuditStatus.QUEUED:
+                tier_key = job.tier
+                if tier_key in ["diamond"]:
+                    tier_key = "enterprise"
+                elif tier_key in ["beginner"]:
+                    tier_key = "starter"
+                if tier_key in by_tier:
+                    by_tier[tier_key] += 1
+        
         return {
             "queued": sum(1 for j in self.jobs.values() if j.status == AuditStatus.QUEUED),
+            "queued_by_tier": by_tier,
             "processing": len(self.processing),
             "completed": sum(1 for j in self.jobs.values() if j.status == AuditStatus.COMPLETED),
             "failed": sum(1 for j in self.jobs.values() if j.status == AuditStatus.FAILED),
@@ -4775,14 +4861,32 @@ async def process_one_queued_job():
         if active_audit_count >= MAX_CONCURRENT_AUDITS:
             return  # Still at capacity
         
-        # Check if there's a queued job
-        try:
-            job = await asyncio.wait_for(audit_queue.queue.get(), timeout=0.1)
-        except asyncio.TimeoutError:
-            return  # Queue empty
+        # Check if there's a queued job (priority queue handles ordering)
+        async with audit_queue.lock:
+            if not audit_queue.queue:
+                return  # Queue empty
+            
+            # Find highest priority QUEUED job
+            job = None
+            temp_items = []
+            while audit_queue.queue:
+                priority, counter, candidate = heapq.heappop(audit_queue.queue)
+                if candidate.status == AuditStatus.QUEUED:
+                    job = candidate
+                    # Don't put this one back - we're processing it
+                    break
+                else:
+                    temp_items.append((priority, counter, candidate))
+            
+            # Put back any items we popped but didn't use
+            for item in temp_items:
+                heapq.heappush(audit_queue.queue, item)
+            
+            if not job:
+                return  # No queued jobs found
         
         active_audit_count += 1
-        logger.info(f"[QUEUE_DRAIN] Processing queued job {job.job_id[:8]}... ({active_audit_count}/{MAX_CONCURRENT_AUDITS})")
+        logger.info(f"[QUEUE_DRAIN] Processing queued job {job.job_id[:8]}... (tier={job.tier}, {active_audit_count}/{MAX_CONCURRENT_AUDITS})")
     
     try:
         job.status = AuditStatus.PROCESSING
