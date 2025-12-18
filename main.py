@@ -295,7 +295,7 @@ audit_queue = AuditQueue(max_concurrent=2)
 # Track currently executing audits (for admission control)
 active_audit_count = 0
 active_audit_lock = asyncio.Lock()
-MAX_CONCURRENT_AUDITS = 2  # Safe limit for 2GB RAM
+MAX_CONCURRENT_AUDITS = 1  # Conservative limit for 2GB RAM with parallel tools
 
 # WebSocket connections for job status updates
 active_job_websockets: dict[str, list[WebSocket]] = {}
@@ -4325,53 +4325,36 @@ async def audit_contract(
         tier_for_flags = tier_flags_map.get(tier_for_flags, tier_for_flags)
         fuzzing_enabled = usage_tracker.feature_flags.get(tier_for_flags, {}).get("fuzzing", False)
         
-        # Start ALL analysis tools in PARALLEL for maximum speed
+        # Run analysis tools SEQUENTIALLY to reduce RAM pressure
+        # Each tool uses 300MB-1GB, sequential keeps peak RAM at ~1GB vs ~2.5GB parallel
+        
         await broadcast_audit_log(effective_username, "Running Slither analysis")
-        slither_task = asyncio.create_task(asyncio.to_thread(analyze_slither, temp_path))
+        try:
+            slither_findings = await asyncio.to_thread(analyze_slither, temp_path)
+        except Exception as e:
+            logger.error(f"Slither failed: {e}")
+            slither_findings = []
+        await broadcast_audit_log(effective_username, f"Slither found {len(slither_findings)} issues")
 
         await broadcast_audit_log(effective_username, "Running Mythril analysis")
-        mythril_task = asyncio.create_task(asyncio.to_thread(run_mythril, temp_path))
-
-        # Start Echidna immediately if enabled (don't wait for Mythril!)
-        echidna_task = None
-        if fuzzing_enabled:
-            await broadcast_audit_log(effective_username, "Starting Echidna fuzzing")
-            echidna_task = asyncio.create_task(asyncio.to_thread(run_echidna, temp_path))
-
-        # Wait for all tasks to complete in parallel
-        if echidna_task:
-            results = await asyncio.gather(slither_task, mythril_task, echidna_task, return_exceptions=True)
-            slither_findings, mythril_results, fuzzing_results = results
-        else:
-            results = await asyncio.gather(slither_task, mythril_task, return_exceptions=True)
-            slither_findings, mythril_results = results
-            fuzzing_results = []
-
-        # Handle Slither results
-        if isinstance(slither_findings, Exception):
-            logger.error(f"Slither failed: {slither_findings}")
-            await broadcast_audit_log(effective_username, "Slither failed")
-            slither_findings = []
-        else:
-            await broadcast_audit_log(effective_username, f"Slither found {len(slither_findings)} issues")
-
-        # Handle Mythril results
-        if isinstance(mythril_results, Exception):
-            logger.error(f"Mythril failed: {mythril_results}")
-            await broadcast_audit_log(effective_username, "Mythril failed")
+        try:
+            mythril_results = await asyncio.to_thread(run_mythril, temp_path)
+        except Exception as e:
+            logger.error(f"Mythril failed: {e}")
             mythril_results = []
-        else:
-            await broadcast_audit_log(effective_username, f"Mythril found {len(mythril_results)} issues")
-        
-        # Handle Echidna results
-        if isinstance(fuzzing_results, Exception):
-            logger.exception(f"Echidna fuzzing failed for {effective_username}: {fuzzing_results}")
-            await broadcast_audit_log(effective_username, "Echidna fuzzing failed")
-            fuzzing_results = []
-        elif fuzzing_results:
+        await broadcast_audit_log(effective_username, f"Mythril found {len(mythril_results)} issues")
+
+        fuzzing_results = []
+        if fuzzing_enabled:
+            await broadcast_audit_log(effective_username, "Running Echidna fuzzing")
+            try:
+                fuzzing_results = await asyncio.to_thread(run_echidna, temp_path)
+            except Exception as e:
+                logger.error(f"Echidna failed: {e}")
+                fuzzing_results = []
             await broadcast_audit_log(effective_username, f"Echidna completed with {len(fuzzing_results)} results")
-        elif fuzzing_enabled:
-            await broadcast_audit_log(effective_username, "Echidna completed with no results")
+
+        # Results already handled above in sequential execution
         
         context = json.dumps([f if isinstance(f, dict) else getattr(f, "__dict__", str(f)) for f in slither_findings]).replace('"', '\"') if slither_findings else "No static issues found"
         context = summarize_context(context)
