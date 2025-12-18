@@ -290,7 +290,7 @@ class AuditQueue:
 
 # Initialize global audit queue with admission control
 # For 2GB RAM: Allow 2 concurrent audits before queuing
-audit_queue = AuditQueue(max_concurrent=2)
+audit_queue = AuditQueue(max_concurrent=1)
 
 # Track currently executing audits (for admission control)
 active_audit_count = 0
