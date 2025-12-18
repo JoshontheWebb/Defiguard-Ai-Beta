@@ -3306,6 +3306,66 @@ a:focus-visible {
     margin-top: var(--space-2);
 }
 
+/* Queue breakdown by tier */
+.queue-breakdown {
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    margin: var(--space-3) 0;
+    padding: var(--space-3);
+    background: var(--bg-secondary);
+    border-radius: var(--radius-md);
+    border-left: 3px solid var(--accent-teal);
+}
+
+/* Upgrade prompt in queue */
+.queue-upgrade-prompt {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-top: var(--space-4);
+    padding: var(--space-4);
+    background: linear-gradient(135deg, rgba(255, 64, 129, 0.1), rgba(0, 209, 178, 0.1));
+    border: 1px solid var(--accent-pink);
+    border-radius: var(--radius-md);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    animation: subtlePulse 3s ease-in-out infinite;
+}
+
+.queue-upgrade-prompt.starter {
+    border-color: var(--accent-teal);
+    background: linear-gradient(135deg, rgba(0, 209, 178, 0.05), rgba(0, 209, 178, 0.1));
+}
+
+@keyframes subtlePulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.85; }
+}
+
+.queue-upgrade-prompt .upgrade-icon {
+    font-size: var(--text-xl);
+    flex-shrink: 0;
+}
+
+.queue-upgrade-prompt .upgrade-link {
+    color: var(--accent-teal);
+    font-weight: 600;
+    text-decoration: none;
+    margin-left: auto;
+    padding: var(--space-2) var(--space-4);
+    background: var(--glass-bg);
+    border-radius: var(--radius-full);
+    transition: all var(--transition-base);
+    white-space: nowrap;
+}
+
+.queue-upgrade-prompt .upgrade-link:hover {
+    background: var(--accent-teal);
+    color: white;
+    transform: translateY(-1px);
+    box-shadow: var(--glow-teal);
+}
+
 .queue-animation {
     display: flex;
     align-items: center;
