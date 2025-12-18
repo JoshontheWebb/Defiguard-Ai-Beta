@@ -50,4 +50,4 @@ RUN echo "========== Tool Verification ==========" && \
 EXPOSE 10000
 
 # Start command (FastAPI with gunicorn)
-CMD ["python3", "-m", "gunicorn", "main:app", "--workers", "1", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:10000", "--timeout", "300", "--graceful-timeout", "120", "--log-level", "info"]
+CMD python3 -m gunicorn main:app --workers ${WEB_CONCURRENCY:-2} --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:10000 --timeout 300 --graceful-timeout 120 --log-level info
