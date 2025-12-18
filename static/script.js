@@ -155,9 +155,44 @@ class AuditQueueTracker {
         const queueUI = document.getElementById('queue-status');
         if (!queueUI) return;
         
-        const waitMinutes = Math.ceil(data.estimated_wait_seconds / 60);
-        const waitText = waitMinutes < 1 ? 'Less than a minute' : 
-                         waitMinutes === 1 ? '~1 minute' : `~${waitMinutes} minutes`;
+        // Get user's tier from sidebar or default to free
+        const userTier = document.getElementById('sidebar-tier-name')?.textContent?.toLowerCase() || 'free';
+        const isFreeTier = userTier === 'free';
+        const isStarterTier = userTier === 'starter';
+        
+        // Build users ahead breakdown if available
+        let usersAheadHtml = '';
+        if (data.users_ahead) {
+            const ahead = data.users_ahead;
+            const parts = [];
+            if (ahead.enterprise > 0) parts.push(`${ahead.enterprise} Enterprise`);
+            if (ahead.pro > 0) parts.push(`${ahead.pro} Pro`);
+            if (ahead.starter > 0) parts.push(`${ahead.starter} Starter`);
+            if (ahead.free > 0) parts.push(`${ahead.free} Free`);
+            if (parts.length > 0) {
+                usersAheadHtml = `<div class="queue-breakdown">${parts.join(' • ')}</div>`;
+            }
+        }
+        
+        // Upgrade prompt for Free/Starter users
+        let upgradeHtml = '';
+        if (isFreeTier) {
+            upgradeHtml = `
+                <div class="queue-upgrade-prompt">
+                    <span class="upgrade-icon">⚡</span>
+                    <span>Pro & Enterprise audits are prioritized.</span>
+                    <a href="#tier-select" class="upgrade-link" onclick="document.getElementById('tier-select').scrollIntoView({behavior: 'smooth'})">Upgrade to skip ahead</a>
+                </div>
+            `;
+        } else if (isStarterTier) {
+            upgradeHtml = `
+                <div class="queue-upgrade-prompt starter">
+                    <span class="upgrade-icon">⚡</span>
+                    <span>Pro & Enterprise audits get priority.</span>
+                    <a href="#tier-select" class="upgrade-link" onclick="document.getElementById('tier-select').scrollIntoView({behavior: 'smooth'})">Upgrade to Pro</a>
+                </div>
+            `;
+        }
         
         queueUI.innerHTML = `
             <div class="queue-card">
@@ -168,12 +203,11 @@ class AuditQueueTracker {
                         <span class="position-number">${data.position}</span>
                         <span class="position-label">${data.position === 1 ? "You're next!" : 'position in line'}</span>
                     </div>
-                    <div class="estimated-wait">
-                        Estimated wait: <strong>${waitText}</strong>
-                    </div>
+                    ${usersAheadHtml}
                     <div class="queue-stats">
-                        ${data.queue_length} in queue • ${data.processing_count} processing
+                        ${data.queue_length || data.position} in queue • ${data.processing_count || 1} processing
                     </div>
+                    ${upgradeHtml}
                 </div>
                 <div class="queue-animation">
                     <div class="pulse"></div>
