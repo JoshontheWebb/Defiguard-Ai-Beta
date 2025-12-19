@@ -225,7 +225,7 @@ class AuditQueueTracker {
             'slither': { icon: '🔍', label: 'Running Slither Analysis', progress: 10 },
             'mythril': { icon: '🧠', label: 'Running Mythril Symbolic Analysis', progress: 25 },
             'echidna': { icon: '🧪', label: 'Running Echidna Fuzzing', progress: 40 },
-            'grok': { icon: '🤖', label: 'AI Analysis & Report Generation', progress: 60 },
+            'claude': { icon: '🤖', label: 'Claude AI Analysis & Report Generation', progress: 60 },
             'finalizing': { icon: '✨', label: 'Finalizing Report', progress: 90 },
             'complete': { icon: '✅', label: 'Complete!', progress: 100 }
         };

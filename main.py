@@ -3914,9 +3914,9 @@ async def execute_queued_audit(job: AuditJob) -> dict:
         complexity_score = sum(code_str.count(keyword) for keyword in complexity_keywords) / max(functions_count, 1)
         complexity_score = min(round(complexity_score, 1), 10.0)
         
-        # Phase 4: AI Analysis
-        await audit_queue.update_phase(job.job_id, "grok", 60)
-        await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "grok", "progress": 60})
+        # Phase 4: AI Analysis (Claude primary, Grok fallback)
+        await audit_queue.update_phase(job.job_id, "claude", 60)
+        await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "claude", "progress": 60})
         
         # Compliance pre-scan
         compliance_scan = {}
@@ -3931,10 +3931,10 @@ async def execute_queued_audit(job: AuditJob) -> dict:
             details += f" Contract address: {contract_address}"
         
         report: dict = {}
-        
+
         try:
-            if not os.getenv("GROK_API_KEY"):
-                raise Exception("GROK_API_KEY not set")
+            if not os.getenv("ANTHROPIC_API_KEY") and not os.getenv("GROK_API_KEY"):
+                raise Exception("No AI API keys configured (ANTHROPIC_API_KEY or GROK_API_KEY)")
             
             prompt = PROMPT_TEMPLATE.format(
                 context=context,
@@ -4019,21 +4019,21 @@ async def execute_queued_audit(job: AuditJob) -> dict:
             report = audit_json
             
         except Exception as e:
-            logger.error(f"Grok analysis failed: {e}")
+            logger.error(f"AI analysis failed: {e}")
             fallback_issues = mythril_results + [
                 {"type": d.get("name", "Slither finding"), "severity": "Medium", "description": str(d.get("details", "N/A")), "fix": "Manual review required"}
                 for d in (slither_findings or [])
             ]
             
             report = {
-                "risk_score": "Unknown (Grok failed)",
+                "risk_score": "Unknown (AI analysis failed)",
                 "critical_count": sum(1 for i in fallback_issues if i.get("severity", "").lower() == "critical"),
                 "high_count": sum(1 for i in fallback_issues if i.get("severity", "").lower() == "high"),
                 "medium_count": sum(1 for i in fallback_issues if i.get("severity", "").lower() == "medium"),
                 "low_count": sum(1 for i in fallback_issues if i.get("severity", "").lower() == "low"),
                 "issues": fallback_issues,
                 "predictions": [],
-                "recommendations": ["Grok analysis unavailable – review static analysis results above"],
+                "recommendations": ["AI analysis unavailable – review static analysis results above"],
                 "error": str(e)
             }
         
@@ -4554,7 +4554,7 @@ async def audit_contract(
                 logger.error(f"On-chain code fetch failed: {e}")
                 await broadcast_audit_log(effective_username, "No deployed code found")
         
-        # Pre-calculate code metrics (don't rely on Grok)
+        # Pre-calculate code metrics (don't rely on AI)
         lines_of_code = len([line for line in code_str.split('\n') if line.strip() and not line.strip().startswith('//')])
         functions_count = code_str.count('function ') + code_str.count('constructor(')
         
@@ -4565,9 +4565,9 @@ async def audit_contract(
         
         logger.info(f"[METRICS] Calculated: {lines_of_code} LOC, {functions_count} functions, complexity {complexity_score}")
         
-        # Grok API call
+        # AI Analysis (Claude primary, Grok fallback)
         await asyncio.sleep(0)  # Yield to event loop before heavy API call
-        await broadcast_audit_log(effective_username, "Sending to Grok AI")
+        await broadcast_audit_log(effective_username, "Sending to Claude AI")
                 # Run compliance pre-scan
         compliance_scan = {}
         try:
@@ -4577,9 +4577,9 @@ async def audit_contract(
             logger.warning(f"[COMPLIANCE] Pre-scan failed: {e}")
             compliance_scan = {"error": str(e)}
         try:
-            if not os.getenv("GROK_API_KEY"):
-                raise Exception("GROK_API_KEY not set")
-            
+            if not os.getenv("ANTHROPIC_API_KEY") and not os.getenv("GROK_API_KEY"):
+                raise Exception("No AI API keys configured (ANTHROPIC_API_KEY or GROK_API_KEY)")
+
             prompt = PROMPT_TEMPLATE.format(
                 context=context,
                 fuzzing_results=json.dumps(fuzzing_results),
@@ -4662,7 +4662,7 @@ async def audit_contract(
             
             audit_json = json.loads(raw_response)
             
-            # Calculate severity counts if Grok didn't return them
+            # Calculate severity counts if AI didn't return them
             if "critical_count" not in audit_json or audit_json.get("critical_count") is None:
                 issues = audit_json.get("issues", [])
                 critical_count = sum(1 for i in issues if i.get("severity", "").lower() == "critical")
@@ -4688,7 +4688,7 @@ async def audit_contract(
                     "functions_count": functions_count,
                     "complexity_score": complexity_score
                 }
-            logger.info(f"[METRICS] Overrode Grok metrics with accurate counts: {lines_of_code} LOC")
+            logger.info(f"[METRICS] Overrode AI metrics with accurate counts: {lines_of_code} LOC")
             
             # Verify Pro+ fields are present
             
@@ -4704,9 +4704,9 @@ async def audit_contract(
             report = audit_json
         
         except Exception as e:
-            logger.error(f"Grok analysis failed for {effective_username}: {e}")
-            logger.exception("FULL GROK ERROR TRACEBACK:")
-            await broadcast_audit_log(effective_username, f"Grok analysis failed: {str(e)}")
+            logger.error(f"AI analysis failed for {effective_username}: {e}")
+            logger.exception("FULL AI ERROR TRACEBACK:")
+            await broadcast_audit_log(effective_username, f"AI analysis failed: {str(e)}")
             
             # Fallback: still show Slither/Mythril results with calculated counts
             fallback_issues = mythril_results + [
@@ -4721,14 +4721,14 @@ async def audit_contract(
             low_count = sum(1 for i in fallback_issues if i.get("severity", "").lower() == "low")
             
             report.update({
-                "risk_score": "Unknown (Grok failed)",
+                "risk_score": "Unknown (AI analysis failed)",
                 "critical_count": critical_count,
                 "high_count": high_count,
                 "medium_count": medium_count,
                 "low_count": low_count,
                 "issues": fallback_issues,
                 "predictions": [],
-                "recommendations": ["Grok analysis unavailable – review static analysis results above"],
+                "recommendations": ["AI analysis unavailable – review static analysis results above"],
                 "error": str(e)
             })
         

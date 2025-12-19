@@ -100,7 +100,7 @@
         <p>DeFiGuard AI provides automated smart contract security analysis powered by AI and static analysis tools. Our Service includes:</p>
         <ul>
             <li>Static code analysis using Slither, Mythril, and Echidna</li>
-            <li>AI-powered vulnerability detection using Grok AI</li>
+            <li>AI-powered vulnerability detection using Claude AI (with Grok AI fallback)</li>
             <li>Regulatory compliance analysis (MiCA, SEC FIT21)</li>
             <li>Risk scoring and remediation recommendations</li>
             <li>API access for automated auditing (Pro/Enterprise tiers)</li>
@@ -178,7 +178,7 @@
         <ul>
             <li>Claim ownership of Your Content</li>
             <li>Use Your Content to train AI models without explicit permission</li>
-            <li>Share Your Content with third parties except as required for Service provision (e.g., Grok AI for analysis)</li>
+            <li>Share Your Content with third parties except as required for Service provision (e.g., Claude AI/Grok AI for analysis)</li>
             <li>Retain Your Content after analysis is complete (unless Enterprise archival is enabled)</li>
         </ul>
 
@@ -252,7 +252,8 @@
         <ul>
             <li><strong>Auth0:</strong> Authentication and user management</li>
             <li><strong>Stripe:</strong> Payment processing</li>
-            <li><strong>Grok AI (X.AI):</strong> AI-powered analysis</li>
+            <li><strong>Claude AI (Anthropic):</strong> AI-powered analysis (primary)</li>
+            <li><strong>Grok AI (X.AI):</strong> AI-powered analysis (fallback)</li>
             <li><strong>Infura:</strong> Ethereum blockchain access</li>
             <li><strong>Slither, Mythril, Echidna:</strong> Open-source analysis tools</li>
         </ul>
@@ -264,7 +265,7 @@
         <h3>Key Points:</h3>
         <ul>
             <li>We collect: email, username, payment info, uploaded code, usage data</li>
-            <li>We use: Auth0 (authentication), Stripe (payments), Grok AI (analysis)</li>
+            <li>We use: Auth0 (authentication), Stripe (payments), Claude AI/Grok AI (analysis)</li>
             <li>We comply with: GDPR (EU), CCPA (California)</li>
             <li>You have rights to: access, deletion, portability, opt-out</li>
         </ul>
