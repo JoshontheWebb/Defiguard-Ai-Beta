@@ -33,21 +33,32 @@ print("=" * 80)
 
 # Import what we need for initialize_client
 from openai import OpenAI
+import anthropic
 from web3 import Web3
 
 # Initialize clients RIGHT NOW
-client = None
+claude_client = None
+grok_client = None
 w3 = None
 
+# Primary: Claude
+anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+if anthropic_key and anthropic_key.strip():
+    claude_client = anthropic.Anthropic(api_key=anthropic_key.strip())
+    print("[CLAUDE] Primary client initialized successfully ✅")
+else:
+    print("[CLAUDE] ANTHROPIC_API_KEY missing - primary client is None ❌")
+
+# Fallback: Grok
 grok_key = os.getenv("GROK_API_KEY")
 if grok_key and grok_key.strip():
-    client = OpenAI(
+    grok_client = OpenAI(
         api_key=grok_key.strip(),
         base_url="https://api.x.ai/v1"
     )
-    print("[GROK] Client initialized successfully ✅")
+    print("[GROK] Fallback client initialized successfully ✅")
 else:
-    print("[GROK] GROK_API_KEY missing - client is None ❌")
+    print("[GROK] GROK_API_KEY missing - fallback client is None ❌")
 
 # Web3
 infura_url = f"https://mainnet.infura.io/v3/{os.getenv('INFURA_PROJECT_ID')}"
@@ -3935,22 +3946,55 @@ async def execute_queued_audit(job: AuditJob) -> dict:
                 compliance_scan=json.dumps(compliance_scan, indent=2)
             )
             
-            response = client.chat.completions.create(
-                model="grok-4-1-fast-reasoning",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                stream=False,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "defi_audit_report",
-                        "strict": True,
-                        "schema": AUDIT_SCHEMA
-                    }
-                }
-            )
+            # Try Claude first, fallback to Grok
+            raw_response = ""
+            used_model = "unknown"
             
-            raw_response = response.choices[0].message.content or ""
+            if claude_client:
+                try:
+                    logger.info("[AI] Attempting Claude (primary)...")
+                    response = claude_client.messages.create(
+                        model="claude-sonnet-4-20250514",
+                        max_tokens=16384,
+                        messages=[{
+                            "role": "user",
+                            "content": prompt + "\n\nCRITICAL: Respond with ONLY valid JSON matching the required schema. No markdown code blocks, no backticks, no explanation outside the JSON object."
+                        }]
+                    )
+                    raw_response = response.content[0].text or ""
+                    used_model = "claude-sonnet-4"
+                    logger.info("[AI] Claude response received ✅")
+                except Exception as claude_err:
+                    logger.warning(f"[AI] Claude failed: {claude_err}, trying Grok fallback...")
+            
+            if not raw_response and grok_client:
+                try:
+                    logger.info("[AI] Attempting Grok (fallback)...")
+                    response = grok_client.chat.completions.create(
+                        model="grok-4-1-fast-reasoning",
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.0,
+                        stream=False,
+                        response_format={
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "defi_audit_report",
+                                "strict": True,
+                                "schema": AUDIT_SCHEMA
+                            }
+                        }
+                    )
+                    raw_response = response.choices[0].message.content or ""
+                    used_model = "grok-4-fast"
+                    logger.info("[AI] Grok fallback response received ✅")
+                except Exception as grok_err:
+                    logger.error(f"[AI] Grok fallback also failed: {grok_err}")
+                    raise Exception("Both Claude and Grok API calls failed")
+            
+            if not raw_response:
+                raise Exception("No AI client available - check API keys")
+            
+            logger.info(f"[AI] Used model: {used_model}")
             audit_json = json.loads(raw_response)
             
             # Calculate severity counts if missing
@@ -4546,42 +4590,75 @@ async def audit_contract(
                 compliance_scan=json.dumps(compliance_scan, indent=2)
             )
             
-            # Direct synchronous call - OpenAI SDK handles this properly
-            response = client.chat.completions.create(
-                model="grok-4-1-fast-reasoning",  # Latest Grok 4 with reasoning
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                stream=False,  # Explicitly disable streaming
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "defi_audit_report",
-                        "strict": True,
-                        "schema": AUDIT_SCHEMA
-                    }
-                }
-            )
-
-            raw_response = response.choices[0].message.content or ""
+            # Try Claude first, fallback to Grok
+            raw_response = ""
+            used_model = "unknown"
+            
+            if claude_client:
+                try:
+                    logger.info("[AI] Attempting Claude (primary)...")
+                    response = claude_client.messages.create(
+                        model="claude-sonnet-4-20250514",
+                        max_tokens=16384,
+                        messages=[{
+                            "role": "user",
+                            "content": prompt + "\n\nCRITICAL: Respond with ONLY valid JSON matching the required schema. No markdown code blocks, no backticks, no explanation outside the JSON object."
+                        }]
+                    )
+                    raw_response = response.content[0].text or ""
+                    used_model = "claude-sonnet-4"
+                    logger.info("[AI] Claude response received ✅")
+                except Exception as claude_err:
+                    logger.warning(f"[AI] Claude failed: {claude_err}, trying Grok fallback...")
+            
+            if not raw_response and grok_client:
+                try:
+                    logger.info("[AI] Attempting Grok (fallback)...")
+                    response = grok_client.chat.completions.create(
+                        model="grok-4-1-fast-reasoning",
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.0,
+                        stream=False,
+                        response_format={
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "defi_audit_report",
+                                "strict": True,
+                                "schema": AUDIT_SCHEMA
+                            }
+                        }
+                    )
+                    raw_response = response.choices[0].message.content or ""
+                    used_model = "grok-4-fast"
+                    logger.info("[AI] Grok fallback response received ✅")
+                except Exception as grok_err:
+                    logger.error(f"[AI] Grok fallback also failed: {grok_err}")
+                    raise Exception("Both Claude and Grok API calls failed")
+            
+            if not raw_response:
+                raise Exception("No AI client available - check API keys")
+            
+            logger.info(f"[AI] Used model: {used_model}")
             # === CRITICAL DEBUG LOGGING ===
-            logger.info(f"[GROK_DEBUG] ===== RAW RESPONSE START =====")
-            logger.info(f"[GROK_DEBUG] Length: {len(raw_response)} characters")
-            logger.info(f"[GROK_DEBUG] First 1000 chars: {raw_response[:1000]}")
-            logger.info(f"[GROK_DEBUG] Last 500 chars: {raw_response[-500:]}")
-            logger.info(f"[GROK_DEBUG] ===== RAW RESPONSE END =====")
+            logger.info(f"[AI_DEBUG] ===== RAW RESPONSE START =====")
+            logger.info(f"[AI_DEBUG] Model used: {used_model}")
+            logger.info(f"[AI_DEBUG] Length: {len(raw_response)} characters")
+            logger.info(f"[AI_DEBUG] First 1000 chars: {raw_response[:1000]}")
+            logger.info(f"[AI_DEBUG] Last 500 chars: {raw_response[-500:]}")
+            logger.info(f"[AI_DEBUG] ===== RAW RESPONSE END =====")
 
             try:
                 audit_json = json.loads(raw_response)
-                logger.info(f"[GROK_DEBUG] Parsed JSON successfully")
-                logger.info(f"[GROK_DEBUG] Keys in response: {list(audit_json.keys())}")
-                logger.info(f"[GROK_DEBUG] Issues count: {len(audit_json.get('issues', []))}")
-                logger.info(f"[GROK_DEBUG] Issues array: {json.dumps(audit_json.get('issues', []), indent=2)}")
+                logger.info(f"[AI_DEBUG] Parsed JSON successfully")
+                logger.info(f"[AI_DEBUG] Keys in response: {list(audit_json.keys())}")
+                logger.info(f"[AI_DEBUG] Issues count: {len(audit_json.get('issues', []))}")
+                logger.info(f"[AI_DEBUG] Issues array: {json.dumps(audit_json.get('issues', []), indent=2)}")
             except json.JSONDecodeError as e:
-                logger.error(f"[GROK_DEBUG] JSON parse failed: {e}")
-                logger.error(f"[GROK_DEBUG] Full response: {raw_response}")
+                logger.error(f"[AI_DEBUG] JSON parse failed: {e}")
+                logger.error(f"[AI_DEBUG] Full response: {raw_response}")
             # Debug logging
-            logger.info(f"[GROK] Response length: {len(raw_response)} chars")
-            logger.debug(f"[GROK] First 500 chars: {raw_response[:500]}")
+            logger.info(f"[AI] Response length: {len(raw_response)} chars")
+            logger.debug(f"[AI] First 500 chars: {raw_response[:500]}")
             
             audit_json = json.loads(raw_response)
             
@@ -4598,7 +4675,7 @@ async def audit_contract(
                 audit_json["medium_count"] = medium_count
                 audit_json["low_count"] = low_count
                 
-                logger.info(f"[GROK] Calculated severity counts: C={critical_count}, H={high_count}, M={medium_count}, L={low_count}")
+                logger.info(f"[AI] Calculated severity counts: C={critical_count}, H={high_count}, M={medium_count}, L={low_count}")
             
             # Override code_quality_metrics with our accurate calculation
             if "code_quality_metrics" in audit_json:
