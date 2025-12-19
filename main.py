@@ -3858,17 +3858,19 @@ async def execute_queued_audit(job: AuditJob) -> dict:
         
         file_size = len(file_content)
         code_str = file_content.decode("utf-8")
-        
+
         # Phase 1: Static Analysis
         await audit_queue.update_phase(job.job_id, "slither", 10)
         await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "slither", "progress": 10})
-        
+        await broadcast_audit_log(username, "Running Slither analysis")
+
         slither_task = asyncio.create_task(asyncio.to_thread(analyze_slither, temp_path))
-        
+
         # Phase 2: Mythril (parallel with Slither completion)
         await audit_queue.update_phase(job.job_id, "mythril", 25)
         await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "mythril", "progress": 25})
-        
+        await broadcast_audit_log(username, "Running Mythril analysis")
+
         mythril_task = asyncio.create_task(asyncio.to_thread(run_mythril, temp_path))
         
         # Phase 3: Echidna (if enabled)
@@ -3881,6 +3883,7 @@ async def execute_queued_audit(job: AuditJob) -> dict:
         if fuzzing_enabled:
             await audit_queue.update_phase(job.job_id, "echidna", 40)
             await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "echidna", "progress": 40})
+            await broadcast_audit_log(username, "Running Echidna fuzzing")
             echidna_task = asyncio.create_task(asyncio.to_thread(run_echidna, temp_path))
         
         # Wait for all analysis tasks
@@ -3892,17 +3895,23 @@ async def execute_queued_audit(job: AuditJob) -> dict:
             slither_findings, mythril_results = results
             fuzzing_results = []
         
-        # Handle exceptions
+        # Handle exceptions and log results
         if isinstance(slither_findings, Exception):
             logger.error(f"Slither failed: {slither_findings}")
             slither_findings = []
+        await broadcast_audit_log(username, f"Slither found {len(slither_findings)} issues")
+
         if isinstance(mythril_results, Exception):
             logger.error(f"Mythril failed: {mythril_results}")
             mythril_results = []
+        await broadcast_audit_log(username, f"Mythril found {len(mythril_results)} issues")
+
         if isinstance(fuzzing_results, Exception):
             logger.error(f"Echidna failed: {fuzzing_results}")
             fuzzing_results = []
-        
+        if fuzzing_enabled:
+            await broadcast_audit_log(username, f"Echidna completed with {len(fuzzing_results)} results")
+
         # Build context
         context = json.dumps([f if isinstance(f, dict) else getattr(f, "__dict__", str(f)) for f in slither_findings]).replace('"', '\"') if slither_findings else "No static issues found"
         context = summarize_context(context)
@@ -3917,7 +3926,8 @@ async def execute_queued_audit(job: AuditJob) -> dict:
         # Phase 4: AI Analysis (Claude primary, Grok fallback)
         await audit_queue.update_phase(job.job_id, "claude", 60)
         await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "claude", "progress": 60})
-        
+        await broadcast_audit_log(username, "Sending to Claude AI")
+
         # Compliance pre-scan
         compliance_scan = {}
         try:
@@ -4040,11 +4050,13 @@ async def execute_queued_audit(job: AuditJob) -> dict:
         # Phase 5: Finalization
         await audit_queue.update_phase(job.job_id, "finalizing", 90)
         await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "finalizing", "progress": 90})
-        
+
         # Apply free tier filtering
         if tier == "free":
             report = filter_issues_for_free_tier(report, tier)
-        
+
+        await broadcast_audit_log(username, "Audit complete")
+
         return {
             "report": report,
             "risk_score": str(report.get("risk_score", "N/A")),
