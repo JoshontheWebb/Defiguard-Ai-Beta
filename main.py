@@ -33,21 +33,32 @@ print("=" * 80)
 
 # Import what we need for initialize_client
 from openai import OpenAI
+import anthropic
 from web3 import Web3
 
 # Initialize clients RIGHT NOW
-client = None
+claude_client = None
+grok_client = None
 w3 = None
 
+# Primary: Claude
+anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+if anthropic_key and anthropic_key.strip():
+    claude_client = anthropic.Anthropic(api_key=anthropic_key.strip())
+    print("[CLAUDE] Primary client initialized successfully ✅")
+else:
+    print("[CLAUDE] ANTHROPIC_API_KEY missing - primary client is None ❌")
+
+# Fallback: Grok
 grok_key = os.getenv("GROK_API_KEY")
 if grok_key and grok_key.strip():
-    client = OpenAI(
+    grok_client = OpenAI(
         api_key=grok_key.strip(),
         base_url="https://api.x.ai/v1"
     )
-    print("[GROK] Client initialized successfully ✅")
+    print("[GROK] Fallback client initialized successfully ✅")
 else:
-    print("[GROK] GROK_API_KEY missing - client is None ❌")
+    print("[GROK] GROK_API_KEY missing - fallback client is None ❌")
 
 # Web3
 infura_url = f"https://mainnet.infura.io/v3/{os.getenv('INFURA_PROJECT_ID')}"
@@ -2719,24 +2730,37 @@ async def read_ui(
         logger.exception(f"Unexpected error in /ui: {e}")
         return HTMLResponse(content=f"<h1>Internal error: {str(e)}</h1>", status_code=500)
 
-
 @app.get("/queue-monitor", response_class=HTMLResponse)
-async def queue_monitor(request: Request):
-    """
-    Queue Monitor Dashboard - Shows real-time audit queue status by tier.
-    Publicly accessible for transparency about system load.
-    """
-    try:
-        template = jinja_env.get_template("queue-monitor.html")
-        html_content = template.render()
-        return HTMLResponse(content=html_content)
-    except FileNotFoundError:
-        logger.error(f"Queue monitor template not found: {os.path.abspath('templates/queue-monitor.html')}")
-        return HTMLResponse(content="<h1>Queue monitor not found. Check templates/queue-monitor.html.</h1>")
-    except Exception as e:
-        logger.exception(f"Unexpected error in /queue-monitor: {e}")
-        return HTMLResponse(content=f"<h1>Internal error: {str(e)}</h1>", status_code=500)
 
+async def queue_monitor(request: Request):
+
+    """
+
+    Queue Monitor Dashboard - Shows real-time audit queue status by tier.
+
+    Publicly accessible for transparency about system load.
+
+    """
+
+    try:
+
+        template = jinja_env.get_template("queue-monitor.html")
+
+        html_content = template.render()
+
+        return HTMLResponse(content=html_content)
+
+    except FileNotFoundError:
+
+        logger.error(f"Queue monitor template not found: {os.path.abspath('templates/queue-monitor.html')}")
+
+        return HTMLResponse(content="<h1>Queue monitor not found. Check templates/queue-monitor.html.</h1>")
+
+    except Exception as e:
+
+        logger.exception(f"Unexpected error in /queue-monitor: {e}")
+
+        return HTMLResponse(content=f"<h1>Internal error: {str(e)}</h1>", status_code=500)
 
 @app.get("/auth", response_class=HTMLResponse)
 async def read_auth(request: Request):
@@ -3890,9 +3914,9 @@ async def execute_queued_audit(job: AuditJob) -> dict:
         complexity_score = sum(code_str.count(keyword) for keyword in complexity_keywords) / max(functions_count, 1)
         complexity_score = min(round(complexity_score, 1), 10.0)
         
-        # Phase 4: AI Analysis
-        await audit_queue.update_phase(job.job_id, "grok", 60)
-        await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "grok", "progress": 60})
+        # Phase 4: AI Analysis (Claude primary, Grok fallback)
+        await audit_queue.update_phase(job.job_id, "claude", 60)
+        await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "claude", "progress": 60})
         
         # Compliance pre-scan
         compliance_scan = {}
@@ -3907,10 +3931,10 @@ async def execute_queued_audit(job: AuditJob) -> dict:
             details += f" Contract address: {contract_address}"
         
         report: dict = {}
-        
+
         try:
-            if not os.getenv("GROK_API_KEY"):
-                raise Exception("GROK_API_KEY not set")
+            if not os.getenv("ANTHROPIC_API_KEY") and not os.getenv("GROK_API_KEY"):
+                raise Exception("No AI API keys configured (ANTHROPIC_API_KEY or GROK_API_KEY)")
             
             prompt = PROMPT_TEMPLATE.format(
                 context=context,
@@ -3922,22 +3946,55 @@ async def execute_queued_audit(job: AuditJob) -> dict:
                 compliance_scan=json.dumps(compliance_scan, indent=2)
             )
             
-            response = client.chat.completions.create(
-                model="grok-4-1-fast-reasoning",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                stream=False,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "defi_audit_report",
-                        "strict": True,
-                        "schema": AUDIT_SCHEMA
-                    }
-                }
-            )
+            # Try Claude first, fallback to Grok
+            raw_response = ""
+            used_model = "unknown"
             
-            raw_response = response.choices[0].message.content or ""
+            if claude_client:
+                try:
+                    logger.info("[AI] Attempting Claude (primary)...")
+                    response = claude_client.messages.create(
+                        model="claude-sonnet-4-20250514",
+                        max_tokens=16384,
+                        messages=[{
+                            "role": "user",
+                            "content": prompt + "\n\nCRITICAL: Respond with ONLY valid JSON matching the required schema. No markdown code blocks, no backticks, no explanation outside the JSON object."
+                        }]
+                    )
+                    raw_response = response.content[0].text or ""
+                    used_model = "claude-sonnet-4"
+                    logger.info("[AI] Claude response received ✅")
+                except Exception as claude_err:
+                    logger.warning(f"[AI] Claude failed: {claude_err}, trying Grok fallback...")
+            
+            if not raw_response and grok_client:
+                try:
+                    logger.info("[AI] Attempting Grok (fallback)...")
+                    response = grok_client.chat.completions.create(
+                        model="grok-4-1-fast-reasoning",
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.0,
+                        stream=False,
+                        response_format={
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "defi_audit_report",
+                                "strict": True,
+                                "schema": AUDIT_SCHEMA
+                            }
+                        }
+                    )
+                    raw_response = response.choices[0].message.content or ""
+                    used_model = "grok-4-fast"
+                    logger.info("[AI] Grok fallback response received ✅")
+                except Exception as grok_err:
+                    logger.error(f"[AI] Grok fallback also failed: {grok_err}")
+                    raise Exception("Both Claude and Grok API calls failed")
+            
+            if not raw_response:
+                raise Exception("No AI client available - check API keys")
+            
+            logger.info(f"[AI] Used model: {used_model}")
             audit_json = json.loads(raw_response)
             
             # Calculate severity counts if missing
@@ -3962,21 +4019,21 @@ async def execute_queued_audit(job: AuditJob) -> dict:
             report = audit_json
             
         except Exception as e:
-            logger.error(f"Grok analysis failed: {e}")
+            logger.error(f"AI analysis failed: {e}")
             fallback_issues = mythril_results + [
                 {"type": d.get("name", "Slither finding"), "severity": "Medium", "description": str(d.get("details", "N/A")), "fix": "Manual review required"}
                 for d in (slither_findings or [])
             ]
             
             report = {
-                "risk_score": "Unknown (Grok failed)",
+                "risk_score": "Unknown (AI analysis failed)",
                 "critical_count": sum(1 for i in fallback_issues if i.get("severity", "").lower() == "critical"),
                 "high_count": sum(1 for i in fallback_issues if i.get("severity", "").lower() == "high"),
                 "medium_count": sum(1 for i in fallback_issues if i.get("severity", "").lower() == "medium"),
                 "low_count": sum(1 for i in fallback_issues if i.get("severity", "").lower() == "low"),
                 "issues": fallback_issues,
                 "predictions": [],
-                "recommendations": ["Grok analysis unavailable – review static analysis results above"],
+                "recommendations": ["AI analysis unavailable – review static analysis results above"],
                 "error": str(e)
             }
         
@@ -4497,7 +4554,7 @@ async def audit_contract(
                 logger.error(f"On-chain code fetch failed: {e}")
                 await broadcast_audit_log(effective_username, "No deployed code found")
         
-        # Pre-calculate code metrics (don't rely on Grok)
+        # Pre-calculate code metrics (don't rely on AI)
         lines_of_code = len([line for line in code_str.split('\n') if line.strip() and not line.strip().startswith('//')])
         functions_count = code_str.count('function ') + code_str.count('constructor(')
         
@@ -4508,9 +4565,9 @@ async def audit_contract(
         
         logger.info(f"[METRICS] Calculated: {lines_of_code} LOC, {functions_count} functions, complexity {complexity_score}")
         
-        # Grok API call
+        # AI Analysis (Claude primary, Grok fallback)
         await asyncio.sleep(0)  # Yield to event loop before heavy API call
-        await broadcast_audit_log(effective_username, "Sending to Grok AI")
+        await broadcast_audit_log(effective_username, "Sending to Claude AI")
                 # Run compliance pre-scan
         compliance_scan = {}
         try:
@@ -4520,9 +4577,9 @@ async def audit_contract(
             logger.warning(f"[COMPLIANCE] Pre-scan failed: {e}")
             compliance_scan = {"error": str(e)}
         try:
-            if not os.getenv("GROK_API_KEY"):
-                raise Exception("GROK_API_KEY not set")
-            
+            if not os.getenv("ANTHROPIC_API_KEY") and not os.getenv("GROK_API_KEY"):
+                raise Exception("No AI API keys configured (ANTHROPIC_API_KEY or GROK_API_KEY)")
+
             prompt = PROMPT_TEMPLATE.format(
                 context=context,
                 fuzzing_results=json.dumps(fuzzing_results),
@@ -4533,46 +4590,79 @@ async def audit_contract(
                 compliance_scan=json.dumps(compliance_scan, indent=2)
             )
             
-            # Direct synchronous call - OpenAI SDK handles this properly
-            response = client.chat.completions.create(
-                model="grok-4-1-fast-reasoning",  # Latest Grok 4 with reasoning
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                stream=False,  # Explicitly disable streaming
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "defi_audit_report",
-                        "strict": True,
-                        "schema": AUDIT_SCHEMA
-                    }
-                }
-            )
-
-            raw_response = response.choices[0].message.content or ""
+            # Try Claude first, fallback to Grok
+            raw_response = ""
+            used_model = "unknown"
+            
+            if claude_client:
+                try:
+                    logger.info("[AI] Attempting Claude (primary)...")
+                    response = claude_client.messages.create(
+                        model="claude-sonnet-4-20250514",
+                        max_tokens=16384,
+                        messages=[{
+                            "role": "user",
+                            "content": prompt + "\n\nCRITICAL: Respond with ONLY valid JSON matching the required schema. No markdown code blocks, no backticks, no explanation outside the JSON object."
+                        }]
+                    )
+                    raw_response = response.content[0].text or ""
+                    used_model = "claude-sonnet-4"
+                    logger.info("[AI] Claude response received ✅")
+                except Exception as claude_err:
+                    logger.warning(f"[AI] Claude failed: {claude_err}, trying Grok fallback...")
+            
+            if not raw_response and grok_client:
+                try:
+                    logger.info("[AI] Attempting Grok (fallback)...")
+                    response = grok_client.chat.completions.create(
+                        model="grok-4-1-fast-reasoning",
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.0,
+                        stream=False,
+                        response_format={
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "defi_audit_report",
+                                "strict": True,
+                                "schema": AUDIT_SCHEMA
+                            }
+                        }
+                    )
+                    raw_response = response.choices[0].message.content or ""
+                    used_model = "grok-4-fast"
+                    logger.info("[AI] Grok fallback response received ✅")
+                except Exception as grok_err:
+                    logger.error(f"[AI] Grok fallback also failed: {grok_err}")
+                    raise Exception("Both Claude and Grok API calls failed")
+            
+            if not raw_response:
+                raise Exception("No AI client available - check API keys")
+            
+            logger.info(f"[AI] Used model: {used_model}")
             # === CRITICAL DEBUG LOGGING ===
-            logger.info(f"[GROK_DEBUG] ===== RAW RESPONSE START =====")
-            logger.info(f"[GROK_DEBUG] Length: {len(raw_response)} characters")
-            logger.info(f"[GROK_DEBUG] First 1000 chars: {raw_response[:1000]}")
-            logger.info(f"[GROK_DEBUG] Last 500 chars: {raw_response[-500:]}")
-            logger.info(f"[GROK_DEBUG] ===== RAW RESPONSE END =====")
+            logger.info(f"[AI_DEBUG] ===== RAW RESPONSE START =====")
+            logger.info(f"[AI_DEBUG] Model used: {used_model}")
+            logger.info(f"[AI_DEBUG] Length: {len(raw_response)} characters")
+            logger.info(f"[AI_DEBUG] First 1000 chars: {raw_response[:1000]}")
+            logger.info(f"[AI_DEBUG] Last 500 chars: {raw_response[-500:]}")
+            logger.info(f"[AI_DEBUG] ===== RAW RESPONSE END =====")
 
             try:
                 audit_json = json.loads(raw_response)
-                logger.info(f"[GROK_DEBUG] Parsed JSON successfully")
-                logger.info(f"[GROK_DEBUG] Keys in response: {list(audit_json.keys())}")
-                logger.info(f"[GROK_DEBUG] Issues count: {len(audit_json.get('issues', []))}")
-                logger.info(f"[GROK_DEBUG] Issues array: {json.dumps(audit_json.get('issues', []), indent=2)}")
+                logger.info(f"[AI_DEBUG] Parsed JSON successfully")
+                logger.info(f"[AI_DEBUG] Keys in response: {list(audit_json.keys())}")
+                logger.info(f"[AI_DEBUG] Issues count: {len(audit_json.get('issues', []))}")
+                logger.info(f"[AI_DEBUG] Issues array: {json.dumps(audit_json.get('issues', []), indent=2)}")
             except json.JSONDecodeError as e:
-                logger.error(f"[GROK_DEBUG] JSON parse failed: {e}")
-                logger.error(f"[GROK_DEBUG] Full response: {raw_response}")
+                logger.error(f"[AI_DEBUG] JSON parse failed: {e}")
+                logger.error(f"[AI_DEBUG] Full response: {raw_response}")
             # Debug logging
-            logger.info(f"[GROK] Response length: {len(raw_response)} chars")
-            logger.debug(f"[GROK] First 500 chars: {raw_response[:500]}")
+            logger.info(f"[AI] Response length: {len(raw_response)} chars")
+            logger.debug(f"[AI] First 500 chars: {raw_response[:500]}")
             
             audit_json = json.loads(raw_response)
             
-            # Calculate severity counts if Grok didn't return them
+            # Calculate severity counts if AI didn't return them
             if "critical_count" not in audit_json or audit_json.get("critical_count") is None:
                 issues = audit_json.get("issues", [])
                 critical_count = sum(1 for i in issues if i.get("severity", "").lower() == "critical")
@@ -4585,7 +4675,7 @@ async def audit_contract(
                 audit_json["medium_count"] = medium_count
                 audit_json["low_count"] = low_count
                 
-                logger.info(f"[GROK] Calculated severity counts: C={critical_count}, H={high_count}, M={medium_count}, L={low_count}")
+                logger.info(f"[AI] Calculated severity counts: C={critical_count}, H={high_count}, M={medium_count}, L={low_count}")
             
             # Override code_quality_metrics with our accurate calculation
             if "code_quality_metrics" in audit_json:
@@ -4598,7 +4688,7 @@ async def audit_contract(
                     "functions_count": functions_count,
                     "complexity_score": complexity_score
                 }
-            logger.info(f"[METRICS] Overrode Grok metrics with accurate counts: {lines_of_code} LOC")
+            logger.info(f"[METRICS] Overrode AI metrics with accurate counts: {lines_of_code} LOC")
             
             # Verify Pro+ fields are present
             
@@ -4614,9 +4704,9 @@ async def audit_contract(
             report = audit_json
         
         except Exception as e:
-            logger.error(f"Grok analysis failed for {effective_username}: {e}")
-            logger.exception("FULL GROK ERROR TRACEBACK:")
-            await broadcast_audit_log(effective_username, f"Grok analysis failed: {str(e)}")
+            logger.error(f"AI analysis failed for {effective_username}: {e}")
+            logger.exception("FULL AI ERROR TRACEBACK:")
+            await broadcast_audit_log(effective_username, f"AI analysis failed: {str(e)}")
             
             # Fallback: still show Slither/Mythril results with calculated counts
             fallback_issues = mythril_results + [
@@ -4631,14 +4721,14 @@ async def audit_contract(
             low_count = sum(1 for i in fallback_issues if i.get("severity", "").lower() == "low")
             
             report.update({
-                "risk_score": "Unknown (Grok failed)",
+                "risk_score": "Unknown (AI analysis failed)",
                 "critical_count": critical_count,
                 "high_count": high_count,
                 "medium_count": medium_count,
                 "low_count": low_count,
                 "issues": fallback_issues,
                 "predictions": [],
-                "recommendations": ["Grok analysis unavailable – review static analysis results above"],
+                "recommendations": ["AI analysis unavailable – review static analysis results above"],
                 "error": str(e)
             })
         
