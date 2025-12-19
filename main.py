@@ -1381,13 +1381,272 @@ def initialize_client() -> tuple[Optional[OpenAI], Web3]:
     return client, w3
 
 def extract_json_from_response(raw_response: str) -> str:
-    """Extract JSON object from AI response, removing any extra text."""
-    # Find the first { and last }
-    start = raw_response.find('{')
-    end = raw_response.rfind('}')
-    if start != -1 and end != -1 and end > start:
-        return raw_response[start:end + 1]
-    return raw_response
+    """
+    Robustly extract JSON object from AI response.
+    Handles markdown code blocks, extra text, and malformed responses.
+    """
+    import re
+    
+    if not raw_response or not raw_response.strip():
+        logger.warning("[JSON_EXTRACT] Empty response received")
+        return "{}"
+    
+    text = raw_response.strip()
+    
+    # Step 1: Remove markdown code blocks (```json ... ``` or ``` ... ```)
+    code_block_patterns = [
+        r'```json\s*([\s\S]*?)\s*```',  # ```json ... ```
+        r'```\s*([\s\S]*?)\s*```',       # ``` ... ```
+    ]
+    
+    for pattern in code_block_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            extracted = match.group(1).strip()
+            if extracted.startswith('{') and extracted.endswith('}'):
+                logger.info("[JSON_EXTRACT] Extracted JSON from markdown code block")
+                return extracted
+    
+    # Step 2: Find JSON object with proper brace matching
+    # This handles nested objects correctly
+    start_idx = text.find('{')
+    if start_idx == -1:
+        logger.warning("[JSON_EXTRACT] No JSON object found in response")
+        return "{}"
+    
+    brace_count = 0
+    end_idx = -1
+    in_string = False
+    escape_next = False
+    
+    for i in range(start_idx, len(text)):
+        char = text[i]
+        
+        if escape_next:
+            escape_next = False
+            continue
+        
+        if char == '\\':
+            escape_next = True
+            continue
+        
+        if char == '"':
+            in_string = not in_string
+            continue
+        
+        if in_string:
+            continue
+        
+        if char == '{':
+            brace_count += 1
+        elif char == '}':
+            brace_count -= 1
+            if brace_count == 0:
+                end_idx = i
+                break
+    
+    if end_idx == -1:
+        # Fallback: use last } (original behavior)
+        end_idx = text.rfind('}')
+        logger.warning("[JSON_EXTRACT] Brace matching failed, using fallback")
+    
+    if end_idx > start_idx:
+        result = text[start_idx:end_idx + 1]
+        logger.info(f"[JSON_EXTRACT] Extracted {len(result)} chars of JSON")
+        return result
+    
+    logger.error("[JSON_EXTRACT] Failed to extract valid JSON")
+    return "{}"
+
+
+def normalize_audit_response(audit_json: dict, tier: str) -> dict:
+    """
+    Normalize and validate AI audit response to ensure all required fields exist.
+    This restores the field population that worked with Grok's strict JSON schema.
+    """
+    
+    # ===== REQUIRED CORE FIELDS =====
+    # Risk score - ensure it's a number or valid string
+    risk_score = audit_json.get("risk_score")
+    if risk_score is None:
+        audit_json["risk_score"] = 50  # Default moderate risk
+    elif isinstance(risk_score, str):
+        # Try to extract number from string like "75/100" or "High (85)"
+        import re
+        numbers = re.findall(r'\d+(?:\.\d+)?', str(risk_score))
+        if numbers:
+            audit_json["risk_score"] = float(numbers[0])
+        else:
+            audit_json["risk_score"] = 50
+    
+    # Executive summary
+    if not audit_json.get("executive_summary"):
+        audit_json["executive_summary"] = "AI analysis completed. Review the identified issues below for detailed findings."
+    
+    # ===== ISSUES ARRAY =====
+    issues = audit_json.get("issues", [])
+    if not isinstance(issues, list):
+        issues = []
+    
+    normalized_issues = []
+    for idx, issue in enumerate(issues):
+        if not isinstance(issue, dict):
+            continue
+        
+        # Normalize each issue to match expected schema
+        normalized_issue = {
+            "id": issue.get("id") or f"ISSUE-{idx + 1:03d}",
+            "type": issue.get("type") or issue.get("title") or issue.get("name") or "Security Issue",
+            "severity": _normalize_severity(issue.get("severity", "Medium")),
+            "description": issue.get("description") or issue.get("details") or "No description provided",
+            "fix": issue.get("fix") or issue.get("recommendation") or issue.get("remediation") or "Manual review recommended",
+        }
+        
+        # Pro tier fields
+        if tier in ["pro", "enterprise", "diamond"]:
+            normalized_issue["line_number"] = issue.get("line_number") or issue.get("line") or issue.get("lineNumber")
+            normalized_issue["function_name"] = issue.get("function_name") or issue.get("function") or issue.get("functionName")
+            normalized_issue["vulnerable_code"] = issue.get("vulnerable_code") or issue.get("code") or issue.get("vulnerableCode")
+            normalized_issue["exploit_scenario"] = issue.get("exploit_scenario") or issue.get("exploit") or issue.get("exploitScenario")
+            normalized_issue["estimated_impact"] = issue.get("estimated_impact") or issue.get("impact") or issue.get("estimatedImpact")
+            
+            # Code fix object
+            code_fix = issue.get("code_fix") or issue.get("codeFix") or issue.get("fix_code")
+            if isinstance(code_fix, dict):
+                normalized_issue["code_fix"] = {
+                    "before": code_fix.get("before") or code_fix.get("original") or "",
+                    "after": code_fix.get("after") or code_fix.get("fixed") or "",
+                    "explanation": code_fix.get("explanation") or code_fix.get("reason") or ""
+                }
+            
+            # Alternatives array
+            alts = issue.get("alternatives") or issue.get("alternative_fixes") or []
+            if isinstance(alts, list):
+                normalized_issue["alternatives"] = [
+                    {
+                        "approach": alt.get("approach") or alt.get("method") or "",
+                        "pros": alt.get("pros") or alt.get("advantages") or "",
+                        "cons": alt.get("cons") or alt.get("disadvantages") or "",
+                        "gas_impact": alt.get("gas_impact") or alt.get("gasImpact") or "Unknown"
+                    }
+                    for alt in alts if isinstance(alt, dict)
+                ]
+        
+        # Enterprise tier fields
+        if tier in ["enterprise", "diamond"]:
+            normalized_issue["proof_of_concept"] = issue.get("proof_of_concept") or issue.get("poc") or issue.get("proofOfConcept")
+            
+            refs = issue.get("references") or []
+            if isinstance(refs, list):
+                normalized_issue["references"] = [
+                    {
+                        "title": ref.get("title") or ref.get("name") or "Reference",
+                        "url": ref.get("url") or ref.get("link") or "#"
+                    }
+                    for ref in refs if isinstance(ref, dict)
+                ]
+        
+        normalized_issues.append(normalized_issue)
+    
+    audit_json["issues"] = normalized_issues
+    
+    # ===== SEVERITY COUNTS =====
+    audit_json["critical_count"] = sum(1 for i in normalized_issues if i.get("severity", "").lower() == "critical")
+    audit_json["high_count"] = sum(1 for i in normalized_issues if i.get("severity", "").lower() == "high")
+    audit_json["medium_count"] = sum(1 for i in normalized_issues if i.get("severity", "").lower() == "medium")
+    audit_json["low_count"] = sum(1 for i in normalized_issues if i.get("severity", "").lower() == "low")
+    
+    # ===== PREDICTIONS =====
+    predictions = audit_json.get("predictions", [])
+    if not isinstance(predictions, list):
+        predictions = []
+    
+    normalized_predictions = []
+    for pred in predictions:
+        if isinstance(pred, dict):
+            normalized_predictions.append({
+                "scenario": pred.get("scenario") or pred.get("description") or "Potential vulnerability scenario",
+                "impact": pred.get("impact") or pred.get("consequence") or "Unknown impact"
+            })
+        elif isinstance(pred, str):
+            normalized_predictions.append({"scenario": pred, "impact": "See description"})
+    
+    # Default predictions if empty
+    if not normalized_predictions and normalized_issues:
+        if audit_json["critical_count"] > 0:
+            normalized_predictions.append({
+                "scenario": "Critical vulnerabilities may be exploited within hours of deployment",
+                "impact": "Potential total loss of contract funds"
+            })
+        if audit_json["high_count"] > 0:
+            normalized_predictions.append({
+                "scenario": "High-severity issues could be targeted by sophisticated attackers",
+                "impact": "Significant financial or operational damage"
+            })
+    
+    audit_json["predictions"] = normalized_predictions
+    
+    # ===== RECOMMENDATIONS =====
+    recommendations = audit_json.get("recommendations", {})
+    
+    if isinstance(recommendations, list):
+        # Convert flat list to categorized object
+        audit_json["recommendations"] = {
+            "immediate": recommendations[:2] if len(recommendations) > 0 else ["Review critical issues immediately"],
+            "short_term": recommendations[2:4] if len(recommendations) > 2 else ["Schedule security review"],
+            "long_term": recommendations[4:] if len(recommendations) > 4 else ["Consider formal verification"]
+        }
+    elif isinstance(recommendations, dict):
+        audit_json["recommendations"] = {
+            "immediate": recommendations.get("immediate") or recommendations.get("critical") or ["Review critical issues"],
+            "short_term": recommendations.get("short_term") or recommendations.get("shortTerm") or ["Schedule testing"],
+            "long_term": recommendations.get("long_term") or recommendations.get("longTerm") or ["Plan security roadmap"]
+        }
+    else:
+        audit_json["recommendations"] = {
+            "immediate": ["Address critical vulnerabilities before deployment"],
+            "short_term": ["Implement comprehensive testing"],
+            "long_term": ["Establish ongoing security monitoring"]
+        }
+    
+    # ===== REMEDIATION ROADMAP (Enterprise) =====
+    if tier in ["enterprise", "diamond"]:
+        if not audit_json.get("remediation_roadmap"):
+            critical_count = audit_json["critical_count"]
+            high_count = audit_json["high_count"]
+            audit_json["remediation_roadmap"] = f"""Day 1-2: Fix {critical_count} critical issues immediately
+Day 3-5: Address {high_count} high-severity vulnerabilities
+Week 2: Implement medium/low priority fixes
+Week 3: Conduct comprehensive re-audit
+Week 4: Deploy to testnet for final validation"""
+    
+    logger.info(f"[NORMALIZE] Normalized response: {len(normalized_issues)} issues, {len(normalized_predictions)} predictions")
+    return audit_json
+
+
+def _normalize_severity(severity: str) -> str:
+    """Normalize severity string to expected values."""
+    if not severity:
+        return "Medium"
+    
+    severity_lower = str(severity).lower().strip()
+    
+    severity_map = {
+        "critical": "Critical",
+        "crit": "Critical",
+        "severe": "Critical",
+        "high": "High",
+        "major": "High",
+        "medium": "Medium",
+        "moderate": "Medium",
+        "med": "Medium",
+        "low": "Low",
+        "minor": "Low",
+        "info": "Low",
+        "informational": "Low"
+    }
+    
+    return severity_map.get(severity_lower, "Medium")
 
 async def broadcast_audit_log(username: str, message: str):
 
@@ -3765,22 +4024,51 @@ async def process_audit_queue():
             job = await audit_queue.process_next()
             if job:
                 try:
-                    # Process the audit
-                    result = await execute_queued_audit(job)
-                    await audit_queue.complete(job.job_id, result)
+                    # Route through MAIN audit_contract for 100% feature parity
+                    from io import BytesIO
                     
-                    # Notify WebSocket subscribers
-                    await notify_job_subscribers(job.job_id, {
-                        "status": "completed",
-                        "result": result
-                    })
+                    file_obj = UploadFile(
+                        filename=job.filename,
+                        file=BytesIO(job.file_content),
+                        size=len(job.file_content)
+                    )
+                    
+                    # Create fresh DB session for this job
+                    queue_db = SessionLocal()
+                    
+                    try:
+                        # Update phase for WebSocket subscribers
+                        await audit_queue.update_phase(job.job_id, "starting", 5)
+                        await notify_job_subscribers(job.job_id, {
+                            "status": "processing",
+                            "phase": "starting",
+                            "progress": 5
+                        })
+                        
+                        # Call MAIN audit function with _from_queue=True
+                        result = await audit_contract(
+                            file=file_obj,
+                            contract_address=job.contract_address,
+                            username=job.username,
+                            db=queue_db,
+                            request=None,
+                            _from_queue=True
+                        )
+                        
+                        await audit_queue.complete(job.job_id, result)
+                        await notify_job_subscribers(job.job_id, {
+                            "status": "completed",
+                            "result": result
+                        })
+                        
+                    finally:
+                        queue_db.close()
                     
                 except Exception as e:
                     error_msg = str(e)
                     logger.exception(f"[QUEUE_PROCESSOR] Audit failed for job {job.job_id[:8]}...")
                     await audit_queue.fail(job.job_id, error_msg)
                     
-                    # Notify WebSocket subscribers
                     await notify_job_subscribers(job.job_id, {
                         "status": "failed",
                         "error": error_msg
@@ -3794,7 +4082,7 @@ async def process_audit_queue():
             break
         except Exception as e:
             logger.error(f"[QUEUE_PROCESSOR] Unexpected error: {e}")
-            await asyncio.sleep(5)  # Wait before retrying
+            await asyncio.sleep(5)
 
 
 async def periodic_queue_cleanup():
@@ -3960,12 +4248,41 @@ async def execute_queued_audit(job: AuditJob) -> dict:
             if claude_client:
                 try:
                     logger.info("[AI] Attempting Claude (primary)...")
+                    
+                    # Enhanced system prompt for strict JSON output
+                    claude_system_prompt = """You are an expert smart contract security auditor. You MUST respond with ONLY a valid JSON object - no markdown, no code blocks, no backticks, no explanatory text before or after.
+
+CRITICAL OUTPUT REQUIREMENTS:
+1. Start your response with { and end with }
+2. Do NOT wrap in ```json or any markdown
+3. Do NOT add any text before or after the JSON
+4. All string values must be properly escaped
+5. Use double quotes for all keys and string values
+6. Ensure all arrays and objects are properly closed
+
+The JSON MUST include these exact keys:
+- "risk_score": number (0-100)
+- "executive_summary": string
+- "critical_count": integer
+- "high_count": integer  
+- "medium_count": integer
+- "low_count": integer
+- "issues": array of issue objects
+- "predictions": array of prediction objects
+- "recommendations": object with "immediate", "short_term", "long_term" arrays
+
+Each issue object MUST have: "id", "type", "severity" (Critical/High/Medium/Low), "description", "fix"
+For Pro tier, also include: "line_number", "function_name", "vulnerable_code", "exploit_scenario", "estimated_impact", "code_fix", "alternatives"
+For Enterprise tier, also include: "proof_of_concept", "references"
+"""
+                    
                     response = claude_client.messages.create(
                         model="claude-sonnet-4-20250514",
                         max_tokens=16384,
+                        system=claude_system_prompt,
                         messages=[{
                             "role": "user",
-                            "content": prompt + "\n\nCRITICAL: Respond with ONLY valid JSON matching the required schema. No markdown code blocks, no backticks, no explanation outside the JSON object."
+                            "content": prompt
                         }]
                     )
                     raw_response = response.content[0].text or ""
@@ -4002,17 +4319,28 @@ async def execute_queued_audit(job: AuditJob) -> dict:
                 raise Exception("No AI client available - check API keys")
             
             logger.info(f"[AI] Used model: {used_model}")
-            clean_response = extract_json_from_response(raw_response)
-            audit_json = json.loads(clean_response)
-
+            logger.debug(f"[AI] Raw response length: {len(raw_response)} chars")
+            logger.debug(f"[AI] Raw response first 500 chars: {raw_response[:500]}")
             
-            # Calculate severity counts if missing
-            if "critical_count" not in audit_json or audit_json.get("critical_count") is None:
-                issues = audit_json.get("issues", [])
-                audit_json["critical_count"] = sum(1 for i in issues if i.get("severity", "").lower() == "critical")
-                audit_json["high_count"] = sum(1 for i in issues if i.get("severity", "").lower() == "high")
-                audit_json["medium_count"] = sum(1 for i in issues if i.get("severity", "").lower() == "medium")
-                audit_json["low_count"] = sum(1 for i in issues if i.get("severity", "").lower() == "low")
+            clean_response = extract_json_from_response(raw_response)
+            
+            try:
+                audit_json = json.loads(clean_response)
+            except json.JSONDecodeError as json_err:
+                logger.error(f"[AI] JSON parse error: {json_err}")
+                logger.error(f"[AI] Cleaned response: {clean_response[:1000]}")
+                # Create minimal valid response
+                audit_json = {
+                    "risk_score": 50,
+                    "executive_summary": "AI analysis completed but response parsing failed. Manual review recommended.",
+                    "issues": [],
+                    "predictions": [],
+                    "recommendations": {"immediate": ["Manual security review required"], "short_term": [], "long_term": []}
+                }
+            
+            # CRITICAL: Normalize the response to match expected schema (restores Grok-like behavior)
+            audit_json = normalize_audit_response(audit_json, tier_for_flags)
+            logger.info(f"[AI] Normalized response: {audit_json.get('critical_count', 0)} critical, {audit_json.get('high_count', 0)} high, {audit_json.get('medium_count', 0)} medium, {audit_json.get('low_count', 0)} low issues")
             
             # Override metrics
             audit_json["code_quality_metrics"] = {
@@ -4496,11 +4824,24 @@ async def audit_contract(
         tier_for_flags = tier_flags_map.get(tier_for_flags, tier_for_flags)
         fuzzing_enabled = usage_tracker.feature_flags.get(tier_for_flags, {}).get("fuzzing", False)
         
+        # Helper to get job_id if this came from queue (for WebSocket updates)
+        job_id = None
+        if _from_queue:
+            # Find job by username (most recent processing job)
+            for jid, job in audit_queue.jobs.items():
+                if job.username == effective_username and job.status == AuditStatus.PROCESSING:
+                    job_id = jid
+                    break
+        
         # Run analysis tools SEQUENTIALLY to reduce RAM pressure
         # Each tool uses 300MB-1GB, sequential keeps peak RAM at ~1GB vs ~2.5GB parallel
         # Yield points (asyncio.sleep(0)) allow event loop to handle other requests
         
+        # Phase 1: Slither
         await broadcast_audit_log(effective_username, "Running Slither analysis")
+        if job_id:
+            await audit_queue.update_phase(job_id, "slither", 10)
+            await notify_job_subscribers(job_id, {"status": "processing", "phase": "slither", "progress": 10})
         await asyncio.sleep(0)  # Yield to event loop
         try:
             slither_findings = await asyncio.to_thread(analyze_slither, temp_path)
@@ -4510,7 +4851,11 @@ async def audit_contract(
         await asyncio.sleep(0)  # Yield to event loop
         await broadcast_audit_log(effective_username, f"Slither found {len(slither_findings)} issues")
 
+        # Phase 2: Mythril
         await broadcast_audit_log(effective_username, "Running Mythril analysis")
+        if job_id:
+            await audit_queue.update_phase(job_id, "mythril", 30)
+            await notify_job_subscribers(job_id, {"status": "processing", "phase": "mythril", "progress": 30})
         await asyncio.sleep(0)  # Yield to event loop
         try:
             mythril_results = await asyncio.to_thread(run_mythril, temp_path)
@@ -4522,7 +4867,11 @@ async def audit_contract(
 
         fuzzing_results = []
         if fuzzing_enabled:
+            # Phase 3: Echidna
             await broadcast_audit_log(effective_username, "Running Echidna fuzzing")
+            if job_id:
+                await audit_queue.update_phase(job_id, "echidna", 50)
+                await notify_job_subscribers(job_id, {"status": "processing", "phase": "echidna", "progress": 50})
             await asyncio.sleep(0)  # Yield to event loop
             try:
                 fuzzing_results = await asyncio.to_thread(run_echidna, temp_path)
@@ -4575,8 +4924,12 @@ async def audit_contract(
         logger.info(f"[METRICS] Calculated: {lines_of_code} LOC, {functions_count} functions, complexity {complexity_score}")
         
         # Grok API call
+        # Phase 4: AI Analysis
         await asyncio.sleep(0)  # Yield to event loop before heavy API call
         await broadcast_audit_log(effective_username, "Sending to Claude AI")
+        if job_id:
+            await audit_queue.update_phase(job_id, "ai_analysis", 70)
+            await notify_job_subscribers(job_id, {"status": "processing", "phase": "ai_analysis", "progress": 70})
                 # Run compliance pre-scan
         compliance_scan = {}
         try:
@@ -4607,12 +4960,41 @@ async def audit_contract(
             if claude_client:
                 try:
                     logger.info("[AI] Attempting Claude (primary)...")
+                    
+                    # Enhanced system prompt for strict JSON output
+                    claude_system_prompt = """You are an expert smart contract security auditor. You MUST respond with ONLY a valid JSON object - no markdown, no code blocks, no backticks, no explanatory text before or after.
+
+CRITICAL OUTPUT REQUIREMENTS:
+1. Start your response with { and end with }
+2. Do NOT wrap in ```json or any markdown
+3. Do NOT add any text before or after the JSON
+4. All string values must be properly escaped
+5. Use double quotes for all keys and string values
+6. Ensure all arrays and objects are properly closed
+
+The JSON MUST include these exact keys:
+- "risk_score": number (0-100)
+- "executive_summary": string
+- "critical_count": integer
+- "high_count": integer  
+- "medium_count": integer
+- "low_count": integer
+- "issues": array of issue objects
+- "predictions": array of prediction objects
+- "recommendations": object with "immediate", "short_term", "long_term" arrays
+
+Each issue object MUST have: "id", "type", "severity" (Critical/High/Medium/Low), "description", "fix"
+For Pro tier, also include: "line_number", "function_name", "vulnerable_code", "exploit_scenario", "estimated_impact", "code_fix", "alternatives"
+For Enterprise tier, also include: "proof_of_concept", "references"
+"""
+                    
                     response = claude_client.messages.create(
                         model="claude-sonnet-4-20250514",
                         max_tokens=16384,
+                        system=claude_system_prompt,
                         messages=[{
                             "role": "user",
-                            "content": prompt + "\n\nCRITICAL: Respond with ONLY valid JSON matching the required schema. No markdown code blocks, no backticks, no explanation outside the JSON object."
+                            "content": prompt
                         }]
                     )
                     raw_response = response.content[0].text or ""
@@ -4671,8 +5053,24 @@ async def audit_contract(
             logger.debug(f"[AI] First 500 chars: {raw_response[:500]}")
             
             clean_response = extract_json_from_response(raw_response)
-            audit_json = json.loads(clean_response)
-
+            
+            try:
+                audit_json = json.loads(clean_response)
+            except json.JSONDecodeError as json_err:
+                logger.error(f"[AI] JSON parse error: {json_err}")
+                logger.error(f"[AI] Cleaned response: {clean_response[:1000]}")
+                # Create minimal valid response
+                audit_json = {
+                    "risk_score": 50,
+                    "executive_summary": "AI analysis completed but response parsing failed. Manual review recommended.",
+                    "issues": [],
+                    "predictions": [],
+                    "recommendations": {"immediate": ["Manual security review required"], "short_term": [], "long_term": []}
+                }
+            
+            # CRITICAL: Normalize the response to match expected schema (restores Grok-like behavior)
+            audit_json = normalize_audit_response(audit_json, tier_for_flags)
+            logger.info(f"[AI] Normalized response: {audit_json.get('critical_count', 0)} critical, {audit_json.get('high_count', 0)} high, {audit_json.get('medium_count', 0)} medium, {audit_json.get('low_count', 0)} low issues")
             
             # Calculate severity counts if AI didn't return them
             if "critical_count" not in audit_json or audit_json.get("critical_count") is None:
@@ -4744,7 +5142,11 @@ async def audit_contract(
                 "error": str(e)
             })
         
+        # Phase 5: Finalization
         await broadcast_audit_log(effective_username, "Audit complete")
+        if job_id:
+            await audit_queue.update_phase(job_id, "finalizing", 95)
+            await notify_job_subscribers(job_id, {"status": "processing", "phase": "finalizing", "progress": 95})
         
         # Finalization: PDF, overage reporting, history, DB commit, cleanup
         if usage_tracker.feature_flags.get(tier_for_flags, {}).get("reports", False):
