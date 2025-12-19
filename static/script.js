@@ -1260,9 +1260,10 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         
         // ISSUES TABLE - Enhanced for Pro+ tiers
-        issuesBody.innerHTML = report.issues.length === 0 
+        const issues = report.issues || [];
+        issuesBody.innerHTML = issues.length === 0
           ? '<tr><td colspan="8">No issues found.</td></tr>'
-          : report.issues.map((issue, index) => {
+          : issues.map((issue, index) => {
           // Add null safety checks for all fields
           const severity = (issue.severity || "unknown").toLowerCase();
           const severityDisplay = issue.severity || "Unknown";
