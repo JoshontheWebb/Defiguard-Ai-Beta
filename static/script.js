@@ -1204,11 +1204,12 @@ document.addEventListener("DOMContentLoaded", () => {
         fullDataStructure: JSON.stringify(data, null, 2).substring(0, 500) // First 500 chars
       }); // Store tier info
   
-      const report = data.report;
+      const report = data.report || {};
       const overageCost = data.overage_cost || null;
         
         // Display risk score
         riskScoreSpan.textContent = report.risk_score || "N/A";
+
         
         // Add risk score color coding
         const riskScore = parseFloat(report.risk_score);
