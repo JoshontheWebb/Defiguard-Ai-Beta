@@ -1380,7 +1380,17 @@ def initialize_client() -> tuple[Optional[OpenAI], Web3]:
     logger.info("Clients initialized")
     return client, w3
 
+def extract_json_from_response(raw_response: str) -> str:
+    """Extract JSON object from AI response, removing any extra text."""
+    # Find the first { and last }
+    start = raw_response.find('{')
+    end = raw_response.rfind('}')
+    if start != -1 and end != -1 and end > start:
+        return raw_response[start:end + 1]
+    return raw_response
+
 async def broadcast_audit_log(username: str, message: str):
+
     """Send audit log message to user's active WebSocket."""
     ws = active_audit_websockets.get(username)
     if ws and ws.application_state == WebSocketState.CONNECTED:
@@ -3992,7 +4002,9 @@ async def execute_queued_audit(job: AuditJob) -> dict:
                 raise Exception("No AI client available - check API keys")
             
             logger.info(f"[AI] Used model: {used_model}")
-            audit_json = json.loads(raw_response)
+            clean_response = extract_json_from_response(raw_response)
+            audit_json = json.loads(clean_response)
+
             
             # Calculate severity counts if missing
             if "critical_count" not in audit_json or audit_json.get("critical_count") is None:
@@ -4658,7 +4670,9 @@ async def audit_contract(
             logger.info(f"[AI] Response length: {len(raw_response)} chars")
             logger.debug(f"[AI] First 500 chars: {raw_response[:500]}")
             
-            audit_json = json.loads(raw_response)
+            clean_response = extract_json_from_response(raw_response)
+            audit_json = json.loads(clean_response)
+
             
             # Calculate severity counts if AI didn't return them
             if "critical_count" not in audit_json or audit_json.get("critical_count") is None:
