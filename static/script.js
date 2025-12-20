@@ -1909,6 +1909,18 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
                 loading.classList.remove("show");
                 if (result.tier) window.currentAuditTier = result.tier;
                 handleAuditResponse(result);
+                
+                // Update sidebar with fresh count from response
+                if (result.audit_count !== undefined && result.audit_limit !== undefined) {
+                  const remaining = result.audit_limit === 9999 ? 'Unlimited' : (result.audit_limit - result.audit_count);
+                  if (sidebarTierUsage) {
+                    sidebarTierUsage.textContent = result.audit_limit === 9999 
+                      ? "Unlimited audits" 
+                      : `${remaining} audits remaining (${result.audit_count}/${result.audit_limit} used)`;
+                  }
+                  log('USAGE', `Updated from queue: ${result.audit_count}/${result.audit_limit} audits used`);
+                }
+                
                 await fetchTierData();
               };
               
@@ -1935,6 +1947,19 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
               loading.classList.remove("show");
               if (data.tier) window.currentAuditTier = data.tier;
               handleAuditResponse(data);
+              
+              // Update sidebar with fresh count from response (faster than full fetch)
+              if (data.audit_count !== undefined && data.audit_limit !== undefined) {
+                const remaining = data.audit_limit === 9999 ? 'Unlimited' : (data.audit_limit - data.audit_count);
+                if (sidebarTierUsage) {
+                  sidebarTierUsage.textContent = data.audit_limit === 9999 
+                    ? "Unlimited audits" 
+                    : `${remaining} audits remaining (${data.audit_count}/${data.audit_limit} used)`;
+                }
+                log('USAGE', `Updated: ${data.audit_count}/${data.audit_limit} audits used`);
+              }
+              
+              // Also do full tier refresh to sync everything
               await fetchTierData();
             }
             

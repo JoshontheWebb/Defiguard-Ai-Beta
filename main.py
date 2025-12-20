@@ -4585,13 +4585,28 @@ async def audit_contract(
         logger.error(f"File read failed for {effective_username}: {e}")
         raise HTTPException(status_code=400, detail=f"File read failed: {str(e)}")
     
-    # Tier & usage checks
+    # Tier & usage checks (DO NOT increment here - only count successful audits)
     try:
         current_tier = getattr(user, "tier", os.getenv("TIER", "free"))
         has_diamond_flag = bool(getattr(user, "has_diamond", False))
         
-        current_count = usage_tracker.increment(file_size, effective_username, db, commit=False)
-        logger.info(f"Audit request {current_count} processed for contract {contract_address or 'uploaded'} with tier {current_tier} for user {effective_username}")
+        # Check usage limit WITHOUT incrementing (we only increment on SUCCESS)
+        tier_limits = {"free": FREE_LIMIT, "starter": STARTER_LIMIT, "beginner": STARTER_LIMIT, "pro": PRO_LIMIT, "enterprise": ENTERPRISE_LIMIT, "diamond": ENTERPRISE_LIMIT}
+        current_limit = tier_limits.get(current_tier, FREE_LIMIT)
+        
+        # Get current audit count from user's history
+        current_count = len(json.loads(user.audit_history or "[]")) if user else usage_tracker.count
+        
+        if current_count >= current_limit and current_tier in ["free", "starter", "beginner"]:
+            logger.warning(f"Usage limit check: {effective_username} at {current_count}/{current_limit}")
+            raise HTTPException(status_code=403, detail=f"Usage limit exceeded for {current_tier} tier. Limit is {current_limit}. Upgrade tier.")
+        
+        # Check file size limit (but don't increment count yet)
+        size_limit = usage_tracker.size_limits.get(current_tier, 500 * 1024)
+        if file_size > size_limit and not has_diamond_flag and current_tier not in ["enterprise", "diamond"]:
+            raise HTTPException(status_code=400, detail=f"File size exceeds {current_tier} tier limit. Upgrade to continue.")
+        
+        logger.info(f"Audit request validated for contract {contract_address or 'uploaded'} with tier {current_tier} for user {effective_username} ({current_count}/{current_limit} audits used)")
     
     except HTTPException as e:
         # Handle size/usage limit redirects
@@ -5112,11 +5127,19 @@ For Enterprise tier, also include: "proof_of_concept", "references"
         except Exception as e:
             logger.error(f"Failed to delete temp file: {e}")
         
-        # Persist usage increment
-        try:
-            usage_tracker.increment(file_size, effective_username, db, commit=True)
-        except Exception as e:
-            logger.error(f"Failed to increment usage: {e}")
+        # INCREMENT USAGE ONLY ON SUCCESSFUL AUDIT COMPLETION
+        # This ensures failed audits don't count against the user's limit
+        audit_success = report.get("error") is None and report.get("risk_score") != "N/A"
+        
+        if audit_success:
+            try:
+                # Increment the usage counter now that audit succeeded
+                usage_tracker.increment(file_size, effective_username, db, commit=True)
+                logger.info(f"[USAGE] ✅ Audit counted for {effective_username} (successful completion)")
+            except Exception as e:
+                logger.error(f"[USAGE] Failed to increment usage: {e}")
+        else:
+            logger.info(f"[USAGE] ⚠️ Audit NOT counted for {effective_username} (failed/incomplete - not charging user)")
         
         try:
             if user:
@@ -5278,10 +5301,24 @@ For Enterprise tier, also include: "proof_of_concept", "references"
         else:
             logger.debug("[GAMIFICATION] Guest user - stats not tracked")
         
-        response = {"report": report, "risk_score": str(report.get("risk_score", "N/A")), "overage_cost": overage_cost}
+        # Get updated audit count after successful increment
+        updated_audit_count = len(json.loads(user.audit_history or "[]")) if user else usage_tracker.count
+        tier_limits = {"free": FREE_LIMIT, "starter": STARTER_LIMIT, "beginner": STARTER_LIMIT, "pro": PRO_LIMIT, "enterprise": ENTERPRISE_LIMIT, "diamond": ENTERPRISE_LIMIT}
+        audit_limit = tier_limits.get(current_tier, FREE_LIMIT)
+        
+        response = {
+            "report": report, 
+            "risk_score": str(report.get("risk_score", "N/A")), 
+            "overage_cost": overage_cost,
+            "tier": current_tier,
+            "audit_count": updated_audit_count,
+            "audit_limit": audit_limit,
+            "audits_remaining": max(0, audit_limit - updated_audit_count) if audit_limit != 9999 else "unlimited"
+        }
         if pdf_path:
             response["compliance_pdf"] = pdf_path
         
+        logger.info(f"[AUDIT_COMPLETE] {effective_username}: {updated_audit_count}/{audit_limit} audits used")
         return response
     
     except HTTPException:
