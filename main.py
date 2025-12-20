@@ -4903,9 +4903,23 @@ For Enterprise tier, also include: "proof_of_concept", "references"
                     audit_json["formal_verification"] = f"Certora failed: {e}"
             
             report = audit_json
+            
+            # Normalize predictions - handle attack_predictions or missing fields
+            if "attack_predictions" in report and "predictions" not in report:
+                report["predictions"] = report["attack_predictions"]
+            if "predictions" not in report:
+                report["predictions"] = []
+            normalized_predictions = []
+            for p in report.get("predictions", []):
+                normalized_predictions.append({
+                    "scenario": p.get("scenario") or p.get("attack") or p.get("name") or "Unknown scenario",
+                    "impact": p.get("impact") or p.get("likelihood") or p.get("severity") or "Unknown impact"
+                })
+            report["predictions"] = normalized_predictions
         
         except Exception as e:
             logger.error(f"AI analysis failed for {effective_username}: {e}")
+
             logger.exception("FULL AI ERROR TRACEBACK:")
             await broadcast_audit_log(effective_username, f"AI analysis failed: {str(e)}")
             
