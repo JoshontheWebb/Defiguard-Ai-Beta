@@ -1694,19 +1694,26 @@ def _normalize_severity(severity: str) -> str:
     return severity_map.get(severity_lower, "Medium")
 
 async def broadcast_audit_log(username: str, message: str):
-
     """Send audit log message to user's active WebSocket."""
     ws = active_audit_websockets.get(username)
+    
+    # Debug: Log all connected WebSocket usernames
+    connected_users = list(active_audit_websockets.keys())
+    logger.debug(f"[AUDIT_LOG] Attempting to send to '{username}', connected users: {connected_users}")
+    
     if ws and ws.application_state == WebSocketState.CONNECTED:
         try:
             await ws.send_json({
                 "type": "audit_log",
-                "message": f"{message}"
+                "message": message
             })
-            logger.debug(f"Sent audit log to {username}: {message}")
+            logger.info(f"[AUDIT_LOG] ✅ Sent to {username}: {message}")
         except Exception as e:
-            logger.error(f"Failed to send audit log to {username}: {str(e)}")
+            logger.error(f"[AUDIT_LOG] ❌ Failed to send to {username}: {str(e)}")
             active_audit_websockets.pop(username, None)
+    else:
+        ws_state = ws.application_state if ws else "NO_WEBSOCKET"
+        logger.warning(f"[AUDIT_LOG] ⚠️ Cannot send to '{username}' (state={ws_state}): {message}")
 
 # Stripe setup
 STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
@@ -3619,15 +3626,32 @@ async def websocket_audit_log(websocket: WebSocket, username: str = Query(None))
     await websocket.accept()
     effective_username = username or "guest"
     active_audit_websockets[effective_username] = websocket
-    logger.debug(f"WebSocket audit log connected for {effective_username}")
+    logger.info(f"[WS_AUDIT] ✅ Connected: '{effective_username}' (total connections: {len(active_audit_websockets)})")
     
     try:
+        # Send confirmation message to client
+        await websocket.send_json({
+            "type": "audit_log",
+            "message": f"Audit log connected for {effective_username}"
+        })
+        
         while True:
-            await asyncio.sleep(1)  # Keep alive
+            # Handle incoming messages (ping/pong or status requests)
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30)
+                if data == "ping":
+                    await websocket.send_text("pong")
+            except asyncio.TimeoutError:
+                # Send keepalive
+                try:
+                    await websocket.send_json({"type": "keepalive"})
+                except Exception:
+                    break
     except Exception as e:
-        logger.debug(f"WebSocket audit log disconnected for {effective_username}: {str(e)}")
+        logger.info(f"[WS_AUDIT] Disconnected: '{effective_username}' - {str(e)}")
     finally:
         active_audit_websockets.pop(effective_username, None)
+        logger.info(f"[WS_AUDIT] Cleaned up: '{effective_username}' (remaining: {len(active_audit_websockets)})")
 
 async def process_pending_audit(db: Session, pending_id: str):
     pending_audit = None
@@ -4905,6 +4929,8 @@ For Enterprise tier, also include: "proof_of_concept", "references"
             report = audit_json
             
             # Normalize predictions - handle attack_predictions or missing fields
+            # normalize_audit_response creates: title, attack_vector, severity, probability
+            # Frontend expects: scenario, impact
             if "attack_predictions" in report and "predictions" not in report:
                 report["predictions"] = report["attack_predictions"]
             if "predictions" not in report:
@@ -4912,8 +4938,8 @@ For Enterprise tier, also include: "proof_of_concept", "references"
             normalized_predictions = []
             for p in report.get("predictions", []):
                 normalized_predictions.append({
-                    "scenario": p.get("scenario") or p.get("attack") or p.get("name") or "Unknown scenario",
-                    "impact": p.get("impact") or p.get("likelihood") or p.get("severity") or "Unknown impact"
+                    "scenario": p.get("title") or p.get("attack_vector") or p.get("scenario") or p.get("attack") or p.get("name") or "Unknown scenario",
+                    "impact": p.get("severity") or p.get("probability") or p.get("financial_impact") or p.get("impact") or p.get("likelihood") or "Unknown impact"
                 })
             report["predictions"] = normalized_predictions
         
