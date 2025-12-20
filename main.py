@@ -1562,26 +1562,71 @@ def normalize_audit_response(audit_json: dict, tier: str) -> dict:
         predictions = []
     
     normalized_predictions = []
-    for pred in predictions:
+    for idx, pred in enumerate(predictions):
         if isinstance(pred, dict):
-            normalized_predictions.append({
-                "scenario": pred.get("scenario") or pred.get("description") or "Potential vulnerability scenario",
-                "impact": pred.get("impact") or pred.get("consequence") or "Unknown impact"
-            })
+            normalized_pred = {
+                "id": pred.get("id") or f"PRED-{idx + 1:03d}",
+                "title": pred.get("title") or pred.get("scenario") or pred.get("name") or "Attack Scenario",
+                "severity": _normalize_severity(pred.get("severity", "High")),
+                "probability": pred.get("probability") or pred.get("likelihood") or "Medium",
+                "attack_vector": pred.get("attack_vector") or pred.get("description") or pred.get("scenario") or "Attack vector not specified",
+                "preconditions": pred.get("preconditions") or pred.get("prerequisites") or "Standard deployment conditions",
+                "financial_impact": pred.get("financial_impact") or pred.get("impact") or pred.get("estimated_loss") or "Impact not quantified",
+                "affected_functions": pred.get("affected_functions") or pred.get("functions") or [],
+                "time_to_exploit": pred.get("time_to_exploit") or pred.get("exploitation_time") or "Unknown",
+                "detection_difficulty": pred.get("detection_difficulty") or pred.get("detectability") or "Medium",
+                "mitigation": pred.get("mitigation") or pred.get("fix") or pred.get("prevention") or "See recommendations",
+                "real_world_example": pred.get("real_world_example") or pred.get("reference") or None
+            }
+            normalized_predictions.append(normalized_pred)
         elif isinstance(pred, str):
-            normalized_predictions.append({"scenario": pred, "impact": "See description"})
+            # Convert legacy string predictions to enhanced format
+            normalized_predictions.append({
+                "id": f"PRED-{idx + 1:03d}",
+                "title": pred[:50] + "..." if len(pred) > 50 else pred,
+                "severity": "Medium",
+                "probability": "Medium",
+                "attack_vector": pred,
+                "preconditions": "Standard deployment conditions",
+                "financial_impact": "Impact assessment required",
+                "affected_functions": [],
+                "time_to_exploit": "Unknown",
+                "detection_difficulty": "Medium",
+                "mitigation": "See recommendations section",
+                "real_world_example": None
+            })
     
-    # Default predictions if empty
+    # Generate default predictions if none provided but issues exist
     if not normalized_predictions and normalized_issues:
         if audit_json["critical_count"] > 0:
             normalized_predictions.append({
-                "scenario": "Critical vulnerabilities may be exploited within hours of deployment",
-                "impact": "Potential total loss of contract funds"
+                "id": "PRED-001",
+                "title": "Critical Vulnerability Exploitation",
+                "severity": "Critical",
+                "probability": "Very High",
+                "attack_vector": f"This contract contains {audit_json['critical_count']} critical vulnerabilities that could be exploited within hours of deployment. Attackers actively scan for newly deployed contracts with known vulnerability patterns. Once identified, exploitation typically follows a predictable pattern: (1) Attacker identifies vulnerable function, (2) Prepares exploit transaction, (3) Executes attack potentially using flashloans for capital, (4) Drains vulnerable funds, (5) Launders proceeds through mixers.",
+                "preconditions": "Contract deployed to mainnet with accessible funds",
+                "financial_impact": "Potential total loss of contract funds - 100% of TVL at risk",
+                "affected_functions": [issue.get("function_name", "Unknown") for issue in normalized_issues if issue.get("severity") == "Critical"][:3],
+                "time_to_exploit": "< 1 hour after deployment",
+                "detection_difficulty": "Hard - attacks often complete before detection",
+                "mitigation": "Address all critical issues before deployment; implement monitoring",
+                "real_world_example": "Euler Finance (Mar 2023) - $197M lost to vulnerability exploitation"
             })
         if audit_json["high_count"] > 0:
             normalized_predictions.append({
-                "scenario": "High-severity issues could be targeted by sophisticated attackers",
-                "impact": "Significant financial or operational damage"
+                "id": "PRED-002",
+                "title": "High-Severity Issue Exploitation",
+                "severity": "High",
+                "probability": "High",
+                "attack_vector": f"The {audit_json['high_count']} high-severity vulnerabilities present significant risk for sophisticated attackers. These issues typically require more complex exploitation but offer substantial rewards. Attack pattern: (1) Attacker analyzes contract for profitable exploit paths, (2) Develops custom attack contract, (3) Tests on fork, (4) Executes in favorable market conditions, (5) Extracts maximum value.",
+                "preconditions": "Contract deployed with sufficient TVL to justify attack costs",
+                "financial_impact": "Estimated 30-70% of TVL at risk depending on vulnerability type",
+                "affected_functions": [issue.get("function_name", "Unknown") for issue in normalized_issues if issue.get("severity") == "High"][:3],
+                "time_to_exploit": "1-24 hours for sophisticated attackers",
+                "detection_difficulty": "Medium - may be detected during execution",
+                "mitigation": "Fix high-severity issues; implement circuit breakers",
+                "real_world_example": "Cream Finance (Oct 2021) - $130M flashloan attack"
             })
     
     audit_json["predictions"] = normalized_predictions
@@ -1826,10 +1871,20 @@ AUDIT_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "scenario": {"type": "string"},
-                    "impact": {"type": "string"}
+                    "id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["Critical", "High", "Medium", "Low"]},
+                    "probability": {"type": "string", "enum": ["Very High", "High", "Medium", "Low"]},
+                    "attack_vector": {"type": "string"},
+                    "preconditions": {"type": "string"},
+                    "financial_impact": {"type": "string"},
+                    "affected_functions": {"type": "array", "items": {"type": "string"}},
+                    "time_to_exploit": {"type": "string"},
+                    "detection_difficulty": {"type": "string", "enum": ["Easy", "Medium", "Hard"]},
+                    "mitigation": {"type": "string"},
+                    "real_world_example": {"type": ["string", "null"]}
                 },
-                "required": ["scenario", "impact"]
+                "required": ["title", "severity", "attack_vector", "financial_impact"]
             }
         },
         "recommendations": {
@@ -1981,7 +2036,25 @@ STARTER TIER ($29/mo):
 - Fix recommendations must be SPECIFIC and ACTIONABLE:
   ✅ GOOD: "Use OpenZeppelin's ReentrancyGuard by importing '@openzeppelin/contracts/security/ReentrancyGuard.sol' and adding 'nonReentrant' modifier to withdraw()"
   ❌ BAD: "Add reentrancy protection"
-- Predictions: 3-5 realistic attack scenarios with quantified impact
+- PREDICTIONS (3-5 attack scenarios) - EACH prediction MUST include:
+  * id: STRING - Unique identifier (PRED-001, PRED-002, etc.)
+  * title: STRING - Short attack name (e.g., "Parameter Manipulation Attack")
+  * severity: STRING - "Critical", "High", "Medium", or "Low"
+  * probability: STRING - "Very High", "High", "Medium", or "Low" based on attack complexity
+  * attack_vector: STRING - DETAILED step-by-step attack narrative (MINIMUM 100 words):
+    - Step 1: How attacker discovers the vulnerability
+    - Step 2: What tools/transactions they use
+    - Step 3: How they execute the exploit
+    - Step 4: How they extract value
+    - Step 5: How they cover their tracks (if applicable)
+  * preconditions: STRING - What conditions must exist for attack to succeed
+  * financial_impact: STRING - Quantified dollar range with rationale (e.g., "$50K-500K based on average TVL")
+  * affected_functions: ARRAY - List of function names targeted
+  * time_to_exploit: STRING - How long to execute (e.g., "< 1 hour", "1-24 hours", "Days")
+  * detection_difficulty: STRING - "Easy", "Medium", or "Hard" with explanation
+  * mitigation: STRING - Specific fix to prevent this attack
+  * real_world_example: STRING (optional) - Reference to similar historical exploit with losses
+
 - Recommendations in THREE categories:
   * immediate: Actions before deployment (fix critical bugs)
   * short_term: Actions for next 7-30 days (audits, testing)
@@ -4114,288 +4187,6 @@ async def notify_job_subscribers(job_id: str, data: dict):
         
         if not active_job_websockets[job_id]:
             del active_job_websockets[job_id]
-
-
-async def execute_queued_audit(job: AuditJob) -> dict:
-    """
-    Execute a queued audit job. This is the core audit logic extracted
-    for queue-based processing.
-    """
-    from io import BytesIO
-    
-    username = job.username
-    file_content = job.file_content
-    filename = job.filename
-    tier = job.tier
-    contract_address = job.contract_address
-    
-    # Create temp file
-    temp_id = str(uuid.uuid4())
-    temp_dir = os.path.join(DATA_DIR, "temp_files")
-    os.makedirs(temp_dir, exist_ok=True)
-    temp_path = os.path.join(temp_dir, f"{temp_id}.sol")
-    
-    try:
-        with open(temp_path, "wb") as f:
-            f.write(file_content)
-        
-        file_size = len(file_content)
-        code_str = file_content.decode("utf-8")
-
-        # Phase 1: Static Analysis
-        await audit_queue.update_phase(job.job_id, "slither", 10)
-        await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "slither", "progress": 10})
-        await broadcast_audit_log(username, "Running Slither analysis")
-
-        slither_task = asyncio.create_task(asyncio.to_thread(analyze_slither, temp_path))
-
-        # Phase 2: Mythril (parallel with Slither completion)
-        await audit_queue.update_phase(job.job_id, "mythril", 25)
-        await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "mythril", "progress": 25})
-        await broadcast_audit_log(username, "Running Mythril analysis")
-
-        mythril_task = asyncio.create_task(asyncio.to_thread(run_mythril, temp_path))
-
-        
-        # Phase 3: Echidna (if enabled)
-        tier_for_flags = tier
-        tier_flags_map = {"beginner": "starter", "diamond": "enterprise"}
-        tier_for_flags = tier_flags_map.get(tier_for_flags, tier_for_flags)
-        fuzzing_enabled = usage_tracker.feature_flags.get(tier_for_flags, {}).get("fuzzing", False)
-        
-        echidna_task = None
-        if fuzzing_enabled:
-            await audit_queue.update_phase(job.job_id, "echidna", 40)
-            await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "echidna", "progress": 40})
-            await broadcast_audit_log(username, "Running Echidna fuzzing")
-            echidna_task = asyncio.create_task(asyncio.to_thread(run_echidna, temp_path))
-
-        
-        # Wait for all analysis tasks
-        if echidna_task:
-            results = await asyncio.gather(slither_task, mythril_task, echidna_task, return_exceptions=True)
-            slither_findings, mythril_results, fuzzing_results = results
-        else:
-            results = await asyncio.gather(slither_task, mythril_task, return_exceptions=True)
-            slither_findings, mythril_results = results
-            fuzzing_results = []
-        
-        # Handle exceptions and log results
-        if isinstance(slither_findings, Exception):
-            logger.error(f"Slither failed: {slither_findings}")
-            slither_findings = []
-        await broadcast_audit_log(username, f"Slither found {len(slither_findings)} issues")
-
-        if isinstance(mythril_results, Exception):
-            logger.error(f"Mythril failed: {mythril_results}")
-            mythril_results = []
-        await broadcast_audit_log(username, f"Mythril found {len(mythril_results)} issues")
-
-        if isinstance(fuzzing_results, Exception):
-            logger.error(f"Echidna failed: {fuzzing_results}")
-            fuzzing_results = []
-        if fuzzing_enabled:
-            await broadcast_audit_log(username, f"Echidna completed with {len(fuzzing_results)} results")
-
-        # Build context
-
-        context = json.dumps([f if isinstance(f, dict) else getattr(f, "__dict__", str(f)) for f in slither_findings]).replace('"', '\"') if slither_findings else "No static issues found"
-        context = summarize_context(context)
-        
-        # Pre-calculate metrics
-        lines_of_code = len([line for line in code_str.split('\n') if line.strip() and not line.strip().startswith('//')])
-        functions_count = code_str.count('function ') + code_str.count('constructor(')
-        complexity_keywords = ['if', 'for', 'while', 'case', 'catch', '&&', '||', '?']
-        complexity_score = sum(code_str.count(keyword) for keyword in complexity_keywords) / max(functions_count, 1)
-        complexity_score = min(round(complexity_score, 1), 10.0)
-        
-        # Phase 4: AI Analysis
-        await audit_queue.update_phase(job.job_id, "grok", 60)
-        await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "grok", "progress": 60})
-        
-        # Compliance pre-scan
-        compliance_scan = {}
-        try:
-            compliance_scan = get_compliance_analysis(code_str, contract_type="defi")
-        except Exception as e:
-            logger.warning(f"[COMPLIANCE] Pre-scan failed: {e}")
-            compliance_scan = {"error": str(e)}
-        
-        details = "Uploaded Solidity code for analysis."
-        if contract_address:
-            details += f" Contract address: {contract_address}"
-        
-        report: dict = {}
-        
-        try:
-            if not os.getenv("ANTHROPIC_API_KEY") and not os.getenv("GROK_API_KEY"):
-                raise Exception("No AI API keys configured (ANTHROPIC_API_KEY or GROK_API_KEY)")
-            
-            prompt = PROMPT_TEMPLATE.format(
-                context=context,
-                fuzzing_results=json.dumps(fuzzing_results),
-                code=code_str,
-                details=details,
-                tier=tier_for_flags,
-                contract_type="defi",
-                compliance_scan=json.dumps(compliance_scan, indent=2)
-            )
-            
-            # Try Claude first, fallback to Grok
-            raw_response = ""
-            used_model = "unknown"
-            
-            if claude_client:
-                try:
-                    logger.info("[AI] Attempting Claude (primary)...")
-                    
-                    # Enhanced system prompt for strict JSON output
-                    claude_system_prompt = """You are an expert smart contract security auditor. You MUST respond with ONLY a valid JSON object - no markdown, no code blocks, no backticks, no explanatory text before or after.
-
-CRITICAL OUTPUT REQUIREMENTS:
-1. Start your response with { and end with }
-2. Do NOT wrap in ```json or any markdown
-3. Do NOT add any text before or after the JSON
-4. All string values must be properly escaped
-5. Use double quotes for all keys and string values
-6. Ensure all arrays and objects are properly closed
-
-The JSON MUST include these exact keys:
-- "risk_score": number (0-100)
-- "executive_summary": string
-- "critical_count": integer
-- "high_count": integer  
-- "medium_count": integer
-- "low_count": integer
-- "issues": array of issue objects
-- "predictions": array of prediction objects
-- "recommendations": object with "immediate", "short_term", "long_term" arrays
-
-Each issue object MUST have: "id", "type", "severity" (Critical/High/Medium/Low), "description", "fix"
-For Pro tier, also include: "line_number", "function_name", "vulnerable_code", "exploit_scenario", "estimated_impact", "code_fix", "alternatives"
-For Enterprise tier, also include: "proof_of_concept", "references"
-"""
-                    
-                    response = claude_client.messages.create(
-                        model="claude-sonnet-4-20250514",
-                        max_tokens=16384,
-                        system=claude_system_prompt,
-                        messages=[{
-                            "role": "user",
-                            "content": prompt
-                        }]
-                    )
-                    raw_response = response.content[0].text or ""
-                    used_model = "claude-sonnet-4"
-                    logger.info("[AI] Claude response received ✅")
-                except Exception as claude_err:
-                    logger.warning(f"[AI] Claude failed: {claude_err}, trying Grok fallback...")
-            
-            if not raw_response and grok_client:
-                try:
-                    logger.info("[AI] Attempting Grok (fallback)...")
-                    response = grok_client.chat.completions.create(
-                        model="grok-4-1-fast-reasoning",
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.0,
-                        stream=False,
-                        response_format={
-                            "type": "json_schema",
-                            "json_schema": {
-                                "name": "defi_audit_report",
-                                "strict": True,
-                                "schema": AUDIT_SCHEMA
-                            }
-                        }
-                    )
-                    raw_response = response.choices[0].message.content or ""
-                    used_model = "grok-4-fast"
-                    logger.info("[AI] Grok fallback response received ✅")
-                except Exception as grok_err:
-                    logger.error(f"[AI] Grok fallback also failed: {grok_err}")
-                    raise Exception("Both Claude and Grok API calls failed")
-            
-            if not raw_response:
-                raise Exception("No AI client available - check API keys")
-            
-            logger.info(f"[AI] Used model: {used_model}")
-            logger.debug(f"[AI] Raw response length: {len(raw_response)} chars")
-            logger.debug(f"[AI] Raw response first 500 chars: {raw_response[:500]}")
-            
-            clean_response = extract_json_from_response(raw_response)
-            
-            try:
-                audit_json = json.loads(clean_response)
-            except json.JSONDecodeError as json_err:
-                logger.error(f"[AI] JSON parse error: {json_err}")
-                logger.error(f"[AI] Cleaned response: {clean_response[:1000]}")
-                # Create minimal valid response
-                audit_json = {
-                    "risk_score": 50,
-                    "executive_summary": "AI analysis completed but response parsing failed. Manual review recommended.",
-                    "issues": [],
-                    "predictions": [],
-                    "recommendations": {"immediate": ["Manual security review required"], "short_term": [], "long_term": []}
-                }
-            
-            # CRITICAL: Normalize the response to match expected schema (restores Grok-like behavior)
-            audit_json = normalize_audit_response(audit_json, tier_for_flags)
-            logger.info(f"[AI] Normalized response: {audit_json.get('critical_count', 0)} critical, {audit_json.get('high_count', 0)} high, {audit_json.get('medium_count', 0)} medium, {audit_json.get('low_count', 0)} low issues")
-            
-            # Override metrics
-            audit_json["code_quality_metrics"] = {
-                "lines_of_code": lines_of_code,
-                "functions_count": functions_count,
-                "complexity_score": complexity_score
-            }
-            
-            # Add fuzzing results for enterprise
-            if tier_for_flags in ["enterprise", "diamond"]:
-                audit_json["fuzzing_results"] = fuzzing_results
-            
-            report = audit_json
-            
-        except Exception as e:
-            logger.error(f"AI analysis failed: {e}")
-            fallback_issues = mythril_results + [
-                {"type": d.get("name", "Slither finding"), "severity": "Medium", "description": str(d.get("details", "N/A")), "fix": "Manual review required"}
-                for d in (slither_findings or [])
-            ]
-            
-            report = {
-                "risk_score": "Unknown (AI analysis failed)",
-                "critical_count": sum(1 for i in fallback_issues if i.get("severity", "").lower() == "critical"),
-                "high_count": sum(1 for i in fallback_issues if i.get("severity", "").lower() == "high"),
-                "medium_count": sum(1 for i in fallback_issues if i.get("severity", "").lower() == "medium"),
-                "low_count": sum(1 for i in fallback_issues if i.get("severity", "").lower() == "low"),
-                "issues": fallback_issues,
-                "predictions": [],
-                "recommendations": ["AI analysis unavailable – review static analysis results above"],
-                "error": str(e)
-            }
-        
-        # Phase 5: Finalization
-        await audit_queue.update_phase(job.job_id, "finalizing", 90)
-        await notify_job_subscribers(job.job_id, {"status": "processing", "phase": "finalizing", "progress": 90})
-        
-        # Apply free tier filtering
-        if tier == "free":
-            report = filter_issues_for_free_tier(report, tier)
-        
-        return {
-            "report": report,
-            "risk_score": str(report.get("risk_score", "N/A")),
-            "overage_cost": None,
-            "tier": tier
-        }
-        
-    finally:
-        # Cleanup temp file
-        try:
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-        except Exception as e:
-            logger.error(f"Failed to delete temp file: {e}")
 
 
 # ============================================================================

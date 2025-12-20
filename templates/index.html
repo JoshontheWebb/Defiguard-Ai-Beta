@@ -46,7 +46,7 @@
             <li><a href="#audit">🔍 Audit Contract</a></li>
             <li><a href="#results">📊 Results Dashboard</a></li>
             <li><a href="#settings">⚙️ Settings <span style="color: var(--text-tertiary); font-size: 0.8em;">(⌘,)</span></a></li>
-            <li><a href="/queue-monitor">⏳ Queue Monitor</a></li>
+            <li><a href="#" id="open-queue-monitor">⏳ Queue Monitor</a></li>
             <li id="auth-status"><a href="/auth">🔐 Sign In / Create Account</a></li>
             <li class="logout-container">
                 <a href="#" id="logout-sidebar" class="logout-link">🚪 Log Out</a>
@@ -432,6 +432,155 @@
         </section>
 
     </main>
+    <!-- Queue Monitor Modal -->
+    <div class="modal-backdrop" id="queue-modal-backdrop"></div>
+    <div class="modal" id="queue-modal" role="dialog" aria-labelledby="queue-modal-title" aria-modal="true" style="max-width: 900px;">
+        <button class="modal-close" id="queue-modal-close" aria-label="Close queue monitor">×</button>
+        
+        <div class="modal-header">
+            <h2 class="modal-title" id="queue-modal-title">⏳ Queue Monitor</h2>
+            <p style="margin-top: 8px; color: var(--text-tertiary); font-size: var(--text-sm);">
+                Real-time audit queue status
+                <span class="queue-refresh-indicator" style="margin-left: var(--space-3);">
+                    <span class="queue-dot" style="display: inline-block; width: 8px; height: 8px; background: var(--success); border-radius: 50%; animation: queueBlink 2s infinite;"></span>
+                    <span style="margin-left: var(--space-1);">Auto-refresh every 3s</span>
+                </span>
+            </p>
+        </div>
+        
+        <div class="modal-body" style="padding: var(--space-6);">
+            <!-- Main Stats Grid -->
+            <div class="queue-stats-grid" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-4); margin-bottom: var(--space-6);">
+                <div class="queue-stat-card" style="background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-lg); padding: var(--space-4); text-align: center;">
+                    <div style="font-size: 1.5rem; margin-bottom: var(--space-2);">⚡</div>
+                    <div id="queue-stat-processing" style="font-size: var(--text-3xl); font-weight: 800; background: linear-gradient(135deg, var(--warning), #fbbf24); background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent;">0</div>
+                    <div style="font-size: var(--text-xs); color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">Processing</div>
+                </div>
+                <div class="queue-stat-card" style="background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-lg); padding: var(--space-4); text-align: center;">
+                    <div style="font-size: 1.5rem; margin-bottom: var(--space-2);">⏳</div>
+                    <div id="queue-stat-queued" style="font-size: var(--text-3xl); font-weight: 800; background: var(--gradient-accent); background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent;">0</div>
+                    <div style="font-size: var(--text-xs); color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">In Queue</div>
+                </div>
+                <div class="queue-stat-card" style="background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-lg); padding: var(--space-4); text-align: center;">
+                    <div style="font-size: 1.5rem; margin-bottom: var(--space-2);">✅</div>
+                    <div id="queue-stat-completed" style="font-size: var(--text-3xl); font-weight: 800; color: var(--success);">0</div>
+                    <div style="font-size: var(--text-xs); color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">Completed</div>
+                </div>
+                <div class="queue-stat-card" style="background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-lg); padding: var(--space-4); text-align: center;">
+                    <div style="font-size: 1.5rem; margin-bottom: var(--space-2);">❌</div>
+                    <div id="queue-stat-failed" style="font-size: var(--text-3xl); font-weight: 800; color: var(--error);">0</div>
+                    <div style="font-size: var(--text-xs); color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em;">Failed</div>
+                </div>
+            </div>
+            
+            <!-- Queue by Tier -->
+            <div class="queue-tier-section" style="background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-xl); padding: var(--space-5); margin-bottom: var(--space-6);">
+                <h3 style="font-size: var(--text-lg); color: var(--accent-teal); margin-bottom: var(--space-4); display: flex; align-items: center; gap: var(--space-2);">
+                    📊 Queue by Tier (Priority Order)
+                </h3>
+                <div class="queue-tier-bars" style="display: flex; flex-direction: column; gap: var(--space-3);">
+                    <div class="queue-tier-row" style="display: flex; align-items: center; gap: var(--space-3);">
+                        <span style="width: 80px; font-weight: 600; color: var(--text-secondary); font-size: var(--text-sm);">Enterprise</span>
+                        <div style="flex: 1; height: 24px; background: var(--bg-secondary); border-radius: var(--radius-full); overflow: hidden; border: 1px solid var(--glass-border);">
+                            <div id="queue-bar-enterprise" style="height: 100%; width: 0%; background: linear-gradient(135deg, #a855f7, #ec4899); border-radius: var(--radius-full); transition: width 0.5s ease; display: flex; align-items: center; justify-content: flex-end; padding-right: var(--space-2); min-width: 0;">
+                                <span id="queue-count-enterprise" style="font-weight: 700; font-size: var(--text-xs); color: white; text-shadow: 0 1px 2px rgba(0,0,0,0.3);">0</span>
+                            </div>
+                        </div>
+                        <span id="queue-value-enterprise" style="width: 30px; text-align: right; font-weight: 700; color: var(--text-primary);">0</span>
+                    </div>
+                    <div class="queue-tier-row" style="display: flex; align-items: center; gap: var(--space-3);">
+                        <span style="width: 80px; font-weight: 600; color: var(--text-secondary); font-size: var(--text-sm);">Pro</span>
+                        <div style="flex: 1; height: 24px; background: var(--bg-secondary); border-radius: var(--radius-full); overflow: hidden; border: 1px solid var(--glass-border);">
+                            <div id="queue-bar-pro" style="height: 100%; width: 0%; background: linear-gradient(135deg, var(--warning), #fbbf24); border-radius: var(--radius-full); transition: width 0.5s ease; display: flex; align-items: center; justify-content: flex-end; padding-right: var(--space-2); min-width: 0;">
+                                <span id="queue-count-pro" style="font-weight: 700; font-size: var(--text-xs); color: white; text-shadow: 0 1px 2px rgba(0,0,0,0.3);">0</span>
+                            </div>
+                        </div>
+                        <span id="queue-value-pro" style="width: 30px; text-align: right; font-weight: 700; color: var(--text-primary);">0</span>
+                    </div>
+                    <div class="queue-tier-row" style="display: flex; align-items: center; gap: var(--space-3);">
+                        <span style="width: 80px; font-weight: 600; color: var(--text-secondary); font-size: var(--text-sm);">Starter</span>
+                        <div style="flex: 1; height: 24px; background: var(--bg-secondary); border-radius: var(--radius-full); overflow: hidden; border: 1px solid var(--glass-border);">
+                            <div id="queue-bar-starter" style="height: 100%; width: 0%; background: linear-gradient(135deg, var(--accent-teal), var(--accent-teal-light)); border-radius: var(--radius-full); transition: width 0.5s ease; display: flex; align-items: center; justify-content: flex-end; padding-right: var(--space-2); min-width: 0;">
+                                <span id="queue-count-starter" style="font-weight: 700; font-size: var(--text-xs); color: white; text-shadow: 0 1px 2px rgba(0,0,0,0.3);">0</span>
+                            </div>
+                        </div>
+                        <span id="queue-value-starter" style="width: 30px; text-align: right; font-weight: 700; color: var(--text-primary);">0</span>
+                    </div>
+                    <div class="queue-tier-row" style="display: flex; align-items: center; gap: var(--space-3);">
+                        <span style="width: 80px; font-weight: 600; color: var(--text-secondary); font-size: var(--text-sm);">Free</span>
+                        <div style="flex: 1; height: 24px; background: var(--bg-secondary); border-radius: var(--radius-full); overflow: hidden; border: 1px solid var(--glass-border);">
+                            <div id="queue-bar-free" style="height: 100%; width: 0%; background: linear-gradient(135deg, #6b7280, #9ca3af); border-radius: var(--radius-full); transition: width 0.5s ease; display: flex; align-items: center; justify-content: flex-end; padding-right: var(--space-2); min-width: 0;">
+                                <span id="queue-count-free" style="font-weight: 700; font-size: var(--text-xs); color: white; text-shadow: 0 1px 2px rgba(0,0,0,0.3);">0</span>
+                            </div>
+                        </div>
+                        <span id="queue-value-free" style="width: 30px; text-align: right; font-weight: 700; color: var(--text-primary);">0</span>
+                    </div>
+                </div>
+                <p style="margin-top: var(--space-3); font-size: var(--text-xs); color: var(--text-muted);">
+                    ℹ️ Higher tiers are processed first (Enterprise → Pro → Starter → Free)
+                </p>
+            </div>
+            
+            <!-- System Health -->
+            <div class="queue-health-grid" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-4);">
+                <div class="queue-health-card" style="background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-lg); padding: var(--space-4);">
+                    <h4 style="font-size: var(--text-sm); color: var(--text-tertiary); margin-bottom: var(--space-2);">🖥️ Server Status</h4>
+                    <div id="queue-server-status" style="display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-lg); font-weight: 600; color: var(--success);">
+                        <span class="queue-health-dot" style="width: 10px; height: 10px; background: var(--success); border-radius: 50%; box-shadow: 0 0 8px var(--success); animation: queuePulse 2s infinite;"></span>
+                        <span>Healthy</span>
+                    </div>
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin-top: var(--space-2);">
+                        Max Concurrent: <strong id="queue-max-concurrent">1</strong>
+                    </p>
+                </div>
+                <div class="queue-health-card" style="background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-lg); padding: var(--space-4);">
+                    <h4 style="font-size: var(--text-sm); color: var(--text-tertiary); margin-bottom: var(--space-2);">⚡ Throughput</h4>
+                    <div style="font-size: var(--text-lg); font-weight: 600; color: var(--accent-teal);">
+                        ~25/hr
+                    </div>
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin-top: var(--space-2);">
+                        Avg audit: <strong>~2 min</strong>
+                    </p>
+                </div>
+                <div class="queue-health-card" style="background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-lg); padding: var(--space-4);">
+                    <h4 style="font-size: var(--text-sm); color: var(--text-tertiary); margin-bottom: var(--space-2);">🚨 Queue Alert</h4>
+                    <div id="queue-alert-status" style="display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-lg); font-weight: 600; color: var(--success);">
+                        <span id="queue-alert-dot" class="queue-health-dot" style="width: 10px; height: 10px; background: var(--success); border-radius: 50%; box-shadow: 0 0 8px var(--success);"></span>
+                        <span id="queue-alert-text">Normal</span>
+                    </div>
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin-top: var(--space-2);">
+                        Alert at: <strong>15+ queued</strong>
+                    </p>
+                </div>
+            </div>
+            
+            <!-- Last Update -->
+            <p id="queue-last-update" style="text-align: center; font-size: var(--text-xs); color: var(--text-muted); margin-top: var(--space-4);">
+                Last updated: --
+            </p>
+        </div>
+    </div>
+    
+    <style>
+        @keyframes queueBlink {
+            0%, 50%, 100% { opacity: 1; }
+            25%, 75% { opacity: 0.3; }
+        }
+        @keyframes queuePulse {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.2); opacity: 0.7; }
+        }
+        
+        /* Responsive queue modal */
+        @media (max-width: 768px) {
+            #queue-modal .queue-stats-grid {
+                grid-template-columns: repeat(2, 1fr) !important;
+            }
+            #queue-modal .queue-health-grid {
+                grid-template-columns: 1fr !important;
+            }
+        }
+    </style>
 
     <!-- Settings Modal (Outside main content, before footer) -->
     <div class="modal-backdrop" id="settings-modal-backdrop"></div>
@@ -609,6 +758,173 @@
         const timestamp = new Date().getTime();
         document.write(`<link rel="stylesheet" href="/static/styles.css?v=${timestamp}">`);
         document.write(`<script src="/static/script.js?v=${timestamp}"><\/script>`);
+    </script>
+    <!-- Queue Monitor Modal Script -->
+    <script>
+    (function() {
+        // Queue Monitor Modal Elements
+        const queueModalBackdrop = document.getElementById('queue-modal-backdrop');
+        const queueModal = document.getElementById('queue-modal');
+        const queueModalClose = document.getElementById('queue-modal-close');
+        const openQueueMonitor = document.getElementById('open-queue-monitor');
+        
+        let queueRefreshInterval = null;
+        let prevQueueStats = null;
+        
+        // Open Queue Monitor
+        if (openQueueMonitor) {
+            openQueueMonitor.addEventListener('click', function(e) {
+                e.preventDefault();
+                openQueueModal();
+            });
+        }
+        
+        // Close handlers
+        if (queueModalClose) {
+            queueModalClose.addEventListener('click', closeQueueModal);
+        }
+        if (queueModalBackdrop) {
+            queueModalBackdrop.addEventListener('click', closeQueueModal);
+        }
+        
+        // ESC key to close
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && queueModal && queueModal.style.display === 'block') {
+                closeQueueModal();
+            }
+        });
+        
+        function openQueueModal() {
+            if (queueModalBackdrop) queueModalBackdrop.style.display = 'block';
+            if (queueModal) queueModal.style.display = 'block';
+            document.body.style.overflow = 'hidden';
+            
+            // Start fetching stats
+            fetchQueueStats();
+            queueRefreshInterval = setInterval(fetchQueueStats, 3000);
+        }
+        
+        function closeQueueModal() {
+            if (queueModalBackdrop) queueModalBackdrop.style.display = 'none';
+            if (queueModal) queueModal.style.display = 'none';
+            document.body.style.overflow = '';
+            
+            // Stop refreshing
+            if (queueRefreshInterval) {
+                clearInterval(queueRefreshInterval);
+                queueRefreshInterval = null;
+            }
+        }
+        
+        async function fetchQueueStats() {
+            try {
+                const response = await fetch('/audit/queue-stats');
+                if (!response.ok) throw new Error('Failed to fetch');
+                
+                const stats = await response.json();
+                
+                // Update main stats
+                const processing = document.getElementById('queue-stat-processing');
+                const queued = document.getElementById('queue-stat-queued');
+                const completed = document.getElementById('queue-stat-completed');
+                const failed = document.getElementById('queue-stat-failed');
+                
+                if (processing) processing.textContent = stats.processing || 0;
+                if (queued) queued.textContent = stats.queued || 0;
+                if (completed) completed.textContent = stats.completed || 0;
+                if (failed) failed.textContent = stats.failed || 0;
+                
+                // Update max concurrent
+                const maxConcurrent = document.getElementById('queue-max-concurrent');
+                if (maxConcurrent) maxConcurrent.textContent = stats.max_concurrent || 1;
+                
+                // Update tier bars
+                const tiers = stats.queued_by_tier || {};
+                const totalQueued = stats.queued || 0;
+                const maxBar = Math.max(totalQueued, 10);
+                
+                ['enterprise', 'pro', 'starter', 'free'].forEach(tier => {
+                    const count = tiers[tier] || 0;
+                    const percent = maxBar > 0 ? (count / maxBar) * 100 : 0;
+                    
+                    const bar = document.getElementById(`queue-bar-${tier}`);
+                    const countEl = document.getElementById(`queue-count-${tier}`);
+                    const valueEl = document.getElementById(`queue-value-${tier}`);
+                    
+                    if (bar) bar.style.width = `${Math.max(percent, count > 0 ? 15 : 0)}%`;
+                    if (countEl) countEl.textContent = count;
+                    if (valueEl) valueEl.textContent = count;
+                });
+                
+                // Update queue alert
+                updateQueueAlert(stats.queued || 0);
+                
+                // Update server status
+                updateServerStatus(true);
+                
+                // Update last update time
+                const lastUpdate = document.getElementById('queue-last-update');
+                if (lastUpdate) {
+                    lastUpdate.textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
+                }
+                
+                prevQueueStats = stats;
+                
+            } catch (error) {
+                console.error('Queue stats fetch error:', error);
+                updateServerStatus(false);
+            }
+        }
+        
+        function updateQueueAlert(queueDepth) {
+            const alertDot = document.getElementById('queue-alert-dot');
+            const alertText = document.getElementById('queue-alert-text');
+            const alertStatus = document.getElementById('queue-alert-status');
+            
+            if (!alertDot || !alertText || !alertStatus) return;
+            
+            if (queueDepth >= 15) {
+                alertDot.style.background = 'var(--error)';
+                alertDot.style.boxShadow = '0 0 8px var(--error)';
+                alertText.textContent = 'High Load';
+                alertStatus.style.color = 'var(--error)';
+            } else if (queueDepth >= 8) {
+                alertDot.style.background = 'var(--warning)';
+                alertDot.style.boxShadow = '0 0 8px var(--warning)';
+                alertText.textContent = 'Elevated';
+                alertStatus.style.color = 'var(--warning)';
+            } else {
+                alertDot.style.background = 'var(--success)';
+                alertDot.style.boxShadow = '0 0 8px var(--success)';
+                alertText.textContent = 'Normal';
+                alertStatus.style.color = 'var(--success)';
+            }
+        }
+        
+        function updateServerStatus(isOnline) {
+            const statusEl = document.getElementById('queue-server-status');
+            if (!statusEl) return;
+            
+            const dot = statusEl.querySelector('.queue-health-dot');
+            const text = statusEl.querySelector('span:last-child');
+            
+            if (isOnline) {
+                if (dot) {
+                    dot.style.background = 'var(--success)';
+                    dot.style.boxShadow = '0 0 8px var(--success)';
+                }
+                if (text) text.textContent = 'Healthy';
+                statusEl.style.color = 'var(--success)';
+            } else {
+                if (dot) {
+                    dot.style.background = 'var(--error)';
+                    dot.style.boxShadow = '0 0 8px var(--error)';
+                }
+                if (text) text.textContent = 'Offline';
+                statusEl.style.color = 'var(--error)';
+            }
+        }
+    })();
     </script>
     <!-- Legal Acceptance Modal (First-Time Users) -->
     <div id="legal-modal-backdrop" class="modal-backdrop" style="display: none;"></div>
