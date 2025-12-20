@@ -409,7 +409,7 @@ except Exception:
             return decorator
         def send_task(self, *args: Any, **kwargs: Any) -> None:
             raise RuntimeError("Celery is not installed in this environment")
-
+import redis.asyncio as aioredis
 import requests  # For cloud fallback
 import asyncio
 from jose import jwt, JWTError
@@ -479,7 +479,13 @@ if AUTH0_DOMAIN and AUTH0_CLIENT_ID and AUTH0_CLIENT_SECRET:
     logger.info("Auth0 OAuth client registered successfully")
 else:
     logger.warning("Auth0 env vars missing – running in legacy/local mode")
-
+@app.on_event("startup")
+async def startup_redis_pubsub():
+    """Initialize Redis pub/sub for cross-worker WebSocket messaging."""
+    if await init_redis_pubsub():
+        asyncio.create_task(redis_audit_subscriber())
+        logger.info("[STARTUP] Redis audit subscriber started")
+        
 @app.get("/debug-files")
 async def debug_files():
     import os
@@ -1694,26 +1700,32 @@ def _normalize_severity(severity: str) -> str:
     return severity_map.get(severity_lower, "Medium")
 
 async def broadcast_audit_log(username: str, message: str):
-    """Send audit log message to user's active WebSocket."""
+    """Send audit log message via Redis pub/sub (cross-worker safe)."""
+    global redis_pubsub_client
+    
+    # Use Redis pub/sub to broadcast to all workers
+    if redis_pubsub_client:
+        try:
+            await redis_pubsub_client.publish("audit_log_broadcast", json.dumps({
+                "username": username,
+                "message": message
+            }))
+            logger.info(f"[AUDIT_LOG] 📤 Published via Redis for '{username}': {message}")
+            return
+        except Exception as e:
+            logger.warning(f"[AUDIT_LOG] Redis publish failed, falling back to local: {e}")
+    
+    # Fallback: local-only delivery (same worker)
     ws = active_audit_websockets.get(username)
-    
-    # Debug: Log all connected WebSocket usernames
-    connected_users = list(active_audit_websockets.keys())
-    logger.debug(f"[AUDIT_LOG] Attempting to send to '{username}', connected users: {connected_users}")
-    
     if ws and ws.application_state == WebSocketState.CONNECTED:
         try:
-            await ws.send_json({
-                "type": "audit_log",
-                "message": message
-            })
-            logger.info(f"[AUDIT_LOG] ✅ Sent to {username}: {message}")
+            await ws.send_json({"type": "audit_log", "message": message})
+            logger.info(f"[AUDIT_LOG] ✅ Local send to {username}: {message}")
         except Exception as e:
-            logger.error(f"[AUDIT_LOG] ❌ Failed to send to {username}: {str(e)}")
+            logger.error(f"[AUDIT_LOG] ❌ Local send failed: {e}")
             active_audit_websockets.pop(username, None)
     else:
-        ws_state = ws.application_state if ws else "NO_WEBSOCKET"
-        logger.warning(f"[AUDIT_LOG] ⚠️ Cannot send to '{username}' (state={ws_state}): {message}")
+        logger.warning(f"[AUDIT_LOG] ⚠️ No Redis and no local WebSocket for '{username}'")
 
 # Stripe setup
 STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
@@ -2892,6 +2904,50 @@ def generate_compliance_pdf(report: dict[str, Any], username: str, file_size: in
 
 # Celery/Redis for scale
 celery = Celery(__name__, broker=os.getenv("REDIS_URL"), backend=os.getenv("REDIS_URL"))
+
+# Redis pub/sub for cross-worker WebSocket messaging
+redis_pubsub_client = None
+
+async def init_redis_pubsub():
+    """Initialize Redis pub/sub for cross-worker WebSocket messaging."""
+    global redis_pubsub_client
+    redis_url = os.getenv("REDIS_URL")
+    if redis_url:
+        try:
+            redis_pubsub_client = await aioredis.from_url(redis_url)
+            logger.info("[REDIS] ✅ Pub/sub client connected for WebSocket messaging")
+            return True
+        except Exception as e:
+            logger.warning(f"[REDIS] ⚠️ Pub/sub connection failed: {e}")
+    return False
+
+async def redis_audit_subscriber():
+    """Subscribe to audit log messages and deliver to local WebSockets."""
+    global redis_pubsub_client
+    if not redis_pubsub_client:
+        return
+    
+    try:
+        pubsub = redis_pubsub_client.pubsub()
+        await pubsub.subscribe("audit_log_broadcast")
+        logger.info("[REDIS] 📡 Subscribed to audit_log_broadcast channel")
+        
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                try:
+                    data = json.loads(message["data"])
+                    username = data.get("username")
+                    msg = data.get("message")
+                    
+                    # Check if THIS worker has the WebSocket for this user
+                    ws = active_audit_websockets.get(username)
+                    if ws and ws.application_state == WebSocketState.CONNECTED:
+                        await ws.send_json({"type": "audit_log", "message": msg})
+                        logger.info(f"[REDIS_SUB] ✅ Delivered to {username}: {msg}")
+                except Exception as e:
+                    logger.error(f"[REDIS_SUB] Message handling error: {e}")
+    except Exception as e:
+        logger.error(f"[REDIS] Subscriber error: {e}")
 
 # FIXED: Added stub for x_semantic_search to prevent NameError
 from typing import Optional, List
