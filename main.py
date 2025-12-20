@@ -518,7 +518,11 @@ async def login(request: Request, screen_hint: Optional[str] = None):
 
 @app.get("/logout")
 async def logout(request: Request):
-    # Clear ALL session data
+    # Log the logout for debugging
+    username = request.session.get("username", "unknown")
+    logger.info(f"[LOGOUT] User {username} logging out")
+    
+    # Clear ALL session data (including cached auth_provider)
     request.session.clear()
     
     # Build Auth0 logout URL
@@ -536,7 +540,9 @@ async def logout(request: Request):
     
     # Create redirect response and DELETE the session cookie
     response = RedirectResponse(url=logout_url, status_code=307)
-    response.delete_cookie("session")  # ← THIS IS THE CRITICAL FIX
+    response.delete_cookie("session")
+    response.delete_cookie("username")  # Also clear username cookie
+    logger.info(f"[LOGOUT] Session cleared, redirecting to Auth0 logout")
     return response
 
 # === DATABASE SETUP AND DEPENDENCIES (MUST BE BEFORE ANY ROUTES) ===
@@ -649,28 +655,54 @@ async def get_authenticated_user(request: Request, db: Session = Depends(get_db)
     auth0_user = request.session.get("user")
     if auth0_user and auth0_user.get("sub"):
         auth0_sub = auth0_user["sub"]
-        # JWKS decode for provider
-        try:
-            token = request.session.get("id_token")
-            if token:
-                jwks_url = f"https://{os.getenv('AUTH0_DOMAIN')}/.well-known/jwks.json"
-                jwks = requests.get(jwks_url).json()
-                unverified_header = jwt.get_unverified_header(token)
-                rsa_key = next((k for k in jwks['keys'] if k['kid'] == unverified_header['kid']), None)
-                if rsa_key:
-                    payload = jwt.decode(
-                        token, rsa_key,
-                        algorithms=['RS256'],
-                        audience=os.getenv('AUTH0_CLIENT_ID'),
-                        issuer=f"https://{os.getenv('AUTH0_DOMAIN')}/"
-                    )
-                    provider = payload.get('identities', [{}])[0].get('provider', 'unknown')
-                    auth0_user['provider'] = provider
+        
+        # Check if provider is already cached in session (avoids JWT decode spam)
+        cached_provider = request.session.get("auth_provider")
+        if cached_provider:
+            auth0_user['provider'] = cached_provider
+        else:
+            # JWKS decode for provider - only done ONCE per session, then cached
+            try:
+                token = request.session.get("id_token")
+                if token:
+                    jwks_url = f"https://{os.getenv('AUTH0_DOMAIN')}/.well-known/jwks.json"
+                    jwks = requests.get(jwks_url).json()
+                    unverified_header = jwt.get_unverified_header(token)
+                    rsa_key = next((k for k in jwks['keys'] if k['kid'] == unverified_header['kid']), None)
+                    if rsa_key:
+                        payload = jwt.decode(
+                            token, rsa_key,
+                            algorithms=['RS256'],
+                            audience=os.getenv('AUTH0_CLIENT_ID'),
+                            issuer=f"https://{os.getenv('AUTH0_DOMAIN')}/"
+                        )
+                        provider = payload.get('identities', [{}])[0].get('provider', 'unknown')
+                        auth0_user['provider'] = provider
+                        # Cache provider in session to avoid future JWT decodes
+                        request.session["auth_provider"] = provider
+                    else:
+                        # Fallback: extract provider from sub (e.g., "google-oauth2|12345")
+                        provider = auth0_sub.split('|')[0] if '|' in auth0_sub else 'auth0'
+                        auth0_user['provider'] = provider
+                        request.session["auth_provider"] = provider
                 else:
-                    auth0_user['provider'] = 'unknown'
-        except (JWTError, Exception) as e:
-            logger.warning(f"JWT decode failed in get_authenticated_user: {e}")
-            auth0_user['provider'] = 'unknown'
+                    # No token, extract from sub
+                    provider = auth0_sub.split('|')[0] if '|' in auth0_sub else 'auth0'
+                    auth0_user['provider'] = provider
+                    request.session["auth_provider"] = provider
+            except JWTError as e:
+                # Expected: JWT expired - this is normal, extract provider from sub instead
+                # Log at DEBUG to avoid log spam (tokens expire every ~1 hour)
+                logger.debug(f"JWT expired (expected): {e}")
+                provider = auth0_sub.split('|')[0] if '|' in auth0_sub else 'auth0'
+                auth0_user['provider'] = provider
+                request.session["auth_provider"] = provider
+            except Exception as e:
+                # Unexpected error - log at WARNING
+                logger.warning(f"JWT decode failed (unexpected): {e}")
+                provider = auth0_sub.split('|')[0] if '|' in auth0_sub else 'auth0'
+                auth0_user['provider'] = provider
+                request.session["auth_provider"] = provider
         
         user = db.query(User).filter(User.auth0_sub == auth0_sub).first()
         if user:
@@ -837,11 +869,20 @@ async def callback(request: Request):
         request.session["username"] = user.username
         request.session["csrf_token"] = secrets.token_urlsafe(32)
         
-        # Provider from userinfo
+        # Provider from userinfo - extract and cache immediately
         provider = 'unknown'
-        if 'userinfo' in locals():
-            provider = userinfo.get('identities', [{}])[0].get('provider', 'unknown')
+        if userinfo:
+            identities = userinfo.get('identities', [])
+            if identities and len(identities) > 0:
+                provider = identities[0].get('provider', 'unknown')
+            elif sub and '|' in sub:
+                # Fallback: extract from sub (e.g., "google-oauth2|12345")
+                provider = sub.split('|')[0]
+        
+        # Cache provider in session to avoid JWT decode spam on subsequent requests
+        request.session["auth_provider"] = provider
         request.session["user"] = {"sub": sub, "email": email, "provider": provider}
+        logger.info(f"[CALLBACK] Cached auth_provider={provider} for {user.username}")
         
         response = RedirectResponse(url="/ui")
         response.set_cookie("username", str(user.username), httponly=False, secure=True, samesite="lax", max_age=2592000)
