@@ -446,13 +446,12 @@ app.add_middleware(
     allow_origins=[
         "http://127.0.0.1:8000",
         "http://localhost:8000",
-        "https://defiguard-ai-fresh-private-test.onrender.com",
-        "https://defiguard-ai-fresh-private.onrender.com",
-        "https://defiguard-ai-beta.onrender.com"
+        "https://defiguard-ai-beta.onrender.com",
+        # Add additional origins via environment variable if needed
     ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=["Authorization", "Content-Type", "X-CSRFToken", "Accept"],
 )
 
 # Global clients — already initialized at top of file
@@ -1772,6 +1771,10 @@ async def broadcast_audit_log(username: str, message: str):
 STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
 stripe.api_key = STRIPE_API_KEY
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+# Base URL fallback for queue-originated requests (when request object is None)
+# This should match your current Render deployment
+APP_BASE_URL = os.getenv("APP_BASE_URL", "https://defiguard-ai-beta.onrender.com")
 
 # ============================================================================
 # NEW PRICING STRUCTURE (December 7, 2025)
@@ -3361,12 +3364,15 @@ async def set_tier(username: str, tier: str, request: Request, has_diamond: bool
         
         logger.debug(f"Creating Stripe checkout session for {username} to {tier}, line_items={line_items}")
         
+        # Use dynamic base URL from request to ensure redirects go to current instance
+        base_url = f"{request.url.scheme}://{request.url.netloc}"
+
         session = stripe.checkout.Session.create(
             payment_method_types=["card"],
             line_items=line_items,
             mode="subscription",
-            success_url=f"https://defiguard-ai-fresh-private.onrender.com/complete-tier-checkout?session_id={{CHECKOUT_SESSION_ID}}&tier={urllib.parse.quote(tier)}&has_diamond={urllib.parse.quote(str(has_diamond).lower())}&username={urllib.parse.quote(username)}",
-            cancel_url=f"https://defiguard-ai-fresh-private.onrender.com/ui?username={urllib.parse.quote(username)}",
+            success_url=f"{base_url}/complete-tier-checkout?session_id={{CHECKOUT_SESSION_ID}}&tier={urllib.parse.quote(tier)}&has_diamond={urllib.parse.quote(str(has_diamond).lower())}&username={urllib.parse.quote(username)}",
+            cancel_url=f"{base_url}/ui?username={urllib.parse.quote(username)}",
             metadata={"username": username, "tier": tier, "has_diamond": str(has_diamond).lower()}
         )
         
@@ -3951,7 +3957,7 @@ async def diamond_audit(
             if request is not None:
                 base_url = f"{request.url.scheme}://{request.url.netloc}"
             else:
-                base_url = "https://defiguard-ai-fresh-private.onrender.com"
+                base_url = APP_BASE_URL
             
             success_url = f"{base_url}/ui?upgrade=success&audit=complete&pending_id={urllib.parse.quote(pending_id)}"
             cancel_url = f"{base_url}/ui"
@@ -4563,7 +4569,7 @@ async def audit_contract(
             
             line_items = [{"price": STRIPE_PRICE_DIAMOND, "quantity": 1}] if current_tier == "pro" else [{"price": STRIPE_PRICE_PRO, "quantity": 1}, {"price": STRIPE_PRICE_DIAMOND, "quantity": 1}]
             
-            base_url = f"{request.url.scheme}://{request.url.netloc}" if request is not None else "https://defiguard-ai-fresh-private.onrender.com"
+            base_url = f"{request.url.scheme}://{request.url.netloc}" if request is not None else APP_BASE_URL
             success_url = f"{base_url}/complete-diamond-audit?session_id={{CHECKOUT_SESSION_ID}}&temp_id={temp_id}&username={urllib.parse.quote(effective_username)}"
             cancel_url = f"{base_url}/ui"
             
@@ -4642,12 +4648,14 @@ async def audit_contract(
                 price_id = STRIPE_PRICE_ENTERPRISE
             
             try:
+                # Use dynamic base URL from request
+                size_limit_base_url = f"{request.url.scheme}://{request.url.netloc}" if request is not None else APP_BASE_URL
                 session = stripe.checkout.Session.create(
                     payment_method_types=["card"],
                     line_items=[{"price": price_id, "quantity": 1}],
                     mode="subscription",
-                    success_url=f"https://defiguard-ai-fresh-private.onrender.com/complete-diamond-audit?session_id={{CHECKOUT_SESSION_ID}}&temp_id={urllib.parse.quote(os.path.basename(temp_path).split('.')[0])}&username={urllib.parse.quote(effective_username)}",
-                    cancel_url="https://defiguard-ai-fresh-private.onrender.com/ui",
+                    success_url=f"{size_limit_base_url}/complete-diamond-audit?session_id={{CHECKOUT_SESSION_ID}}&temp_id={urllib.parse.quote(os.path.basename(temp_path).split('.')[0])}&username={urllib.parse.quote(effective_username)}",
+                    cancel_url=f"{size_limit_base_url}/ui",
                     metadata={"temp_id": os.path.basename(temp_path).split('.')[0], "username": effective_username}
                 )
                 logger.info(f"Redirecting {effective_username} to Stripe for tier upgrade due to file size")
@@ -4665,12 +4673,14 @@ async def audit_contract(
                 raise HTTPException(status_code=503, detail="Payment processing unavailable: Missing Stripe config")
             
             try:
+                # Use dynamic base URL from request
+                usage_limit_base_url = f"{request.url.scheme}://{request.url.netloc}" if request is not None else APP_BASE_URL
                 session = stripe.checkout.Session.create(
                     payment_method_types=["card"],
                     line_items=[{"price": STRIPE_PRICE_STARTER, "quantity": 1}],
                     mode="subscription",
-                    success_url=f"https://defiguard-ai-fresh-private.onrender.com/ui?session_id={{CHECKOUT_SESSION_ID}}&tier=starter",
-                    cancel_url="https://defiguard-ai-fresh-private.onrender.com/ui",
+                    success_url=f"{usage_limit_base_url}/ui?session_id={{CHECKOUT_SESSION_ID}}&tier=starter",
+                    cancel_url=f"{usage_limit_base_url}/ui",
                     metadata={"username": effective_username, "tier": "starter"}
                 )
                 return {"session_url": session.url}
