@@ -1,7 +1,13 @@
 // ---------------------------------------------------------------------
-// GLOBAL DEBUG HELPER – makes console logs easy to spot
+// GLOBAL DEBUG HELPER – controlled via DEBUG_MODE flag
+// Set to false for production to silence debug logs
 // ---------------------------------------------------------------------
-const log = (label, ...args) => console.log(`[${label}]`, ...args, `time=${new Date().toISOString()}`);
+const DEBUG_MODE = false;  // Set to true for development debugging
+const log = (label, ...args) => {
+    if (DEBUG_MODE) console.log(`[${label}]`, ...args, `time=${new Date().toISOString()}`);
+};
+// Debug wrapper for console.log calls - only logs in debug mode
+const debugLog = (...args) => { if (DEBUG_MODE) console.log(...args); };
 
 // ---------------------------------------------------------------------
 // AUDIT QUEUE TRACKER - Real-time queue position and status updates
@@ -377,9 +383,12 @@ class WalletManager {
         this.detectedWallets.forEach(wallet => {
             const btn = document.createElement('button');
             btn.className = 'wallet-option detected';
+            // Escape wallet name to prevent XSS from malicious wallet providers
+            const safeName = escapeHtml(wallet.info.name);
+            const safeIcon = escapeHtml(wallet.info.icon);
             btn.innerHTML = `
-                <img src="${wallet.info.icon}" alt="${wallet.info.name}" class="wallet-icon">
-                <span class="wallet-name">${wallet.info.name}</span>
+                <img src="${safeIcon}" alt="${safeName}" class="wallet-icon">
+                <span class="wallet-name">${safeName}</span>
                 <span class="wallet-tag installed-tag">Detected</span>
             `;
             btn.addEventListener('click', () => this.connectWithEIP6963Wallet(wallet));
@@ -1089,11 +1098,11 @@ function waitForDOM(selectors, callback, maxAttempts = 20, interval = 300) {
         }
 
         if (allFound) {
-            console.log('[DEBUG] All DOM elements found – initializing');
+            debugLog('[DEBUG] All DOM elements found – initializing');
             callback(elements);
         } else if (attempts < maxAttempts) {
             attempts++;
-            console.log(`[DEBUG] Waiting for DOM elements, attempt ${attempts}/${maxAttempts}, missing: ${missing.join(', ')}`);
+            debugLog(`[DEBUG] Waiting for DOM elements, attempt ${attempts}/${maxAttempts}, missing: ${missing.join(', ')}`);
             setTimeout(check, interval);
         } else {
             // *** FALLBACK: Proceed even if some elements are missing ***
@@ -1116,7 +1125,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!response.ok) throw new Error("CSRF fetch failed");
       const data = await response.json();
       if (!data.csrf_token) throw new Error("Empty token");
-      console.log(`[DEBUG] Fresh CSRF token fetched: ${data.csrf_token.substring(0, 10)}...`);
+      debugLog(`[DEBUG] Fresh CSRF token fetched: ${data.csrf_token.substring(0, 10)}...`);
       return data.csrf_token;
     } catch (err) {
       console.error("[ERROR] CSRF token fetch failed:", err);
@@ -1281,7 +1290,7 @@ document.addEventListener("DOMContentLoaded", () => {
           const displayProvider = user.provider && user.provider !== "unknown" 
             ? user.provider 
             : (user.sub?.includes('|') ? user.sub.split('|')[0] : "auth0");
-          authStatus.innerHTML = `Signed in as <strong>${user.username}</strong> <small>(${displayProvider})</small>`;
+          authStatus.innerHTML = `Signed in as <strong>${escapeHtml(user.username)}</strong> <small>(${escapeHtml(displayProvider)})</small>`;
           localStorage.setItem('userSub', user.sub);
           sidebar.classList.add("logged-in");
         } else {
@@ -1309,7 +1318,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (logoutSidebar) {
         logoutSidebar.addEventListener("click", (e) => {
           e.preventDefault();
-          console.log(`[DEBUG] Logout initiated, time=${new Date().toISOString()}`);
+          debugLog(`[DEBUG] Logout initiated, time=${new Date().toISOString()}`);
           window.location.href = "/logout";
         });
       } else {
@@ -1596,7 +1605,7 @@ document.addEventListener("DOMContentLoaded", () => {
           auditLimit = audit_limit;
           // ✅ Handle logged out state
           if (data.tier === "logged_out" || data.logged_in === false) {
-            console.log("[DEBUG] User is logged out, showing logged-out UI");
+            debugLog("[DEBUG] User is logged out, showing logged-out UI");
             
             // Update sidebar to show "Not Signed In"
             sidebarTierName.textContent = "Not Signed In";
@@ -1630,7 +1639,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const apiKeySection = document.getElementById("api-key");
             if (apiKeySection) apiKeySection.style.display = "none";
             
-            console.log("[DEBUG] Logged-out UI state applied");
+            debugLog("[DEBUG] Logged-out UI state applied");
             return; // Exit early, don't run normal tier display code
           }
           
@@ -1753,7 +1762,7 @@ document.addEventListener("DOMContentLoaded", () => {
           const prioritySupport = document.querySelector(".priority-support");
           if (prioritySupport) prioritySupport.style.display =
             feature_flags.priority_support ? "block" : "none";
-          console.log(`[DEBUG] Tier data fetched: tier=${tier}, auditCount=${auditCount}, auditLimit=${auditLimit}, time=${new Date().toISOString()}`);
+          debugLog(`[DEBUG] Tier data fetched: tier=${tier}, auditCount=${auditCount}, auditLimit=${auditLimit}, time=${new Date().toISOString()}`);
         } catch (error) {
           console.error("Tier fetch error:", error);
           usageWarning.textContent = `Error fetching tier data: ${error.message}`;
@@ -1956,14 +1965,14 @@ document.addEventListener("DOMContentLoaded", () => {
       // Only update tier if backend provides it, otherwise keep existing tier from fetchTierData()
       if (data.tier) {
         window.currentAuditTier = data.tier;
-        console.log('[DEBUG] Tier from audit response:', data.tier);
+        debugLog('[DEBUG] Tier from audit response:', data.tier);
       } else {
         // Fallback: Get tier from already-loaded tier data (from sidebar or initial fetch)
         const sidebarTier = document.getElementById('sidebar-tier-name')?.textContent?.toLowerCase() || 'free';
         window.currentAuditTier = window.currentAuditTier || sidebarTier;
-        console.log('[DEBUG] Tier from sidebar fallback:', window.currentAuditTier);
+        debugLog('[DEBUG] Tier from sidebar fallback:', window.currentAuditTier);
       } // Store tier info
-      console.log('[DEBUG] Audit response received:', {
+      debugLog('[DEBUG] Audit response received:', {
         tier: data.tier,
         currentAuditTier: window.currentAuditTier,
         issuesCount: data.report?.issues?.length || 0,
@@ -2576,7 +2585,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
   backdrop.style.display = 'block';
   document.body.style.overflow = 'hidden';
   
-  console.log(`[DEBUG] Modal opened for issue ${index}`);
+  debugLog(`[DEBUG] Modal opened for issue ${index}`);
 };
         predictionsList.innerHTML = report.predictions.length === 0 
           ? "<li>No predictions available.</li>"
@@ -2757,10 +2766,10 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
         if (data.pdf_report_url) {
           window.currentAuditPdfUrl = data.pdf_report_url;
           window.currentAuditPdfPath = data.pdf_report_url;  // Backwards compat
-          console.log(`[DEBUG] PDF available: ${data.pdf_report_url}`);
+          debugLog(`[DEBUG] PDF available: ${data.pdf_report_url}`);
         } else if (data.compliance_pdf) {
           window.currentAuditPdfPath = data.compliance_pdf;
-          console.log(`[DEBUG] PDF generated (legacy): ${data.compliance_pdf}`);
+          debugLog(`[DEBUG] PDF generated (legacy): ${data.compliance_pdf}`);
         }
 
         // Update mobile view based on tier
@@ -2834,7 +2843,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           }
         }
 
-        console.log(`[DEBUG] Mobile view: tier=${currentTier}, hasPdfAccess=${hasPdfAccess}`);
+        debugLog(`[DEBUG] Mobile view: tier=${currentTier}, hasPdfAccess=${hasPdfAccess}`);
 
         if (overageCost) {
           usageWarning.textContent = `Enterprise audit completed with $${overageCost.toFixed(2)} overage charged.`;
@@ -2969,7 +2978,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
 
       if (auditForm) {
         auditForm.addEventListener("submit", handleSubmit);
-        console.log("[DEBUG] Audit submit handler attached successfully");
+        debugLog("[DEBUG] Audit submit handler attached successfully");
       } else {
         console.error("[ERROR] auditForm not found – submit handler NOT attached");
       }
@@ -3018,7 +3027,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
         a.download = `DeFiGuard_Audit_Report_${new Date().toISOString()}.json`;
         a.click();
         URL.revokeObjectURL(url);
-        console.log("[DEBUG] Report downloaded");
+        debugLog("[DEBUG] Report downloaded");
       });
 
       // PDF Download Button
@@ -3044,7 +3053,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             fetchUrl = `/api/reports/${filename}`;
           }
 
-          console.log(`[DEBUG] Fetching PDF from: ${fetchUrl}`);
+          debugLog(`[DEBUG] Fetching PDF from: ${fetchUrl}`);
           const response = await fetch(fetchUrl, {
             credentials: "include"
           });
@@ -3061,7 +3070,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           a.download = pdfUrl.split('/').pop() || `DeFiGuard_Report_${Date.now()}.pdf`;
           a.click();
           URL.revokeObjectURL(url);
-          console.log("[DEBUG] PDF downloaded successfully");
+          debugLog("[DEBUG] PDF downloaded successfully");
         } catch (error) {
           console.error("[ERROR] PDF download failed:", error);
           usageWarning.textContent = `PDF download failed: ${error.message}`;
@@ -3088,7 +3097,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             fetchUrl = `/api/reports/${filename}`;
           }
 
-          console.log(`[DEBUG] Mobile: Fetching PDF from: ${fetchUrl}`);
+          debugLog(`[DEBUG] Mobile: Fetching PDF from: ${fetchUrl}`);
 
           // Show loading state
           mobilePdfDownload.textContent = "⏳ Downloading...";
@@ -3114,7 +3123,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           // Reset button
           mobilePdfDownload.textContent = "📄 Download Full PDF Report";
           mobilePdfDownload.disabled = false;
-          console.log("[DEBUG] Mobile PDF downloaded successfully");
+          debugLog("[DEBUG] Mobile PDF downloaded successfully");
         } catch (error) {
           console.error("[ERROR] Mobile PDF download failed:", error);
           mobilePdfDownload.textContent = "📄 Download Full PDF Report";
@@ -3162,7 +3171,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             const data = await response.json();
             usageWarning.textContent = `🎉 ${data.message} - NFT ID: ${data.nft_id}`;
             usageWarning.classList.add("success");
-            console.log(`[DEBUG] NFT minted: ${data.nft_id}`);
+            debugLog(`[DEBUG] NFT minted: ${data.nft_id}`);
           } catch (error) {
             console.error("[ERROR] NFT minting failed:", error);
             usageWarning.textContent = `NFT minting failed: ${error.message}`;
@@ -3257,7 +3266,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             }
           }
           
-          console.log("[DEBUG] Settings modal populated successfully");
+          debugLog("[DEBUG] Settings modal populated successfully");
         } catch (error) {
           console.error("[ERROR] Failed to populate settings modal:", error);
         }
@@ -3369,7 +3378,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             }
           }
           
-          console.log("[DEBUG] API keys loaded successfully");
+          debugLog("[DEBUG] API keys loaded successfully");
         } catch (error) {
           console.error("[ERROR] Failed to load API keys:", error);
           if (apiKeysTableBody) {
@@ -3386,7 +3395,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
 
       // Open modal
       settingsModalButton?.addEventListener("click", async () => {
-        console.log("[DEBUG] Opening settings modal");
+        debugLog("[DEBUG] Opening settings modal");
         await populateSettingsModal();
         settingsModal?.classList.add("active");
         settingsModalBackdrop?.classList.add("active");
@@ -3395,7 +3404,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
 
       // Close modal
       const closeSettingsModal = () => {
-        console.log("[DEBUG] Closing settings modal");
+        debugLog("[DEBUG] Closing settings modal");
         settingsModal?.classList.remove("active");
         settingsModalBackdrop?.classList.remove("active");
         document.body.style.overflow = ""; // Restore scroll
@@ -3513,7 +3522,7 @@ Key: ${data.api_key}
       if (modalLogoutButton) {
         modalLogoutButton.addEventListener("click", (e) => {
           e.preventDefault();
-          console.log(`[DEBUG] Logout initiated from settings modal, time=${new Date().toISOString()}`);
+          debugLog(`[DEBUG] Logout initiated from settings modal, time=${new Date().toISOString()}`);
           closeSettingsModal();
           window.location.href = "/logout";
         });
@@ -3530,14 +3539,14 @@ Key: ${data.api_key}
         const savedTheme = localStorage.getItem("userTheme") || "default";
         document.documentElement.setAttribute("data-theme", savedTheme);
         if (themeSelect) themeSelect.value = savedTheme;
-        console.log(`[DEBUG] Theme loaded: ${savedTheme}`);
+        debugLog(`[DEBUG] Theme loaded: ${savedTheme}`);
       };
       
       // Apply theme
       const applyTheme = (theme) => {
         document.documentElement.setAttribute("data-theme", theme);
         localStorage.setItem("userTheme", theme);
-        console.log(`[DEBUG] Theme applied: ${theme}`);
+        debugLog(`[DEBUG] Theme applied: ${theme}`);
       };
       
       // Theme change handler
@@ -3730,7 +3739,7 @@ Key: ${data.api_key}
   // FINAL DUPLICATE AUTH CHECK KILLER – NO MORE MULTIPLES EVER
   if (window.authCheckInterval) {
     clearInterval(window.authCheckInterval);
-    console.log("[DEBUG] Cleared duplicate auth check interval");
+    debugLog("[DEBUG] Cleared duplicate auth check interval");
   }
   window.authCheckInterval = null;
 }); // ← THIS CLOSES document.addEventListener("DOMContentLoaded", () => {

@@ -6,30 +6,12 @@ import os
 from dotenv import load_dotenv
 import sys
 
-print("=" * 80)
-print("🔍 PYTHON STARTUP DEBUG:")
-print(f"Python executable: {sys.executable}")
-print(f"Current working directory: {os.getcwd()}")
-print(f"Script location: {os.path.abspath(__file__)}")
-print(f".env file exists at CWD: {os.path.exists('.env')}")
-print(f".env file exists at script dir: {os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))}")
-
 # Load from script directory (not CWD)
 script_dir = os.path.dirname(os.path.abspath(__file__))
 dotenv_path = os.path.join(script_dir, '.env')
-print(f"Loading .env from: {dotenv_path}")
 load_dotenv(dotenv_path=dotenv_path)
 
-grok_test = os.getenv("GROK_API_KEY")
-print(f"GROK_API_KEY loaded: {'YES ✅' if grok_test else 'NO ❌'}")
-if grok_test:
-    print(f"First 20 chars: {grok_test[:20]}...")
-print("=" * 80)
-
 # NOW initialize clients AFTER .env is loaded
-print("=" * 80)
-print("🔍 CALLING INITIALIZE_CLIENT EARLY:")
-print("=" * 80)
 
 # Import what we need for initialize_client
 from openai import OpenAI
@@ -45,9 +27,6 @@ w3 = None
 anthropic_key = os.getenv("ANTHROPIC_API_KEY")
 if anthropic_key and anthropic_key.strip():
     claude_client = anthropic.Anthropic(api_key=anthropic_key.strip())
-    print("[CLAUDE] Primary client initialized successfully ✅")
-else:
-    print("[CLAUDE] ANTHROPIC_API_KEY missing - primary client is None ❌")
 
 # Fallback: Grok
 grok_key = os.getenv("GROK_API_KEY")
@@ -56,14 +35,10 @@ if grok_key and grok_key.strip():
         api_key=grok_key.strip(),
         base_url="https://api.x.ai/v1"
     )
-    print("[GROK] Fallback client initialized successfully ✅")
-else:
-    print("[GROK] GROK_API_KEY missing - fallback client is None ❌")
 
 # Web3
 infura_url = f"https://mainnet.infura.io/v3/{os.getenv('INFURA_PROJECT_ID')}"
 w3 = Web3(Web3.HTTPProvider(infura_url))
-print(f"[WEB3] Connected: {w3.is_connected()}")
 
 # On-chain Analyzer (lazy initialization - imports after all modules loaded)
 onchain_analyzer = None
@@ -72,13 +47,11 @@ def get_onchain_analyzer():
     global onchain_analyzer
     if onchain_analyzer is None:
         try:
-            onchain_analyzer = OnChainAnalyzer(rpc_url=infura_url)
-            print(f"[ONCHAIN] Analyzer initialized: {onchain_analyzer.is_connected}")
-        except Exception as e:
-            print(f"[ONCHAIN] Failed to initialize analyzer: {e}")
+            from onchain_analyzer import OnChainAnalyzer as OCA
+            onchain_analyzer = OCA(rpc_url=infura_url)
+        except Exception:
+            pass
     return onchain_analyzer
-
-print("=" * 80)
 
 import platform
 import json
@@ -456,10 +429,23 @@ app.add_middleware(
     session_cookie="session",
     max_age=14 * 24 * 60 * 60,  # 2 weeks
     same_site="lax",
-    https_only=False  # Set to True in production
+    https_only=os.getenv("ENVIRONMENT", "production") == "production"
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# === LEGAL DOCUMENT ROUTES ===
+@app.get("/privacy")
+async def privacy_page():
+    """Serve the privacy policy page."""
+    from fastapi.responses import FileResponse
+    return FileResponse("static/privacy-policy.html", media_type="text/html")
+
+@app.get("/terms")
+async def terms_page():
+    """Serve the terms of service page."""
+    from fastapi.responses import FileResponse
+    return FileResponse("static/terms-of-service.html", media_type="text/html")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -505,7 +491,11 @@ async def startup_redis_pubsub():
         logger.info("[STARTUP] Redis audit subscriber started")
         
 @app.get("/debug-files")
-async def debug_files():
+async def debug_files(admin_key: str = Query(None)):
+    """Debug endpoint - requires admin key in production."""
+    expected_key = os.getenv("ADMIN_KEY")
+    if expected_key and admin_key != expected_key:
+        raise HTTPException(status_code=403, detail="Admin access required")
     import os
     files = os.listdir("templates") if os.path.exists("templates") else "NO templates folder"
     cwd = os.getcwd()
@@ -608,12 +598,12 @@ class User(Base):
     username: Mapped[str] = mapped_column(String, unique=True, index=True)
     email: Mapped[str] = mapped_column(String, unique=True, index=True)
     password_hash: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    tier: Mapped[str] = mapped_column(String, default="free")
+    tier: Mapped[str] = mapped_column(String, default="free", index=True)
     has_diamond: Mapped[bool] = mapped_column(Boolean, default=False)
     last_reset: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    api_key: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    auth0_sub: Mapped[Optional[str]] = mapped_column(String, unique=True, nullable=True)
-    stripe_customer_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    api_key: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    auth0_sub: Mapped[Optional[str]] = mapped_column(String, unique=True, nullable=True, index=True)
+    stripe_customer_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
     stripe_subscription_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     stripe_subscription_item_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     audit_history: Mapped[str] = mapped_column(Text, default="[]")
@@ -660,12 +650,12 @@ class APIKey(Base):
     __table_args__ = {'extend_existing': True}
     
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    user_id: Mapped[int] = mapped_column(Integer, ForeignKey('users.id'), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey('users.id'), nullable=False, index=True)
     key: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
     label: Mapped[str] = mapped_column(String, default="API Key", nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     
     # Relationship
     user = relationship("User", back_populates="api_keys")
@@ -675,9 +665,9 @@ class PendingAudit(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
     username: Mapped[str] = mapped_column(String, index=True)
     temp_path: Mapped[str] = mapped_column(String)
-    status: Mapped[str] = mapped_column(String, default="pending")
+    status: Mapped[str] = mapped_column(String, default="pending", index=True)
     results: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
 
 Base.metadata.create_all(bind=engine, checkfirst=True)
 
@@ -4164,7 +4154,11 @@ async def verify_api_key(
 ## Section 4.1: Prompt and Debug Endpoints
 
 @app.get("/debug")
-async def debug_log():
+async def debug_log(admin_key: str = Query(None)):
+    """Debug endpoint - requires admin key in production."""
+    expected_key = os.getenv("ADMIN_KEY")
+    if expected_key and admin_key != expected_key:
+        raise HTTPException(status_code=403, detail="Admin access required")
     logger.debug("Debug endpoint called")
     logger.info("Test INFO log")
     logger.warning("Test WARNING log")
@@ -5181,9 +5175,7 @@ async def mint_nft(request: Request, username: str = Query(...), db: Session = D
     logger.info(f"Minted NFT for {username}: token_id={token_id}")
     return {"token_id": token_id}
 
-@app.get("/oauth-google")
-async def oauth_google():
-    return RedirectResponse(url="https://accounts.google.com/o/oauth2/auth?client_id=YOUR_CLIENT_ID&redirect_uri=http://localhost:8000/callback&scope=openid email profile&response_type=code")
+# Removed: /oauth-google stub endpoint (was using placeholder client ID)
 
 @app.post("/refer")
 async def refer(request: Request, link: str = Query(...), db: Session = Depends(get_db)):
@@ -6732,8 +6724,11 @@ async def migrate_tiers(request: Request, db: Session = Depends(get_db), admin_k
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Migration failed: {str(e)}")
 @app.get("/debug/echidna-env")
-async def debug_echidna_env():
-    """Check Echidna installation and environment"""
+async def debug_echidna_env(admin_key: str = Query(None)):
+    """Check Echidna installation and environment - requires admin key."""
+    expected_key = os.getenv("ADMIN_KEY")
+    if expected_key and admin_key != expected_key:
+        raise HTTPException(status_code=403, detail="Admin access required")
     import subprocess
     
     checks = {
