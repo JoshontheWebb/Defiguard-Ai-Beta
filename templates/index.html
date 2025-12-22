@@ -507,6 +507,72 @@
         </section>
 
     </main>
+
+    <!-- Wallet Selection Modal -->
+    <div class="modal-backdrop" id="wallet-modal-backdrop" style="display: none;"></div>
+    <div class="modal wallet-modal" id="wallet-modal" role="dialog" aria-labelledby="wallet-modal-title" aria-modal="true" style="display: none; max-width: 420px;">
+        <button class="modal-close" id="wallet-modal-close" aria-label="Close wallet selector">×</button>
+
+        <div class="modal-header" style="text-align: center; padding-bottom: var(--space-4);">
+            <h2 class="modal-title" id="wallet-modal-title">Connect Wallet</h2>
+            <p style="margin-top: var(--space-2); color: var(--text-tertiary); font-size: var(--text-sm);">
+                Select a wallet to import your deployed contracts
+            </p>
+        </div>
+
+        <div class="modal-body" style="padding: 0 var(--space-6) var(--space-6);">
+            <!-- Detected Browser Wallets (EIP-6963) -->
+            <div id="detected-wallets-section">
+                <div class="wallet-section-label">Detected Wallets</div>
+                <div id="detected-wallets-list" class="wallet-list">
+                    <!-- Populated dynamically -->
+                </div>
+            </div>
+
+            <!-- Popular Wallets -->
+            <div id="popular-wallets-section" style="margin-top: var(--space-4);">
+                <div class="wallet-section-label">Popular Wallets</div>
+                <div class="wallet-list">
+                    <button class="wallet-option" data-wallet="metamask">
+                        <img src="https://upload.wikimedia.org/wikipedia/commons/3/36/MetaMask_Fox.svg" alt="MetaMask" class="wallet-icon">
+                        <span class="wallet-name">MetaMask</span>
+                        <span class="wallet-tag" id="metamask-tag"></span>
+                    </button>
+                    <button class="wallet-option" data-wallet="coinbase">
+                        <img src="https://avatars.githubusercontent.com/u/18060234?s=200&v=4" alt="Coinbase Wallet" class="wallet-icon">
+                        <span class="wallet-name">Coinbase Wallet</span>
+                        <span class="wallet-tag" id="coinbase-tag"></span>
+                    </button>
+                    <button class="wallet-option" data-wallet="walletconnect">
+                        <img src="https://avatars.githubusercontent.com/u/37784886?s=200&v=4" alt="WalletConnect" class="wallet-icon">
+                        <span class="wallet-name">WalletConnect</span>
+                        <span class="wallet-tag mobile-tag">Mobile & 300+ wallets</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- WalletConnect QR Section (hidden by default) -->
+            <div id="walletconnect-qr-section" style="display: none; margin-top: var(--space-4);">
+                <div class="wallet-section-label">Scan with your wallet app</div>
+                <div id="walletconnect-qr-container" class="qr-container">
+                    <div class="qr-loading">Generating QR code...</div>
+                </div>
+                <button id="walletconnect-back" class="btn btn-secondary" style="width: 100%; margin-top: var(--space-4);">
+                    ← Back to wallet list
+                </button>
+            </div>
+
+            <!-- No Wallet Detected Message -->
+            <div id="no-wallet-message" style="display: none; text-align: center; padding: var(--space-6); color: var(--text-tertiary);">
+                <div style="font-size: 2rem; margin-bottom: var(--space-3);">🔗</div>
+                <p style="margin-bottom: var(--space-4);">No browser wallet detected</p>
+                <p style="font-size: var(--text-sm);">
+                    On mobile? Use <strong>WalletConnect</strong> below or open this page in your wallet app's browser.
+                </p>
+            </div>
+        </div>
+    </div>
+
     <!-- Queue Monitor Modal -->
     <div class="modal-backdrop" id="queue-modal-backdrop"></div>
     <div class="modal" id="queue-modal" role="dialog" aria-labelledby="queue-modal-title" aria-modal="true" style="max-width: 900px;">
