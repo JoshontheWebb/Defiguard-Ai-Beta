@@ -134,11 +134,39 @@
                     </small>
                 </div>
 
-                <!-- Wallet Connect (Optional) -->
-                <div class="form-group">
-                    <button id="wallet-connect" type="button">
-                        🔗 Connect Wallet (Optional)
-                    </button>
+                <!-- Wallet Connect -->
+                <div class="form-group wallet-connect-group">
+                    <!-- Not Connected State -->
+                    <div id="wallet-not-connected">
+                        <button id="wallet-connect" type="button" class="btn btn-secondary wallet-btn">
+                            🔗 Connect Wallet
+                        </button>
+                        <small class="form-hint">Import contracts you've deployed</small>
+                    </div>
+
+                    <!-- Connected State -->
+                    <div id="wallet-connected" style="display: none;">
+                        <div class="wallet-connected-info">
+                            <span class="wallet-status-dot"></span>
+                            <span id="wallet-address-display" class="wallet-address">0x...</span>
+                            <button id="wallet-disconnect" type="button" class="btn-icon" title="Disconnect wallet">
+                                ✕
+                            </button>
+                        </div>
+
+                        <!-- Contract Selector (appears after wallet connected) -->
+                        <div id="contract-selector-wrapper" style="display: none; margin-top: var(--space-3);">
+                            <label for="deployed-contracts">Your Deployed Contracts:</label>
+                            <select id="deployed-contracts" class="form-select">
+                                <option value="">-- Select a contract to import --</option>
+                            </select>
+                            <button id="import-contract-btn" type="button" class="btn btn-primary" style="margin-top: var(--space-2);" disabled>
+                                📥 Import Contract Code
+                            </button>
+                        </div>
+
+                        <small id="wallet-contract-count" class="form-hint">Loading your contracts...</small>
+                    </div>
                 </div>
 
                 <!-- Contract Address (Pro/Enterprise) -->
@@ -799,6 +827,8 @@
     </footer>
 
     <!-- Scripts - Cache-busted dynamic loading -->
+    <!-- Ethers.js for wallet connection -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.9.0/ethers.umd.min.js" integrity="sha512-CB/d5YgBmmqIxcKm5O+A/pB8e3FrNx8Bs6dM/xU5K7VKXDlbj0Oi7tsGVS2S2p5YNNhPL/hcrN+jrNlQ7eCIOQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
     <script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script>
     <script>
         // Cache-bust CSS and JS

@@ -275,6 +275,380 @@ class AuditQueueTracker {
 const queueTracker = new AuditQueueTracker();
 
 // ---------------------------------------------------------------------
+// WALLET CONNECTION MANAGER - Connect MetaMask/WalletConnect, import contracts
+// ---------------------------------------------------------------------
+class WalletManager {
+    constructor() {
+        this.provider = null;
+        this.signer = null;
+        this.address = null;
+        this.contracts = [];
+        this.isConnecting = false;
+
+        // Etherscan API for fetching deployed contracts
+        this.etherscanApiKey = null; // Will be fetched from backend
+        this.etherscanBaseUrl = 'https://api.etherscan.io/api';
+    }
+
+    async init() {
+        // Check if already connected (from previous session)
+        const savedAddress = localStorage.getItem('walletAddress');
+        if (savedAddress && window.ethereum) {
+            try {
+                const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+                if (accounts.length > 0 && accounts[0].toLowerCase() === savedAddress.toLowerCase()) {
+                    await this.connectWithProvider(window.ethereum, true);
+                }
+            } catch (e) {
+                log('WALLET', 'Failed to restore session:', e);
+                localStorage.removeItem('walletAddress');
+            }
+        }
+
+        // Listen for account changes
+        if (window.ethereum) {
+            window.ethereum.on('accountsChanged', (accounts) => {
+                if (accounts.length === 0) {
+                    this.disconnect();
+                } else if (accounts[0].toLowerCase() !== this.address?.toLowerCase()) {
+                    this.connectWithProvider(window.ethereum, false);
+                }
+            });
+
+            window.ethereum.on('chainChanged', () => {
+                window.location.reload();
+            });
+        }
+
+        this.bindEvents();
+    }
+
+    bindEvents() {
+        const connectBtn = document.getElementById('wallet-connect');
+        const disconnectBtn = document.getElementById('wallet-disconnect');
+        const contractSelect = document.getElementById('deployed-contracts');
+        const importBtn = document.getElementById('import-contract-btn');
+
+        if (connectBtn) {
+            connectBtn.addEventListener('click', () => this.connect());
+        }
+
+        if (disconnectBtn) {
+            disconnectBtn.addEventListener('click', () => this.disconnect());
+        }
+
+        if (contractSelect) {
+            contractSelect.addEventListener('change', (e) => {
+                if (importBtn) {
+                    importBtn.disabled = !e.target.value;
+                }
+            });
+        }
+
+        if (importBtn) {
+            importBtn.addEventListener('click', () => this.importSelectedContract());
+        }
+    }
+
+    async connect() {
+        if (this.isConnecting) return;
+        this.isConnecting = true;
+
+        const connectBtn = document.getElementById('wallet-connect');
+        if (connectBtn) {
+            connectBtn.textContent = '🔄 Connecting...';
+            connectBtn.disabled = true;
+        }
+
+        try {
+            if (!window.ethereum) {
+                throw new Error('No wallet detected. Please install MetaMask or another Web3 wallet.');
+            }
+
+            // Request account access
+            await window.ethereum.request({ method: 'eth_requestAccounts' });
+            await this.connectWithProvider(window.ethereum, false);
+
+        } catch (error) {
+            log('WALLET', 'Connection failed:', error);
+            this.showError(error.message || 'Failed to connect wallet');
+
+            if (connectBtn) {
+                connectBtn.textContent = '🔗 Connect Wallet';
+                connectBtn.disabled = false;
+            }
+        } finally {
+            this.isConnecting = false;
+        }
+    }
+
+    async connectWithProvider(ethereumProvider, isReconnect = false) {
+        try {
+            // Use ethers.js v6 BrowserProvider
+            this.provider = new ethers.BrowserProvider(ethereumProvider);
+            this.signer = await this.provider.getSigner();
+            this.address = await this.signer.getAddress();
+
+            log('WALLET', `Connected: ${this.address}`);
+
+            // Save to localStorage for session persistence
+            localStorage.setItem('walletAddress', this.address);
+
+            // Verify ownership with signature (only on fresh connect, not reconnect)
+            if (!isReconnect) {
+                const verified = await this.verifyOwnership();
+                if (!verified) {
+                    throw new Error('Wallet verification failed');
+                }
+            }
+
+            // Update UI
+            this.updateUI(true);
+
+            // Fetch deployed contracts
+            await this.fetchDeployedContracts();
+
+        } catch (error) {
+            log('WALLET', 'Provider connection failed:', error);
+            throw error;
+        }
+    }
+
+    async fetchCsrfToken() {
+        try {
+            const response = await fetch(`/csrf-token?_=${Date.now()}`, {
+                method: 'GET',
+                credentials: 'include'
+            });
+            if (!response.ok) throw new Error('CSRF fetch failed');
+            const data = await response.json();
+            return data.csrf_token || null;
+        } catch (e) {
+            log('WALLET', 'CSRF token fetch failed:', e);
+            return null;
+        }
+    }
+
+    async verifyOwnership() {
+        try {
+            const message = `DeFiGuard AI Wallet Verification\n\nTimestamp: ${Date.now()}\n\nSign this message to prove you own this wallet. This does not cost any gas.`;
+            const signature = await this.signer.signMessage(message);
+
+            // Fetch fresh CSRF token
+            const csrfToken = await this.fetchCsrfToken();
+            if (!csrfToken) {
+                log('WALLET', 'No CSRF token available');
+                return true; // Continue without backend save
+            }
+
+            // Send to backend to verify and save
+            const response = await fetch('/api/wallet/connect', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': csrfToken
+                },
+                credentials: 'include',
+                body: JSON.stringify({
+                    address: this.address,
+                    message: message,
+                    signature: signature
+                })
+            });
+
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({}));
+                throw new Error(error.detail || 'Verification failed');
+            }
+
+            const data = await response.json();
+            log('WALLET', 'Verification successful:', data);
+
+            // Store Etherscan API key if provided
+            if (data.etherscan_api_key) {
+                this.etherscanApiKey = data.etherscan_api_key;
+            }
+
+            return true;
+
+        } catch (error) {
+            log('WALLET', 'Verification error:', error);
+            // Don't block on signature rejection - just continue without saving to backend
+            if (error.code === 4001 || error.message?.includes('rejected')) {
+                log('WALLET', 'User rejected signature - continuing without backend save');
+                return true; // Allow continuing without backend verification
+            }
+            return false;
+        }
+    }
+
+    async fetchDeployedContracts() {
+        const countHint = document.getElementById('wallet-contract-count');
+        const selectorWrapper = document.getElementById('contract-selector-wrapper');
+        const select = document.getElementById('deployed-contracts');
+
+        if (countHint) countHint.textContent = 'Loading your contracts...';
+
+        try {
+            // Fetch from backend (which proxies to Etherscan)
+            const response = await fetch(`/api/wallet/contracts?address=${this.address}`, {
+                credentials: 'include'
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to fetch contracts');
+            }
+
+            const data = await response.json();
+            this.contracts = data.contracts || [];
+
+            log('WALLET', `Found ${this.contracts.length} contracts`);
+
+            // Update UI
+            if (select) {
+                select.innerHTML = '<option value="">-- Select a contract to import --</option>';
+
+                this.contracts.forEach(contract => {
+                    const option = document.createElement('option');
+                    option.value = contract.address;
+                    option.textContent = `${contract.name || 'Unknown'} (${this.formatAddress(contract.address)})`;
+                    option.dataset.name = contract.name || '';
+                    select.appendChild(option);
+                });
+            }
+
+            if (this.contracts.length > 0) {
+                if (selectorWrapper) selectorWrapper.style.display = 'block';
+                if (countHint) countHint.textContent = `Found ${this.contracts.length} verified contract${this.contracts.length !== 1 ? 's' : ''}`;
+            } else {
+                if (selectorWrapper) selectorWrapper.style.display = 'none';
+                if (countHint) countHint.textContent = 'No verified contracts found for this address';
+            }
+
+        } catch (error) {
+            log('WALLET', 'Failed to fetch contracts:', error);
+            if (countHint) countHint.textContent = 'Could not load contracts';
+            if (selectorWrapper) selectorWrapper.style.display = 'none';
+        }
+    }
+
+    async importSelectedContract() {
+        const select = document.getElementById('deployed-contracts');
+        const importBtn = document.getElementById('import-contract-btn');
+        const contractAddress = select?.value;
+
+        if (!contractAddress) return;
+
+        if (importBtn) {
+            importBtn.textContent = '⏳ Importing...';
+            importBtn.disabled = true;
+        }
+
+        try {
+            // Fetch source code from backend
+            const response = await fetch(`/api/wallet/contract-source?address=${contractAddress}`, {
+                credentials: 'include'
+            });
+
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({}));
+                throw new Error(error.detail || 'Failed to fetch source code');
+            }
+
+            const data = await response.json();
+
+            if (!data.source_code) {
+                throw new Error('No verified source code found for this contract');
+            }
+
+            // Populate the code editor
+            const codeInput = document.getElementById('code');
+            if (codeInput) {
+                codeInput.value = data.source_code;
+                log('WALLET', `Imported ${data.contract_name || 'contract'} source code (${data.source_code.length} chars)`);
+
+                // Show success message
+                this.showSuccess(`Imported ${data.contract_name || 'contract'} successfully!`);
+
+                // Also set contract address if that field exists
+                const addressInput = document.getElementById('contract_address');
+                if (addressInput) {
+                    addressInput.value = contractAddress;
+                }
+            }
+
+        } catch (error) {
+            log('WALLET', 'Import failed:', error);
+            this.showError(error.message || 'Failed to import contract');
+        } finally {
+            if (importBtn) {
+                importBtn.textContent = '📥 Import Contract Code';
+                importBtn.disabled = false;
+            }
+        }
+    }
+
+    disconnect() {
+        this.provider = null;
+        this.signer = null;
+        this.address = null;
+        this.contracts = [];
+
+        localStorage.removeItem('walletAddress');
+
+        this.updateUI(false);
+        log('WALLET', 'Disconnected');
+    }
+
+    updateUI(connected) {
+        const notConnectedEl = document.getElementById('wallet-not-connected');
+        const connectedEl = document.getElementById('wallet-connected');
+        const addressDisplay = document.getElementById('wallet-address-display');
+        const selectorWrapper = document.getElementById('contract-selector-wrapper');
+
+        if (connected && this.address) {
+            if (notConnectedEl) notConnectedEl.style.display = 'none';
+            if (connectedEl) connectedEl.style.display = 'block';
+            if (addressDisplay) addressDisplay.textContent = this.formatAddress(this.address);
+        } else {
+            if (notConnectedEl) notConnectedEl.style.display = 'block';
+            if (connectedEl) connectedEl.style.display = 'none';
+            if (selectorWrapper) selectorWrapper.style.display = 'none';
+
+            // Reset connect button
+            const connectBtn = document.getElementById('wallet-connect');
+            if (connectBtn) {
+                connectBtn.textContent = '🔗 Connect Wallet';
+                connectBtn.disabled = false;
+            }
+        }
+    }
+
+    formatAddress(address) {
+        if (!address) return '';
+        return `${address.slice(0, 6)}...${address.slice(-4)}`;
+    }
+
+    showError(message) {
+        // Use existing notification system if available
+        if (typeof showNotification === 'function') {
+            showNotification(message, 'error');
+        } else {
+            alert(message);
+        }
+    }
+
+    showSuccess(message) {
+        if (typeof showNotification === 'function') {
+            showNotification(message, 'success');
+        }
+    }
+}
+
+// Global wallet manager instance
+const walletManager = new WalletManager();
+
+// ---------------------------------------------------------------------
 // UTILITY FUNCTIONS – Must be at top so they're available everywhere
 // ---------------------------------------------------------------------
 
@@ -373,7 +747,10 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     return fetchFn(token);
   };
-  
+
+  // Initialize wallet connection manager
+  walletManager.init().catch(e => console.warn('[WALLET] Init failed:', e));
+
   // Fetch signed-in proof from /me (enhances with sub/provider/logged_in)
   const fetchUsername = async () => {
     try {

@@ -1258,6 +1258,277 @@ async def update_api_key_label(
         logger.error(f"[API_KEY_UPDATE] Error: {e}")
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update API key")
+
+
+# ============================================================================
+# WALLET CONNECTION ENDPOINTS
+# ============================================================================
+
+ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
+
+@app.post("/api/wallet/connect")
+async def connect_wallet(
+    request: Request,
+    body: dict = Body(...),
+    db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """
+    Connect and verify wallet ownership via signature.
+    Saves wallet address to user profile after verification.
+    """
+    try:
+        await verify_csrf_token(request)
+
+        user = await get_authenticated_user(request, db)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+        address = body.get("address", "").strip()
+        message = body.get("message", "")
+        signature = body.get("signature", "")
+
+        if not address or not message or not signature:
+            raise HTTPException(status_code=400, detail="Missing address, message, or signature")
+
+        # Validate address format
+        if not w3.is_address(address):
+            raise HTTPException(status_code=400, detail="Invalid Ethereum address")
+
+        # Convert to checksum address
+        checksum_address = w3.to_checksum_address(address)
+
+        # Verify signature using eth_account
+        from eth_account.messages import encode_defunct
+        from eth_account import Account
+
+        try:
+            message_hash = encode_defunct(text=message)
+            recovered_address = Account.recover_message(message_hash, signature=signature)
+
+            if recovered_address.lower() != checksum_address.lower():
+                raise HTTPException(status_code=400, detail="Signature verification failed")
+
+        except Exception as e:
+            logger.warning(f"[WALLET] Signature verification error: {e}")
+            raise HTTPException(status_code=400, detail="Invalid signature")
+
+        # Save wallet address to user profile
+        user.wallet_address = checksum_address
+        db.commit()
+
+        logger.info(f"[WALLET] User {user.username} connected wallet: {checksum_address}")
+
+        return {
+            "success": True,
+            "address": checksum_address,
+            "message": "Wallet connected successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[WALLET] Connect error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to connect wallet")
+
+
+@app.get("/api/wallet/contracts")
+async def get_wallet_contracts(
+    address: str,
+    request: Request,
+    db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """
+    Fetch contracts deployed by a wallet address from Etherscan.
+    Returns list of verified contracts with their names.
+    """
+    try:
+        user = await get_authenticated_user(request, db)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+        if not w3.is_address(address):
+            raise HTTPException(status_code=400, detail="Invalid Ethereum address")
+
+        checksum_address = w3.to_checksum_address(address)
+
+        if not ETHERSCAN_API_KEY:
+            logger.warning("[WALLET] ETHERSCAN_API_KEY not configured")
+            return {"contracts": [], "message": "Etherscan API not configured"}
+
+        # Fetch transactions from Etherscan to find contract creations
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            # Get normal transactions (contract creations have 'to' = empty)
+            response = await client.get(
+                "https://api.etherscan.io/api",
+                params={
+                    "module": "account",
+                    "action": "txlist",
+                    "address": checksum_address,
+                    "startblock": 0,
+                    "endblock": 99999999,
+                    "sort": "desc",
+                    "apikey": ETHERSCAN_API_KEY
+                },
+                timeout=30.0
+            )
+
+            data = response.json()
+
+            if data.get("status") != "1":
+                logger.warning(f"[WALLET] Etherscan API error: {data.get('message')}")
+                return {"contracts": [], "message": data.get("message", "API error")}
+
+            transactions = data.get("result", [])
+
+            # Find contract creation transactions (to address is empty, contractAddress is set)
+            contract_creations = []
+            seen_addresses = set()
+
+            for tx in transactions:
+                if tx.get("to") == "" and tx.get("contractAddress"):
+                    contract_addr = tx.get("contractAddress")
+                    if contract_addr and contract_addr not in seen_addresses:
+                        seen_addresses.add(contract_addr)
+                        contract_creations.append({
+                            "address": w3.to_checksum_address(contract_addr),
+                            "txHash": tx.get("hash"),
+                            "blockNumber": tx.get("blockNumber"),
+                            "timestamp": tx.get("timeStamp")
+                        })
+
+            # Fetch contract names for verified contracts
+            contracts_with_names = []
+            for contract in contract_creations[:20]:  # Limit to 20 contracts
+                try:
+                    # Get contract ABI/source to check if verified and get name
+                    source_response = await client.get(
+                        "https://api.etherscan.io/api",
+                        params={
+                            "module": "contract",
+                            "action": "getsourcecode",
+                            "address": contract["address"],
+                            "apikey": ETHERSCAN_API_KEY
+                        },
+                        timeout=10.0
+                    )
+
+                    source_data = source_response.json()
+                    if source_data.get("status") == "1" and source_data.get("result"):
+                        result = source_data["result"][0]
+                        contract_name = result.get("ContractName", "")
+                        if contract_name:  # Only include verified contracts
+                            contracts_with_names.append({
+                                "address": contract["address"],
+                                "name": contract_name,
+                                "txHash": contract["txHash"],
+                                "verified": True
+                            })
+                except Exception as e:
+                    logger.debug(f"[WALLET] Failed to get contract name for {contract['address']}: {e}")
+                    continue
+
+            logger.info(f"[WALLET] Found {len(contracts_with_names)} verified contracts for {checksum_address}")
+
+            return {
+                "contracts": contracts_with_names,
+                "total_found": len(contract_creations),
+                "verified_count": len(contracts_with_names)
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[WALLET] Get contracts error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch contracts")
+
+
+@app.get("/api/wallet/contract-source")
+async def get_contract_source(
+    address: str,
+    request: Request,
+    db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """
+    Fetch verified source code for a contract from Etherscan.
+    """
+    try:
+        user = await get_authenticated_user(request, db)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+        if not w3.is_address(address):
+            raise HTTPException(status_code=400, detail="Invalid contract address")
+
+        checksum_address = w3.to_checksum_address(address)
+
+        if not ETHERSCAN_API_KEY:
+            raise HTTPException(status_code=503, detail="Etherscan API not configured")
+
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://api.etherscan.io/api",
+                params={
+                    "module": "contract",
+                    "action": "getsourcecode",
+                    "address": checksum_address,
+                    "apikey": ETHERSCAN_API_KEY
+                },
+                timeout=30.0
+            )
+
+            data = response.json()
+
+            if data.get("status") != "1":
+                raise HTTPException(status_code=404, detail="Contract not found or not verified")
+
+            result = data.get("result", [{}])[0]
+            source_code = result.get("SourceCode", "")
+            contract_name = result.get("ContractName", "")
+
+            if not source_code:
+                raise HTTPException(status_code=404, detail="No verified source code found")
+
+            # Handle JSON-formatted source (multi-file contracts)
+            if source_code.startswith("{{") or source_code.startswith("{"):
+                try:
+                    # Remove outer braces if double-wrapped
+                    if source_code.startswith("{{"):
+                        source_code = source_code[1:-1]
+
+                    source_json = json.loads(source_code)
+
+                    # Combine all source files
+                    if "sources" in source_json:
+                        combined_source = ""
+                        for file_path, file_data in source_json["sources"].items():
+                            content = file_data.get("content", "")
+                            combined_source += f"// File: {file_path}\n{content}\n\n"
+                        source_code = combined_source
+                except json.JSONDecodeError:
+                    pass  # Keep original source code
+
+            logger.info(f"[WALLET] Fetched source for {contract_name} ({checksum_address})")
+
+            return {
+                "source_code": source_code,
+                "contract_name": contract_name,
+                "address": checksum_address,
+                "compiler_version": result.get("CompilerVersion", ""),
+                "optimization_used": result.get("OptimizationUsed", ""),
+                "runs": result.get("Runs", "")
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[WALLET] Get source error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch source code")
+
+
 # ============================================================================
 # LEGAL DOCUMENT ACCEPTANCE TRACKING
 # ============================================================================
