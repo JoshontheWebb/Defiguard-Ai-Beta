@@ -5951,7 +5951,7 @@ async def audit_contract(
             if not usage_tracker.feature_flags.get(tier_for_flags, {}).get("onchain", False):
                 logger.warning(f"On-chain analysis denied for {effective_username} (tier: {current_tier})")
                 await broadcast_audit_log(effective_username, "On-chain analysis denied (tier restriction)")
-                raise HTTPException(status_code=403, detail="On-chain analysis requires Starter tier or higher.")
+                raise HTTPException(status_code=403, detail="On-chain analysis requires Pro tier or higher.")
 
             if not os.getenv("INFURA_PROJECT_ID") and not os.getenv("WEB3_PROVIDER_URL"):
                 logger.error("No Web3 provider configured")
