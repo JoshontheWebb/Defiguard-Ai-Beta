@@ -343,3 +343,13 @@ RISK_WEIGHTS = {
 
 # Max risk score adjustment from on-chain analysis
 MAX_ONCHAIN_RISK_ADJUSTMENT = 30
+
+# =============================================================================
+# API RATE LIMITING
+# =============================================================================
+
+# Etherscan free tier: 5 requests/second
+# We use 0.25s delay between requests for safety margin
+ETHERSCAN_API_DELAY = 0.25  # seconds between API calls
+ETHERSCAN_MAX_RETRIES = 3
+ETHERSCAN_RETRY_DELAY = 1.0  # seconds

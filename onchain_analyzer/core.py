@@ -53,7 +53,11 @@ class OnChainAnalyzer:
         else:
             self.rpc_url = self._get_rpc_url()
 
-        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
+        # Configure HTTP provider with timeout (15 seconds)
+        self.w3 = Web3(Web3.HTTPProvider(
+            self.rpc_url,
+            request_kwargs={'timeout': 15}
+        ))
 
         # Verify connection
         if not self.w3.is_connected():

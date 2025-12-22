@@ -43,6 +43,9 @@ from .constants import (
     DANGEROUS_OPCODES,
     FUNCTION_SELECTORS,
     ERC20_ABI,
+    ETHERSCAN_API_DELAY,
+    ETHERSCAN_MAX_RETRIES,
+    ETHERSCAN_RETRY_DELAY,
 )
 
 __all__ = [
@@ -77,6 +80,9 @@ __all__ = [
     "DANGEROUS_OPCODES",
     "FUNCTION_SELECTORS",
     "ERC20_ABI",
+    "ETHERSCAN_API_DELAY",
+    "ETHERSCAN_MAX_RETRIES",
+    "ETHERSCAN_RETRY_DELAY",
 ]
 
 __version__ = "2.0.0"

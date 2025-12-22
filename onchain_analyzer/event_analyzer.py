@@ -6,12 +6,19 @@ Enterprise feature.
 
 import logging
 import os
+import asyncio
 from typing import Any, Optional
 from datetime import datetime
 import aiohttp
 from web3 import Web3
 
-from .constants import CHAIN_CONFIG, DEFAULT_CHAIN_ID
+from .constants import (
+    CHAIN_CONFIG,
+    DEFAULT_CHAIN_ID,
+    ETHERSCAN_API_DELAY,
+    ETHERSCAN_MAX_RETRIES,
+    ETHERSCAN_RETRY_DELAY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -241,18 +248,39 @@ class EventAnalyzer:
                 f"&apikey={self.api_key}"
             )
 
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=30) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        if data.get("status") == "1":
-                            return data.get("result", [])
-                        else:
-                            logger.warning(f"Explorer API error: {data.get('message')}")
-                            return []
-                    else:
-                        logger.warning(f"Explorer API HTTP error: {response.status}")
-                        return []
+            # Rate limiting with retry logic
+            for attempt in range(ETHERSCAN_MAX_RETRIES):
+                try:
+                    # Add delay between API calls for rate limiting
+                    await asyncio.sleep(ETHERSCAN_API_DELAY)
+
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(url, timeout=30) as response:
+                            if response.status == 200:
+                                data = await response.json()
+                                if data.get("status") == "1":
+                                    return data.get("result", [])
+                                elif data.get("message") == "NOTOK" and "rate limit" in data.get("result", "").lower():
+                                    # Rate limited, wait and retry
+                                    logger.warning(f"Rate limited, retry {attempt + 1}/{ETHERSCAN_MAX_RETRIES}")
+                                    await asyncio.sleep(ETHERSCAN_RETRY_DELAY * (attempt + 1))
+                                    continue
+                                else:
+                                    logger.warning(f"Explorer API error: {data.get('message')}")
+                                    return []
+                            elif response.status == 429:  # Too Many Requests
+                                logger.warning(f"Rate limited (429), retry {attempt + 1}/{ETHERSCAN_MAX_RETRIES}")
+                                await asyncio.sleep(ETHERSCAN_RETRY_DELAY * (attempt + 1))
+                                continue
+                            else:
+                                logger.warning(f"Explorer API HTTP error: {response.status}")
+                                return []
+                except asyncio.TimeoutError:
+                    logger.warning(f"API timeout, retry {attempt + 1}/{ETHERSCAN_MAX_RETRIES}")
+                    await asyncio.sleep(ETHERSCAN_RETRY_DELAY)
+                    continue
+
+            return []
 
         except Exception as e:
             logger.error(f"Failed to fetch logs: {e}")

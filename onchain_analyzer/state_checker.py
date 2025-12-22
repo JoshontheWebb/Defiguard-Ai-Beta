@@ -10,7 +10,7 @@ from datetime import datetime
 
 from .constants import (
     ERC20_ABI,
-    OWNER_ABI,
+    OWNABLE_ABI,
     PAUSABLE_ABI,
     FUNCTION_SELECTORS,
 )
@@ -135,7 +135,7 @@ class StateChecker:
 
             # Try to get owner
             try:
-                contract = self.w3.eth.contract(address=address, abi=OWNER_ABI)
+                contract = self.w3.eth.contract(address=address, abi=OWNABLE_ABI)
                 owner = contract.functions.owner().call()
                 state["owner"] = owner
 

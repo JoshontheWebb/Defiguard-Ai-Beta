@@ -203,7 +203,7 @@ class TokenAnalyzer:
             # Total supply
             try:
                 raw_supply = contract.functions.totalSupply().call()
-                decimals = result["decimals"] or 18
+                decimals = result["decimals"] if result["decimals"] and result["decimals"] > 0 else 18
                 result["total_supply"] = str(raw_supply / (10 ** decimals))
                 result["supply_info"]["raw_total_supply"] = str(raw_supply)
             except Exception:
