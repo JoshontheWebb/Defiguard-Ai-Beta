@@ -895,6 +895,24 @@
     <!-- Scripts - Cache-busted dynamic loading -->
     <!-- Ethers.js for wallet connection -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.9.0/ethers.umd.min.js" integrity="sha512-CB/d5YgBmmqIxcKm5O+A/pB8e3FrNx8Bs6dM/xU5K7VKXDlbj0Oi7tsGVS2S2p5YNNhPL/hcrN+jrNlQ7eCIOQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <!-- QR Code library for WalletConnect -->
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+    <!-- WalletConnect EthereumProvider -->
+    <script type="module">
+        import { EthereumProvider } from 'https://esm.sh/@walletconnect/ethereum-provider@2.13.0';
+
+        window.WalletConnectProvider = EthereumProvider;
+        window.WALLETCONNECT_PROJECT_ID = '079a6f8f37edf022e707aff4a34ca1d8';
+        window.WALLETCONNECT_METADATA = {
+            name: 'DeFiGuard AI',
+            description: 'Smart Contract Security Auditor',
+            url: 'https://defiguard-ai-beta.onrender.com',
+            icons: ['https://defiguard-ai-beta.onrender.com/static/logo.png']
+        };
+
+        // Dispatch event when WalletConnect is ready
+        window.dispatchEvent(new Event('walletconnect-ready'));
+    </script>
     <script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script>
     <script>
         // Cache-bust CSS and JS

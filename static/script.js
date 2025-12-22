@@ -288,6 +288,9 @@ class WalletManager {
         // EIP-6963 detected wallets
         this.detectedWallets = [];
 
+        // WalletConnect provider reference
+        this.wcProvider = null;
+
         // Etherscan API for fetching deployed contracts
         this.etherscanApiKey = null;
         this.etherscanBaseUrl = 'https://api.etherscan.io/api';
@@ -528,7 +531,7 @@ class WalletManager {
                 await this.connectCoinbase(buttonEl);
                 break;
             case 'walletconnect':
-                this.showWalletConnectQR();
+                await this.showWalletConnectQR();
                 break;
             default:
                 log('WALLET', `Unknown wallet type: ${walletType}`);
@@ -637,7 +640,7 @@ class WalletManager {
         }
     }
 
-    showWalletConnectQR() {
+    async showWalletConnectQR() {
         const walletListSections = document.querySelectorAll('#detected-wallets-section, #popular-wallets-section, #no-wallet-message');
         const qrSection = document.getElementById('walletconnect-qr-section');
         const qrContainer = document.getElementById('walletconnect-qr-container');
@@ -647,28 +650,108 @@ class WalletManager {
         });
         if (qrSection) qrSection.style.display = 'block';
 
-        // Show instructions for WalletConnect
+        // Show loading state
         if (qrContainer) {
-            qrContainer.innerHTML = `
-                <div style="text-align: center; padding: var(--space-4); color: #333;">
-                    <div style="font-size: 3rem; margin-bottom: var(--space-4);">📱</div>
-                    <h3 style="margin-bottom: var(--space-3); color: #333;">Mobile Wallet Connection</h3>
-                    <p style="margin-bottom: var(--space-4); font-size: var(--text-sm); color: #666;">
-                        To connect from mobile, open this page in your wallet app's built-in browser:
-                    </p>
-                    <div style="background: #f5f5f5; padding: var(--space-4); border-radius: var(--radius-md); margin-bottom: var(--space-4);">
-                        <p style="font-weight: 600; margin-bottom: var(--space-2); color: #333;">MetaMask Mobile:</p>
-                        <p style="font-size: var(--text-sm); color: #666;">Open MetaMask → Browser tab → Enter this URL</p>
+            qrContainer.innerHTML = '<div class="qr-loading">Initializing WalletConnect...</div>';
+        }
+
+        try {
+            // Check if WalletConnect provider is available
+            if (!window.WalletConnectProvider) {
+                throw new Error('WalletConnect not loaded yet. Please wait a moment and try again.');
+            }
+
+            log('WALLET', 'Initializing WalletConnect...');
+
+            // Initialize WalletConnect EthereumProvider
+            const provider = await window.WalletConnectProvider.init({
+                projectId: window.WALLETCONNECT_PROJECT_ID,
+                metadata: window.WALLETCONNECT_METADATA,
+                showQrModal: false, // We'll show our own QR
+                chains: [1], // Ethereum mainnet
+                optionalChains: [8453, 42161, 137, 10], // Base, Arbitrum, Polygon, Optimism
+                methods: ['eth_sendTransaction', 'eth_signTransaction', 'eth_sign', 'personal_sign', 'eth_signTypedData'],
+                events: ['chainChanged', 'accountsChanged', 'disconnect']
+            });
+
+            // Listen for display_uri event to show QR code
+            provider.on('display_uri', async (uri) => {
+                log('WALLET', 'WalletConnect URI received');
+
+                if (qrContainer) {
+                    // Create QR code canvas
+                    qrContainer.innerHTML = `
+                        <div style="text-align: center;">
+                            <canvas id="walletconnect-qr-canvas" style="max-width: 280px; margin: 0 auto;"></canvas>
+                            <p style="margin-top: var(--space-3); font-size: var(--text-sm); color: var(--text-secondary);">
+                                Scan with your mobile wallet
+                            </p>
+                            <p style="margin-top: var(--space-2); font-size: var(--text-xs); color: var(--text-tertiary);">
+                                MetaMask, Trust, Rainbow, Coinbase & 300+ wallets
+                            </p>
+                        </div>
+                    `;
+
+                    // Generate QR code
+                    const canvas = document.getElementById('walletconnect-qr-canvas');
+                    if (canvas && window.QRCode) {
+                        await window.QRCode.toCanvas(canvas, uri, {
+                            width: 280,
+                            margin: 2,
+                            color: {
+                                dark: '#000000',
+                                light: '#ffffff'
+                            }
+                        });
+                    }
+                }
+            });
+
+            // Listen for connection
+            provider.on('connect', async () => {
+                log('WALLET', 'WalletConnect connected!');
+
+                // Store provider reference
+                this.wcProvider = provider;
+
+                // Connect with ethers
+                await this.connectWithProvider(provider);
+
+                // Close modal on success
+                this.closeWalletModal();
+            });
+
+            // Listen for disconnect
+            provider.on('disconnect', () => {
+                log('WALLET', 'WalletConnect disconnected');
+                this.disconnect();
+            });
+
+            // Enable the provider (triggers QR code display)
+            await provider.connect();
+
+        } catch (error) {
+            log('WALLET', 'WalletConnect error:', error);
+
+            if (qrContainer) {
+                qrContainer.innerHTML = `
+                    <div style="text-align: center; padding: var(--space-4);">
+                        <div style="font-size: 2rem; margin-bottom: var(--space-3);">⚠️</div>
+                        <p style="color: var(--text-secondary); margin-bottom: var(--space-4);">
+                            ${error.message || 'Failed to initialize WalletConnect'}
+                        </p>
+                        <p style="font-size: var(--text-sm); color: var(--text-tertiary); margin-bottom: var(--space-4);">
+                            <strong>Alternative:</strong> Open this page in your wallet app's browser
+                        </p>
+                        <div style="background: var(--glass-bg); padding: var(--space-3); border-radius: var(--radius-md); font-size: var(--text-xs); word-break: break-all; color: var(--text-tertiary);">
+                            ${window.location.origin}
+                        </div>
+                        <button onclick="window.walletManager.showWalletConnectQR()" class="btn btn-secondary" style="margin-top: var(--space-4);">
+                            Try Again
+                        </button>
                     </div>
-                    <div style="background: #f5f5f5; padding: var(--space-4); border-radius: var(--radius-md);">
-                        <p style="font-weight: 600; margin-bottom: var(--space-2); color: #333;">Coinbase Wallet:</p>
-                        <p style="font-size: var(--text-sm); color: #666;">Open Coinbase Wallet → Browser → Enter this URL</p>
-                    </div>
-                    <p style="margin-top: var(--space-4); font-size: var(--text-xs); color: #999;">
-                        URL: ${window.location.origin}
-                    </p>
-                </div>
-            `;
+                `;
+            }
         }
     }
 
@@ -883,13 +966,24 @@ class WalletManager {
         }
     }
 
-    disconnect() {
+    async disconnect() {
+        // Disconnect WalletConnect if active
+        if (this.wcProvider) {
+            try {
+                await this.wcProvider.disconnect();
+            } catch (e) {
+                log('WALLET', 'WalletConnect disconnect error:', e);
+            }
+            this.wcProvider = null;
+        }
+
         this.provider = null;
         this.signer = null;
         this.address = null;
         this.contracts = [];
 
         localStorage.removeItem('walletAddress');
+        localStorage.removeItem('walletProviderType');
 
         this.updateUI(false);
         log('WALLET', 'Disconnected');
