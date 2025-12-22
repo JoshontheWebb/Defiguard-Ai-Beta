@@ -8,6 +8,8 @@ Comprehensive on-chain analysis for smart contract security:
 - Honeypot detection
 - Token security analysis (ERC-20/721/1155)
 - Live state monitoring
+- Transaction history analysis (Enterprise)
+- Event log analysis (Enterprise)
 
 Usage:
     from onchain_analyzer import OnChainAnalyzer
@@ -22,6 +24,8 @@ from .storage_analyzer import StorageAnalyzer
 from .backdoor_scanner import BackdoorScanner, HoneypotDetector
 from .token_analyzer import TokenAnalyzer
 from .state_checker import StateChecker, ContractMonitor
+from .transaction_analyzer import TransactionAnalyzer
+from .event_analyzer import EventAnalyzer
 from .constants import (
     CHAIN_CONFIG,
     DEFAULT_CHAIN_ID,
@@ -39,7 +43,7 @@ __all__ = [
     "OnChainAnalyzer",
     "MultiChainAnalyzer",
 
-    # Component analyzers
+    # Component analyzers (Pro)
     "ProxyDetector",
     "StorageAnalyzer",
     "BackdoorScanner",
@@ -47,6 +51,10 @@ __all__ = [
     "TokenAnalyzer",
     "StateChecker",
     "ContractMonitor",
+
+    # Enterprise analyzers
+    "TransactionAnalyzer",
+    "EventAnalyzer",
 
     # Constants
     "CHAIN_CONFIG",
@@ -60,4 +68,4 @@ __all__ = [
     "ERC20_ABI",
 ]
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
