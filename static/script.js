@@ -285,27 +285,42 @@ class WalletManager {
         this.contracts = [];
         this.isConnecting = false;
 
+        // EIP-6963 detected wallets
+        this.detectedWallets = [];
+
+        // WalletConnect provider reference
+        this.wcProvider = null;
+
         // Etherscan API for fetching deployed contracts
-        this.etherscanApiKey = null; // Will be fetched from backend
+        this.etherscanApiKey = null;
         this.etherscanBaseUrl = 'https://api.etherscan.io/api';
     }
 
     async init() {
+        // Setup EIP-6963 wallet detection
+        this.setupEIP6963Detection();
+
         // Check if already connected (from previous session)
         const savedAddress = localStorage.getItem('walletAddress');
-        if (savedAddress && window.ethereum) {
+        const savedProviderType = localStorage.getItem('walletProviderType');
+
+        if (savedAddress) {
             try {
-                const accounts = await window.ethereum.request({ method: 'eth_accounts' });
-                if (accounts.length > 0 && accounts[0].toLowerCase() === savedAddress.toLowerCase()) {
-                    await this.connectWithProvider(window.ethereum, true);
+                // Try to reconnect based on saved provider type
+                if (savedProviderType === 'injected' && window.ethereum) {
+                    const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+                    if (accounts.length > 0 && accounts[0].toLowerCase() === savedAddress.toLowerCase()) {
+                        await this.connectWithProvider(window.ethereum, true);
+                    }
                 }
             } catch (e) {
                 log('WALLET', 'Failed to restore session:', e);
                 localStorage.removeItem('walletAddress');
+                localStorage.removeItem('walletProviderType');
             }
         }
 
-        // Listen for account changes
+        // Listen for account changes on injected provider
         if (window.ethereum) {
             window.ethereum.on('accountsChanged', (accounts) => {
                 if (accounts.length === 0) {
@@ -321,6 +336,86 @@ class WalletManager {
         }
 
         this.bindEvents();
+        this.updateWalletTags();
+    }
+
+    setupEIP6963Detection() {
+        // EIP-6963: Multi Injected Provider Discovery
+        this.detectedWallets = [];
+
+        const handleAnnouncement = (event) => {
+            const { info, provider } = event.detail;
+            log('WALLET', `EIP-6963 detected: ${info.name}`);
+
+            // Avoid duplicates
+            if (!this.detectedWallets.find(w => w.info.uuid === info.uuid)) {
+                this.detectedWallets.push({ info, provider });
+                this.renderDetectedWallets();
+            }
+        };
+
+        window.addEventListener('eip6963:announceProvider', handleAnnouncement);
+
+        // Request providers to announce themselves
+        window.dispatchEvent(new Event('eip6963:requestProvider'));
+    }
+
+    renderDetectedWallets() {
+        const container = document.getElementById('detected-wallets-list');
+        const section = document.getElementById('detected-wallets-section');
+
+        if (!container || !section) return;
+
+        if (this.detectedWallets.length === 0) {
+            section.style.display = 'none';
+            return;
+        }
+
+        section.style.display = 'block';
+        container.innerHTML = '';
+
+        this.detectedWallets.forEach(wallet => {
+            const btn = document.createElement('button');
+            btn.className = 'wallet-option detected';
+            btn.innerHTML = `
+                <img src="${wallet.info.icon}" alt="${wallet.info.name}" class="wallet-icon">
+                <span class="wallet-name">${wallet.info.name}</span>
+                <span class="wallet-tag installed-tag">Detected</span>
+            `;
+            btn.addEventListener('click', () => this.connectWithEIP6963Wallet(wallet));
+            container.appendChild(btn);
+        });
+    }
+
+    updateWalletTags() {
+        // Update MetaMask tag
+        const metamaskTag = document.getElementById('metamask-tag');
+        if (metamaskTag) {
+            if (window.ethereum?.isMetaMask) {
+                metamaskTag.textContent = 'Installed';
+                metamaskTag.className = 'wallet-tag installed-tag';
+            }
+        }
+
+        // Update Coinbase tag
+        const coinbaseTag = document.getElementById('coinbase-tag');
+        if (coinbaseTag) {
+            if (window.ethereum?.isCoinbaseWallet || window.coinbaseWalletExtension) {
+                coinbaseTag.textContent = 'Installed';
+                coinbaseTag.className = 'wallet-tag installed-tag';
+            }
+        }
+
+        // Show no wallet message if needed
+        const noWalletMsg = document.getElementById('no-wallet-message');
+        const popularSection = document.getElementById('popular-wallets-section');
+        if (noWalletMsg && popularSection) {
+            if (!window.ethereum && this.detectedWallets.length === 0) {
+                noWalletMsg.style.display = 'block';
+            } else {
+                noWalletMsg.style.display = 'none';
+            }
+        }
     }
 
     bindEvents() {
@@ -329,8 +424,9 @@ class WalletManager {
         const contractSelect = document.getElementById('deployed-contracts');
         const importBtn = document.getElementById('import-contract-btn');
 
+        // Main connect button opens modal
         if (connectBtn) {
-            connectBtn.addEventListener('click', () => this.connect());
+            connectBtn.addEventListener('click', () => this.openWalletModal());
         }
 
         if (disconnectBtn) {
@@ -348,38 +444,320 @@ class WalletManager {
         if (importBtn) {
             importBtn.addEventListener('click', () => this.importSelectedContract());
         }
+
+        // Wallet modal events
+        this.bindModalEvents();
     }
 
-    async connect() {
+    bindModalEvents() {
+        const modalBackdrop = document.getElementById('wallet-modal-backdrop');
+        const modal = document.getElementById('wallet-modal');
+        const closeBtn = document.getElementById('wallet-modal-close');
+        const walletConnectBack = document.getElementById('walletconnect-back');
+
+        // Close modal handlers
+        if (closeBtn) {
+            closeBtn.addEventListener('click', () => this.closeWalletModal());
+        }
+        if (modalBackdrop) {
+            modalBackdrop.addEventListener('click', () => this.closeWalletModal());
+        }
+
+        // WalletConnect back button
+        if (walletConnectBack) {
+            walletConnectBack.addEventListener('click', () => this.showWalletList());
+        }
+
+        // Wallet option clicks
+        document.querySelectorAll('.wallet-option[data-wallet]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const walletType = btn.dataset.wallet;
+                this.handleWalletSelection(walletType, btn);
+            });
+        });
+    }
+
+    openWalletModal() {
+        const modal = document.getElementById('wallet-modal');
+        const backdrop = document.getElementById('wallet-modal-backdrop');
+
+        if (modal) modal.style.display = 'block';
+        if (backdrop) backdrop.style.display = 'block';
+
+        // Refresh detected wallets
+        this.updateWalletTags();
+        this.showWalletList();
+    }
+
+    closeWalletModal() {
+        const modal = document.getElementById('wallet-modal');
+        const backdrop = document.getElementById('wallet-modal-backdrop');
+
+        if (modal) modal.style.display = 'none';
+        if (backdrop) backdrop.style.display = 'none';
+
+        // Reset any connecting states
+        document.querySelectorAll('.wallet-option.connecting').forEach(el => {
+            el.classList.remove('connecting');
+        });
+    }
+
+    showWalletList() {
+        const walletListSections = document.querySelectorAll('#detected-wallets-section, #popular-wallets-section, #no-wallet-message');
+        const qrSection = document.getElementById('walletconnect-qr-section');
+
+        walletListSections.forEach(el => {
+            if (el) el.style.display = '';
+        });
+        if (qrSection) qrSection.style.display = 'none';
+
+        // Re-check visibility
+        this.updateWalletTags();
+        if (this.detectedWallets.length > 0) {
+            document.getElementById('detected-wallets-section').style.display = 'block';
+        }
+    }
+
+    async handleWalletSelection(walletType, buttonEl) {
+        if (this.isConnecting) return;
+
+        log('WALLET', `Selected wallet type: ${walletType}`);
+
+        switch (walletType) {
+            case 'metamask':
+                await this.connectMetaMask(buttonEl);
+                break;
+            case 'coinbase':
+                await this.connectCoinbase(buttonEl);
+                break;
+            case 'walletconnect':
+                await this.showWalletConnectQR();
+                break;
+            default:
+                log('WALLET', `Unknown wallet type: ${walletType}`);
+        }
+    }
+
+    async connectWithEIP6963Wallet(wallet) {
         if (this.isConnecting) return;
         this.isConnecting = true;
 
-        const connectBtn = document.getElementById('wallet-connect');
-        if (connectBtn) {
-            connectBtn.textContent = '🔄 Connecting...';
-            connectBtn.disabled = true;
-        }
+        log('WALLET', `Connecting via EIP-6963: ${wallet.info.name}`);
 
         try {
-            if (!window.ethereum) {
-                throw new Error('No wallet detected. Please install MetaMask or another Web3 wallet.');
-            }
-
-            // Request account access
-            await window.ethereum.request({ method: 'eth_requestAccounts' });
-            await this.connectWithProvider(window.ethereum, false);
-
+            await wallet.provider.request({ method: 'eth_requestAccounts' });
+            await this.connectWithProvider(wallet.provider, false);
+            localStorage.setItem('walletProviderType', 'eip6963');
+            localStorage.setItem('walletProviderUuid', wallet.info.uuid);
+            this.closeWalletModal();
         } catch (error) {
-            log('WALLET', 'Connection failed:', error);
+            log('WALLET', 'EIP-6963 connection failed:', error);
             this.showError(error.message || 'Failed to connect wallet');
-
-            if (connectBtn) {
-                connectBtn.textContent = '🔗 Connect Wallet';
-                connectBtn.disabled = false;
-            }
         } finally {
             this.isConnecting = false;
         }
+    }
+
+    async connectMetaMask(buttonEl) {
+        if (this.isConnecting) return;
+        this.isConnecting = true;
+
+        if (buttonEl) buttonEl.classList.add('connecting');
+
+        try {
+            // Check if MetaMask is available
+            const provider = window.ethereum?.providers?.find(p => p.isMetaMask) ||
+                           (window.ethereum?.isMetaMask ? window.ethereum : null);
+
+            if (!provider) {
+                // Redirect to MetaMask install or deep link on mobile
+                const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+                if (isMobile) {
+                    // Deep link to MetaMask app
+                    const currentUrl = encodeURIComponent(window.location.href);
+                    window.location.href = `https://metamask.app.link/dapp/${window.location.host}${window.location.pathname}`;
+                    return;
+                } else {
+                    window.open('https://metamask.io/download/', '_blank');
+                    throw new Error('Please install MetaMask and refresh the page');
+                }
+            }
+
+            await provider.request({ method: 'eth_requestAccounts' });
+            await this.connectWithProvider(provider, false);
+            localStorage.setItem('walletProviderType', 'injected');
+            this.closeWalletModal();
+
+        } catch (error) {
+            log('WALLET', 'MetaMask connection failed:', error);
+            if (error.code !== 4001) { // User rejected
+                this.showError(error.message || 'Failed to connect MetaMask');
+            }
+        } finally {
+            this.isConnecting = false;
+            if (buttonEl) buttonEl.classList.remove('connecting');
+        }
+    }
+
+    async connectCoinbase(buttonEl) {
+        if (this.isConnecting) return;
+        this.isConnecting = true;
+
+        if (buttonEl) buttonEl.classList.add('connecting');
+
+        try {
+            // Check if Coinbase Wallet is available
+            const provider = window.ethereum?.providers?.find(p => p.isCoinbaseWallet) ||
+                           window.coinbaseWalletExtension ||
+                           (window.ethereum?.isCoinbaseWallet ? window.ethereum : null);
+
+            if (!provider) {
+                // Redirect to Coinbase Wallet
+                const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+                if (isMobile) {
+                    const currentUrl = encodeURIComponent(window.location.href);
+                    window.location.href = `https://go.cb-w.com/dapp?cb_url=${currentUrl}`;
+                    return;
+                } else {
+                    window.open('https://www.coinbase.com/wallet/downloads', '_blank');
+                    throw new Error('Please install Coinbase Wallet and refresh the page');
+                }
+            }
+
+            await provider.request({ method: 'eth_requestAccounts' });
+            await this.connectWithProvider(provider, false);
+            localStorage.setItem('walletProviderType', 'injected');
+            this.closeWalletModal();
+
+        } catch (error) {
+            log('WALLET', 'Coinbase connection failed:', error);
+            if (error.code !== 4001) {
+                this.showError(error.message || 'Failed to connect Coinbase Wallet');
+            }
+        } finally {
+            this.isConnecting = false;
+            if (buttonEl) buttonEl.classList.remove('connecting');
+        }
+    }
+
+    async showWalletConnectQR() {
+        const walletListSections = document.querySelectorAll('#detected-wallets-section, #popular-wallets-section, #no-wallet-message');
+        const qrSection = document.getElementById('walletconnect-qr-section');
+        const qrContainer = document.getElementById('walletconnect-qr-container');
+
+        walletListSections.forEach(el => {
+            if (el) el.style.display = 'none';
+        });
+        if (qrSection) qrSection.style.display = 'block';
+
+        // Show loading state
+        if (qrContainer) {
+            qrContainer.innerHTML = '<div class="qr-loading">Initializing WalletConnect...</div>';
+        }
+
+        try {
+            // Check if WalletConnect provider is available
+            if (!window.WalletConnectProvider) {
+                throw new Error('WalletConnect not loaded yet. Please wait a moment and try again.');
+            }
+
+            log('WALLET', 'Initializing WalletConnect...');
+
+            // Initialize WalletConnect EthereumProvider
+            const provider = await window.WalletConnectProvider.init({
+                projectId: window.WALLETCONNECT_PROJECT_ID,
+                metadata: window.WALLETCONNECT_METADATA,
+                showQrModal: false, // We'll show our own QR
+                chains: [1], // Ethereum mainnet
+                optionalChains: [8453, 42161, 137, 10], // Base, Arbitrum, Polygon, Optimism
+                methods: ['eth_sendTransaction', 'eth_signTransaction', 'eth_sign', 'personal_sign', 'eth_signTypedData'],
+                events: ['chainChanged', 'accountsChanged', 'disconnect']
+            });
+
+            // Listen for display_uri event to show QR code
+            provider.on('display_uri', async (uri) => {
+                log('WALLET', 'WalletConnect URI received');
+
+                if (qrContainer) {
+                    // Create QR code canvas
+                    qrContainer.innerHTML = `
+                        <div style="text-align: center;">
+                            <canvas id="walletconnect-qr-canvas" style="max-width: 280px; margin: 0 auto;"></canvas>
+                            <p style="margin-top: var(--space-3); font-size: var(--text-sm); color: var(--text-secondary);">
+                                Scan with your mobile wallet
+                            </p>
+                            <p style="margin-top: var(--space-2); font-size: var(--text-xs); color: var(--text-tertiary);">
+                                MetaMask, Trust, Rainbow, Coinbase & 300+ wallets
+                            </p>
+                        </div>
+                    `;
+
+                    // Generate QR code
+                    const canvas = document.getElementById('walletconnect-qr-canvas');
+                    if (canvas && window.QRCode) {
+                        await window.QRCode.toCanvas(canvas, uri, {
+                            width: 280,
+                            margin: 2,
+                            color: {
+                                dark: '#000000',
+                                light: '#ffffff'
+                            }
+                        });
+                    }
+                }
+            });
+
+            // Listen for connection
+            provider.on('connect', async () => {
+                log('WALLET', 'WalletConnect connected!');
+
+                // Store provider reference
+                this.wcProvider = provider;
+
+                // Connect with ethers
+                await this.connectWithProvider(provider);
+
+                // Close modal on success
+                this.closeWalletModal();
+            });
+
+            // Listen for disconnect
+            provider.on('disconnect', () => {
+                log('WALLET', 'WalletConnect disconnected');
+                this.disconnect();
+            });
+
+            // Enable the provider (triggers QR code display)
+            await provider.connect();
+
+        } catch (error) {
+            log('WALLET', 'WalletConnect error:', error);
+
+            if (qrContainer) {
+                qrContainer.innerHTML = `
+                    <div style="text-align: center; padding: var(--space-4);">
+                        <div style="font-size: 2rem; margin-bottom: var(--space-3);">⚠️</div>
+                        <p style="color: var(--text-secondary); margin-bottom: var(--space-4);">
+                            ${error.message || 'Failed to initialize WalletConnect'}
+                        </p>
+                        <p style="font-size: var(--text-sm); color: var(--text-tertiary); margin-bottom: var(--space-4);">
+                            <strong>Alternative:</strong> Open this page in your wallet app's browser
+                        </p>
+                        <div style="background: var(--glass-bg); padding: var(--space-3); border-radius: var(--radius-md); font-size: var(--text-xs); word-break: break-all; color: var(--text-tertiary);">
+                            ${window.location.origin}
+                        </div>
+                        <button onclick="window.walletManager.showWalletConnectQR()" class="btn btn-secondary" style="margin-top: var(--space-4);">
+                            Try Again
+                        </button>
+                    </div>
+                `;
+            }
+        }
+    }
+
+    // Legacy connect method (kept for backwards compatibility)
+    async connect() {
+        this.openWalletModal();
     }
 
     async connectWithProvider(ethereumProvider, isReconnect = false) {
@@ -588,13 +966,24 @@ class WalletManager {
         }
     }
 
-    disconnect() {
+    async disconnect() {
+        // Disconnect WalletConnect if active
+        if (this.wcProvider) {
+            try {
+                await this.wcProvider.disconnect();
+            } catch (e) {
+                log('WALLET', 'WalletConnect disconnect error:', e);
+            }
+            this.wcProvider = null;
+        }
+
         this.provider = null;
         this.signer = null;
         this.address = null;
         this.contracts = [];
 
         localStorage.removeItem('walletAddress');
+        localStorage.removeItem('walletProviderType');
 
         this.updateUI(false);
         log('WALLET', 'Disconnected');
