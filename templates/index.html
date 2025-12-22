@@ -333,6 +333,25 @@
                 </p>
             </div>
 
+            <!-- Mobile-Only: Simplified Results View -->
+            <div class="mobile-results-prompt" id="mobile-results-prompt">
+                <div class="mobile-results-card">
+                    <div class="mobile-results-icon">📱</div>
+                    <h4>Full Report Available</h4>
+                    <p>For the best experience on mobile, download your comprehensive PDF report with detailed findings, code analysis, and remediation steps.</p>
+                    <button id="mobile-pdf-download" class="btn btn-primary mobile-pdf-btn">
+                        📄 Download Full PDF Report
+                    </button>
+                    <div class="mobile-results-summary" id="mobile-severity-summary">
+                        <!-- Populated by JS with severity counts -->
+                    </div>
+                    <p class="mobile-hint">View on desktop for interactive results</p>
+                </div>
+            </div>
+
+            <!-- Desktop: Full Results (hidden on mobile) -->
+            <div class="desktop-results-content">
+
             <!-- Executive Summary (Pro+) -->
             <div id="executive-summary" class="executive-summary-box" style="display: none; margin: var(--space-6) 0; padding: var(--space-5); background: var(--glass-bg); border-left: 4px solid var(--accent-teal); border-radius: var(--radius-lg);">
                 <!-- Content populated by JavaScript -->
@@ -420,6 +439,8 @@
                     <li>No roadmap yet. Results will appear after analysis.</li>
                 </ul>
             </div>
+
+            </div><!-- End desktop-results-content -->
         </section>
 
         <!-- Settings Section -->
