@@ -10,12 +10,18 @@ Comprehensive on-chain analysis for smart contract security:
 - Live state monitoring
 - Transaction history analysis (Enterprise)
 - Event log analysis (Enterprise)
+- Multi-chain support (Ethereum, Base, Arbitrum, Polygon, Optimism)
 
 Usage:
-    from onchain_analyzer import OnChainAnalyzer
+    from onchain_analyzer import OnChainAnalyzer, MultiChainProvider
 
+    # Single chain
     analyzer = OnChainAnalyzer(web3_provider_url)
     result = await analyzer.analyze(contract_address)
+
+    # Multi-chain
+    provider = MultiChainProvider()
+    result = await provider.analyze(address, chain_id=8453)  # Base
 """
 
 from .core import OnChainAnalyzer, MultiChainAnalyzer
@@ -26,6 +32,7 @@ from .token_analyzer import TokenAnalyzer
 from .state_checker import StateChecker, ContractMonitor
 from .transaction_analyzer import TransactionAnalyzer
 from .event_analyzer import EventAnalyzer
+from .multichain_provider import MultiChainProvider, ChainConnection
 from .constants import (
     CHAIN_CONFIG,
     DEFAULT_CHAIN_ID,
@@ -42,6 +49,10 @@ __all__ = [
     # Main analyzer
     "OnChainAnalyzer",
     "MultiChainAnalyzer",
+
+    # Multi-chain provider
+    "MultiChainProvider",
+    "ChainConnection",
 
     # Component analyzers (Pro)
     "ProxyDetector",
@@ -68,4 +79,4 @@ __all__ = [
     "ERC20_ABI",
 ]
 
-__version__ = "1.2.0"
+__version__ = "2.0.0"
