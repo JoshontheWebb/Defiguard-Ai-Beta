@@ -813,6 +813,143 @@ section h4 {
     line-height: var(--leading-relaxed);
 }
 
+.hero-subtitle {
+    font-size: clamp(1.1rem, 2.5vw, 1.4rem) !important;
+    margin-bottom: var(--space-6) !important;
+}
+
+.hero-subtext {
+    font-size: var(--text-sm) !important;
+    color: var(--text-tertiary) !important;
+    margin-top: var(--space-4) !important;
+    margin-bottom: 0 !important;
+}
+
+/* Hero Stats */
+.hero-stats {
+    display: flex;
+    justify-content: center;
+    gap: var(--space-8);
+    margin: var(--space-8) 0;
+    flex-wrap: wrap;
+}
+
+.hero-stat {
+    text-align: center;
+}
+
+.hero-stat .stat-number {
+    display: block;
+    font-size: clamp(2rem, 4vw, 3rem);
+    font-weight: 800;
+    background: var(--gradient-accent);
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    line-height: 1.1;
+}
+
+.hero-stat .stat-label {
+    font-size: var(--text-sm);
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+/* Trust Badges */
+.trust-badges {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: var(--space-4);
+    padding: var(--space-6) var(--space-4);
+    background: var(--glass-bg);
+    border-bottom: 1px solid var(--glass-border);
+}
+
+.trust-badge {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    background: var(--bg-secondary);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-full);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+}
+
+.trust-badge .badge-icon {
+    font-size: 1.2em;
+}
+
+/* Why DeFiGuard Benefits Section */
+.why-defiguard {
+    padding: var(--space-12) var(--space-6);
+    text-align: center;
+}
+
+.why-defiguard h3 {
+    margin-bottom: var(--space-8);
+    font-size: clamp(1.5rem, 3vw, 2rem);
+}
+
+.benefits-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: var(--space-6);
+    max-width: 1000px;
+    margin: 0 auto;
+}
+
+.benefit-card {
+    background: var(--gradient-card);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-xl);
+    padding: var(--space-6);
+    text-align: center;
+    transition: all var(--transition-base);
+}
+
+.benefit-card:hover {
+    transform: translateY(-4px);
+    border-color: var(--accent-teal);
+    box-shadow: var(--glow-accent);
+}
+
+.benefit-card .benefit-icon {
+    font-size: 2.5rem;
+    margin-bottom: var(--space-4);
+}
+
+.benefit-card h4 {
+    font-size: var(--text-lg);
+    margin-bottom: var(--space-3);
+    color: var(--text-primary);
+}
+
+.benefit-card p {
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    line-height: var(--leading-relaxed);
+    margin: 0;
+}
+
+/* Pricing Table Enhancements */
+.pricing-table .popular-tier {
+    background: rgba(0, 209, 178, 0.1);
+    border-left: 3px solid var(--accent-teal);
+}
+
+.pricing-table .popular-tier td:first-child::after {
+    content: ' POPULAR';
+    display: block;
+    font-size: var(--text-xs);
+    color: var(--accent-teal);
+    font-weight: 600;
+    margin-top: var(--space-1);
+}
+
 /* ============================================================================
    BUTTONS - Premium interactive design with variants
    ============================================================================ */
