@@ -1846,22 +1846,75 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           console.log(`[DEBUG] PDF generated (legacy): ${data.compliance_pdf}`);
         }
 
-        // Update mobile severity summary
-        const mobileSeveritySummary = document.getElementById('mobile-severity-summary');
-        if (mobileSeveritySummary) {
-          const criticalCount = report.critical_count || 0;
-          const highCount = report.high_count || 0;
-          const mediumCount = report.medium_count || 0;
-          const lowCount = report.low_count || 0;
+        // Update mobile view based on tier
+        const currentTier = data.tier || window.currentAuditTier || 'free';
+        const hasPdfAccess = ['starter', 'beginner', 'pro', 'enterprise', 'diamond'].includes(currentTier);
 
-          mobileSeveritySummary.innerHTML = `
-            ${criticalCount > 0 ? `<span class="mobile-severity-badge critical">⚠️ ${criticalCount} Critical</span>` : ''}
-            ${highCount > 0 ? `<span class="mobile-severity-badge high">🔴 ${highCount} High</span>` : ''}
-            ${mediumCount > 0 ? `<span class="mobile-severity-badge medium">🟡 ${mediumCount} Medium</span>` : ''}
-            ${lowCount > 0 ? `<span class="mobile-severity-badge low">🟢 ${lowCount} Low</span>` : ''}
-            ${(criticalCount + highCount + mediumCount + lowCount) === 0 ? '<span class="mobile-severity-badge low">✅ No issues found</span>' : ''}
-          `;
+        const mobilePaidView = document.getElementById('mobile-paid-view');
+        const mobileFreeView = document.getElementById('mobile-free-view');
+
+        // Severity counts for both views
+        const criticalCount = report.critical_count || 0;
+        const highCount = report.high_count || 0;
+        const mediumCount = report.medium_count || 0;
+        const lowCount = report.low_count || 0;
+
+        const severityHtml = `
+          ${criticalCount > 0 ? `<span class="mobile-severity-badge critical">⚠️ ${criticalCount} Critical</span>` : ''}
+          ${highCount > 0 ? `<span class="mobile-severity-badge high">🔴 ${highCount} High</span>` : ''}
+          ${mediumCount > 0 ? `<span class="mobile-severity-badge medium">🟡 ${mediumCount} Medium</span>` : ''}
+          ${lowCount > 0 ? `<span class="mobile-severity-badge low">🟢 ${lowCount} Low</span>` : ''}
+          ${(criticalCount + highCount + mediumCount + lowCount) === 0 ? '<span class="mobile-severity-badge low">✅ No issues found</span>' : ''}
+        `;
+
+        if (hasPdfAccess) {
+          // PAID tier: Show PDF download view
+          if (mobilePaidView) mobilePaidView.style.display = 'block';
+          if (mobileFreeView) mobileFreeView.style.display = 'none';
+
+          const paidSeveritySummary = document.getElementById('mobile-severity-summary-paid');
+          if (paidSeveritySummary) paidSeveritySummary.innerHTML = severityHtml;
+
+        } else {
+          // FREE tier: Show issues list + upgrade CTA
+          if (mobilePaidView) mobilePaidView.style.display = 'none';
+          if (mobileFreeView) mobileFreeView.style.display = 'block';
+
+          const freeSeveritySummary = document.getElementById('mobile-severity-summary-free');
+          if (freeSeveritySummary) freeSeveritySummary.innerHTML = severityHtml;
+
+          // Populate issues list for free users
+          const mobileIssuesList = document.getElementById('mobile-issues-list');
+          if (mobileIssuesList && report.issues) {
+            const issues = report.issues.slice(0, 5); // Show max 5 issues on mobile
+            const severityIcon = { critical: '⚠️', high: '🔴', medium: '🟡', low: '🟢' };
+
+            let issuesHtml = issues.map(issue => {
+              const severity = (issue.severity || 'medium').toLowerCase();
+              return `
+                <div class="mobile-issue-item ${severity}">
+                  <span class="mobile-issue-severity">${severityIcon[severity] || '🔵'}</span>
+                  <div class="mobile-issue-content">
+                    <div class="mobile-issue-type">${issue.type || issue.title || 'Issue'}</div>
+                    <div class="mobile-issue-desc">${issue.description || ''}</div>
+                  </div>
+                </div>
+              `;
+            }).join('');
+
+            if (report.issues.length > 5) {
+              issuesHtml += `<div class="mobile-issues-more">+ ${report.issues.length - 5} more issues (view on desktop)</div>`;
+            }
+
+            if (report.issues.length === 0) {
+              issuesHtml = '<div class="mobile-issues-more">No issues found - your contract looks secure!</div>';
+            }
+
+            mobileIssuesList.innerHTML = issuesHtml;
+          }
         }
+
+        console.log(`[DEBUG] Mobile view: tier=${currentTier}, hasPdfAccess=${hasPdfAccess}`);
 
         if (overageCost) {
           usageWarning.textContent = `Enterprise audit completed with $${overageCost.toFixed(2)} overage charged.`;

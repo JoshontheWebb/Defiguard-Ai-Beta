@@ -335,17 +335,43 @@
 
             <!-- Mobile-Only: Simplified Results View -->
             <div class="mobile-results-prompt" id="mobile-results-prompt">
-                <div class="mobile-results-card">
-                    <div class="mobile-results-icon">📱</div>
-                    <h4>Full Report Available</h4>
-                    <p>For the best experience on mobile, download your comprehensive PDF report with detailed findings, code analysis, and remediation steps.</p>
+
+                <!-- Mobile View for PAID users (Starter+) - PDF Download -->
+                <div class="mobile-results-card mobile-paid-view" id="mobile-paid-view" style="display: none;">
+                    <div class="mobile-results-icon">📄</div>
+                    <h4>Your Report is Ready</h4>
+                    <p>Download your comprehensive PDF report with detailed findings, code analysis, and remediation steps.</p>
                     <button id="mobile-pdf-download" class="btn btn-primary mobile-pdf-btn">
                         📄 Download Full PDF Report
                     </button>
-                    <div class="mobile-results-summary" id="mobile-severity-summary">
+                    <div class="mobile-results-summary" id="mobile-severity-summary-paid">
                         <!-- Populated by JS with severity counts -->
                     </div>
                     <p class="mobile-hint">View on desktop for interactive results</p>
+                </div>
+
+                <!-- Mobile View for FREE users - Issues List + Upgrade CTA -->
+                <div class="mobile-results-card mobile-free-view" id="mobile-free-view" style="display: none;">
+                    <div class="mobile-results-icon">🔍</div>
+                    <h4>Audit Complete</h4>
+
+                    <div class="mobile-results-summary" id="mobile-severity-summary-free">
+                        <!-- Populated by JS with severity counts -->
+                    </div>
+
+                    <div class="mobile-issues-list" id="mobile-issues-list">
+                        <!-- Populated by JS with simplified issue list -->
+                    </div>
+
+                    <div class="mobile-upgrade-cta">
+                        <p>📄 Want a detailed PDF report?</p>
+                        <a href="#audit" class="btn btn-primary mobile-upgrade-btn" onclick="document.getElementById('tier-select').value='starter'; document.getElementById('tier-switch').click();">
+                            ⬆️ Upgrade to Starter
+                        </a>
+                        <p class="mobile-upgrade-hint">Get PDF exports, full analysis & more</p>
+                    </div>
+
+                    <p class="mobile-hint">View on desktop for full interactive results</p>
                 </div>
             </div>
 
