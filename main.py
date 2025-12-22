@@ -2084,11 +2084,59 @@ PHASE 4: CODE QUALITY & GAS OPTIMIZATION
 - Upgrade safety (proxy patterns, storage collisions)
 
 ═══════════════════════════════════════════════════════════════════
+SEVERITY CLASSIFICATION CRITERIA (FOLLOW STRICTLY - NO EXCEPTIONS):
+═══════════════════════════════════════════════════════════════════
+
+CRITICAL (Score: 25 points each) - MUST meet ALL criteria:
+- Direct loss of user funds possible (theft, permanent lock)
+- Exploitable without special permissions/conditions
+- Examples: Reentrancy with external calls before state updates,
+  unprotected selfdestruct, arbitrary external call injection,
+  uninitialized proxy implementation, signature replay attacks
+
+HIGH (Score: 15 points each) - MUST meet criteria:
+- Potential fund loss under specific conditions OR
+- Protocol functionality can be permanently broken OR
+- Admin/privileged role abuse possible
+- Examples: Missing access control on sensitive functions,
+  oracle manipulation without TWAP, flash loan attack vectors,
+  unchecked return values on transfers, front-running with MEV
+
+MEDIUM (Score: 8 points each) - MUST meet criteria:
+- Temporary disruption to protocol OR
+- Minor fund loss (gas griefing, dust amounts) OR
+- Requires unlikely conditions to exploit
+- Examples: DoS via gas limits, timestamp manipulation,
+  missing event emissions, unsafe ERC20 assumptions,
+  integer truncation (non-critical paths)
+
+LOW (Score: 3 points each) - MUST meet criteria:
+- Best practice violations with no direct security impact
+- Gas inefficiencies
+- Code quality/style issues
+- Examples: Unused variables, missing zero-address checks (non-critical),
+  suboptimal gas usage, missing NatSpec comments, magic numbers
+
+═══════════════════════════════════════════════════════════════════
+RISK SCORE CALCULATION (MANDATORY FORMULA - USE EXACTLY):
+═══════════════════════════════════════════════════════════════════
+
+risk_score = min(100, (critical_count × 25) + (high_count × 15) + (medium_count × 8) + (low_count × 3))
+
+Examples:
+- 2 Critical + 1 High + 3 Medium + 5 Low = (2×25)+(1×15)+(3×8)+(5×3) = 50+15+24+15 = 104 → 100
+- 0 Critical + 2 High + 4 Medium + 8 Low = (0×25)+(2×15)+(4×8)+(8×3) = 0+30+32+24 = 86
+- 0 Critical + 0 High + 2 Medium + 4 Low = (0×25)+(0×15)+(2×8)+(4×3) = 0+0+16+12 = 28
+
+IMPORTANT: The risk_score MUST be calculated using this formula. Do NOT subjectively adjust.
+Count ALL issues found, then apply the formula. Be consistent.
+
+═══════════════════════════════════════════════════════════════════
 ANALYSIS REQUIREMENTS BY TIER:
 ═══════════════════════════════════════════════════════════════════
 
 FREE TIER:
-- Risk score (0-100) with justification
+- Risk score calculated using the MANDATORY FORMULA above (no subjective adjustment)
 - Top 3 CRITICAL or HIGH severity issues ONLY
 - For each issue: type, severity, 2-3 sentence description
 - NO fix recommendations (upgrade required)
@@ -5477,6 +5525,7 @@ For Enterprise tier, also include: "proof_of_concept", "references"
                     response = claude_client.messages.create(
                         model="claude-sonnet-4-20250514",
                         max_tokens=16384,
+                        temperature=0,  # Deterministic output for consistent results
                         system=claude_system_prompt,
                         messages=[{
                             "role": "user",

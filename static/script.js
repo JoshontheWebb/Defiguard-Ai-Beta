@@ -1889,14 +1889,17 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             const issues = report.issues.slice(0, 5); // Show max 5 issues on mobile
             const severityIcon = { critical: '⚠️', high: '🔴', medium: '🟡', low: '🟢' };
 
-            let issuesHtml = issues.map(issue => {
+            let issuesHtml = issues.map((issue, index) => {
               const severity = (issue.severity || 'medium').toLowerCase();
+              const desc = issue.description || '';
+              const needsExpand = desc.length > 80; // Show expand hint if description is long
               return `
-                <div class="mobile-issue-item ${severity}">
+                <div class="mobile-issue-item ${severity}" data-issue-index="${index}" onclick="this.classList.toggle('expanded')">
                   <span class="mobile-issue-severity">${severityIcon[severity] || '🔵'}</span>
                   <div class="mobile-issue-content">
                     <div class="mobile-issue-type">${issue.type || issue.title || 'Issue'}</div>
-                    <div class="mobile-issue-desc">${issue.description || ''}</div>
+                    <div class="mobile-issue-desc">${desc}</div>
+                    ${needsExpand ? '<div class="mobile-issue-expand-hint">tap to expand</div>' : ''}
                   </div>
                 </div>
               `;

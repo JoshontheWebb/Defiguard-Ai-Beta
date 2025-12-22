@@ -1347,6 +1347,12 @@ small {
     background: var(--glass-bg);
     border-radius: var(--radius-md);
     border-left: 3px solid var(--accent-teal);
+    cursor: pointer;
+    transition: all var(--transition-base);
+}
+
+.mobile-issue-item:active {
+    background: var(--bg-hover);
 }
 
 .mobile-issue-item.critical {
@@ -1390,6 +1396,24 @@ small {
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
+    transition: all var(--transition-base);
+}
+
+.mobile-issue-item.expanded .mobile-issue-desc {
+    display: block;
+    -webkit-line-clamp: unset;
+    overflow: visible;
+}
+
+.mobile-issue-expand-hint {
+    font-size: 0.65rem;
+    color: var(--accent-teal);
+    margin-top: var(--space-1);
+    opacity: 0.7;
+}
+
+.mobile-issue-item.expanded .mobile-issue-expand-hint {
+    display: none;
 }
 
 .mobile-issues-more {
