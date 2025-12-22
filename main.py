@@ -548,20 +548,31 @@ async def logout(request: Request):
     return response
 
 # === DATABASE SETUP AND DEPENDENCIES (MUST BE BEFORE ANY ROUTES) ===
-import os
-
-# Use local path for development, Render path for production
-import os
 from pathlib import Path
 
-# Use local path for development, Render path for production
-if os.getenv("RENDER"):
+# Database Configuration - Supports PostgreSQL (recommended) or SQLite (dev only)
+# Priority: DATABASE_URL env var > Render SQLite > Local SQLite
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if DATABASE_URL:
+    # PostgreSQL from Render or external provider
+    # Render uses 'postgres://' but SQLAlchemy needs 'postgresql://'
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    logger.info(f"[DB] Using PostgreSQL database")
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
+elif os.getenv("RENDER"):
+    # Fallback: SQLite on Render (WARNING: Data lost on redeploy!)
     DATABASE_URL = "sqlite:////tmp/users.db"
+    logger.warning("[DB] ⚠️ Using ephemeral SQLite on Render - data will be lost on redeploy!")
+    logger.warning("[DB] ⚠️ Set DATABASE_URL env var to use PostgreSQL for persistence")
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 else:
-    # Create instance folder if it doesn't exist
+    # Local development
     Path("./instance").mkdir(exist_ok=True)
     DATABASE_URL = "sqlite:///./instance/users.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+    logger.info("[DB] Using local SQLite database for development")
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -848,11 +859,49 @@ async def callback(request: Request):
         # Find or create user
         user = db.query(User).filter(User.email == email).first()
         if not user:
+            # Check if this user has a Stripe customer (returning after DB reset)
+            stripe_customer_id = None
+            stripe_tier = "free"
+            stripe_subscription_id = None
+
+            try:
+                customers = stripe.Customer.list(email=email, limit=1)
+                if customers.data:
+                    stripe_customer_id = customers.data[0].id
+                    logger.info(f"[CALLBACK] Found existing Stripe customer for {email}: {stripe_customer_id}")
+
+                    # Check for active subscriptions
+                    subs = stripe.Subscription.list(customer=stripe_customer_id, status='active', limit=1)
+                    if subs.data:
+                        active_sub = subs.data[0]
+                        stripe_subscription_id = active_sub.id
+                        stripe_tier = active_sub.metadata.get('tier')
+
+                        if not stripe_tier:
+                            # Fallback: determine tier from price ID
+                            price_id = active_sub['items']['data'][0]['price']['id'] if active_sub.get('items', {}).get('data') else None
+                            price_to_tier = {
+                                os.getenv("STRIPE_PRICE_STARTER"): "starter",
+                                os.getenv("STRIPE_PRICE_PRO"): "pro",
+                                os.getenv("STRIPE_PRICE_ENTERPRISE"): "enterprise",
+                                os.getenv("STRIPE_PRICE_BEGINNER"): "starter",
+                                os.getenv("STRIPE_PRICE_DIAMOND"): "diamond",
+                            }
+                            stripe_tier = price_to_tier.get(price_id, "free")
+
+                        logger.info(f"[CALLBACK] Restored tier from Stripe for {email}: {stripe_tier}")
+            except stripe.error.StripeError as e:
+                logger.warning(f"[CALLBACK] Stripe lookup failed for {email}: {e}")
+            except Exception as e:
+                logger.error(f"[CALLBACK] Unexpected error looking up Stripe customer: {e}")
+
             user = User(
                 username=username,
                 email=email,
                 auth0_sub=sub,
-                tier="free",
+                tier=stripe_tier,
+                stripe_customer_id=stripe_customer_id,
+                stripe_subscription_id=stripe_subscription_id,
                 audit_history="[]",
                 last_reset=datetime.now(timezone.utc),
                 has_diamond=False
@@ -860,12 +909,17 @@ async def callback(request: Request):
             db.add(user)
             db.commit()
             db.refresh(user)
-            logger.info(f"New user created: {username}")
+            logger.info(f"New user created: {username} (tier: {stripe_tier})")
         else:
             if not user.auth0_sub:
                 user.auth0_sub = sub
                 db.commit()
-        
+
+        # Verify tier with Stripe (restores tier if DB was reset during redeploy)
+        if user.stripe_customer_id:
+            verified_tier = verify_tier_with_stripe(user, db)
+            logger.info(f"[CALLBACK] Stripe tier verification for {user.username}: {verified_tier}")
+
         # Set session
         request.session["user_id"] = user.id
         request.session["username"] = user.username
@@ -902,7 +956,11 @@ async def me_endpoint(request: Request, db: Session = Depends(get_db)) -> dict[s
         user = await get_authenticated_user(request, db)
         if not user:
             raise HTTPException(status_code=401, detail="Not authenticated")
-        
+
+        # Periodically verify tier with Stripe (handles DB resets)
+        if user.stripe_customer_id:
+            verify_tier_with_stripe(user, db)
+
         provider = getattr(user, 'provider', 'unknown')
         if provider == 'unknown' and 'userinfo' in request.session:
             ui = request.session['userinfo']
@@ -1774,6 +1832,73 @@ async def broadcast_audit_log(username: str, message: str):
 STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
 stripe.api_key = STRIPE_API_KEY
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+
+def verify_tier_with_stripe(user, db: Session) -> str:
+    """
+    Verify user's tier with Stripe subscription status.
+    This ensures tier data persists even if local database is reset.
+
+    Returns the verified tier (updates user if changed).
+    """
+    if not user or not user.stripe_customer_id:
+        return user.tier if user else "free"
+
+    try:
+        # Get active subscriptions for this customer
+        subscriptions = stripe.Subscription.list(
+            customer=user.stripe_customer_id,
+            status='active',
+            limit=1
+        )
+
+        if not subscriptions.data:
+            # No active subscription - check for canceled/past_due
+            all_subs = stripe.Subscription.list(
+                customer=user.stripe_customer_id,
+                limit=5
+            )
+
+            # If they had subscriptions but none active, they've churned
+            if all_subs.data and user.tier != "free":
+                logger.info(f"[STRIPE_VERIFY] User {user.username} has no active subscription, downgrading to free")
+                user.tier = "free"
+                db.commit()
+            return user.tier
+
+        # Get tier from subscription metadata or price ID
+        active_sub = subscriptions.data[0]
+        stripe_tier = active_sub.metadata.get('tier')
+
+        if not stripe_tier:
+            # Fallback: determine tier from price ID
+            price_id = active_sub['items']['data'][0]['price']['id'] if active_sub.get('items', {}).get('data') else None
+
+            price_to_tier = {
+                os.getenv("STRIPE_PRICE_STARTER"): "starter",
+                os.getenv("STRIPE_PRICE_PRO"): "pro",
+                os.getenv("STRIPE_PRICE_ENTERPRISE"): "enterprise",
+                os.getenv("STRIPE_PRICE_BEGINNER"): "starter",  # Legacy
+                os.getenv("STRIPE_PRICE_DIAMOND"): "diamond",
+            }
+            stripe_tier = price_to_tier.get(price_id, "free")
+
+        # Update user if tier doesn't match
+        if user.tier != stripe_tier:
+            logger.info(f"[STRIPE_VERIFY] Updating {user.username} tier: {user.tier} -> {stripe_tier}")
+            user.tier = stripe_tier
+            user.stripe_subscription_id = active_sub.id
+            db.commit()
+
+        return stripe_tier
+
+    except stripe.error.StripeError as e:
+        logger.warning(f"[STRIPE_VERIFY] Stripe API error for {user.username}: {e}")
+        return user.tier  # Keep existing tier on API error
+    except Exception as e:
+        logger.error(f"[STRIPE_VERIFY] Unexpected error for {user.username}: {e}")
+        return user.tier
+
 
 # Base URL fallback for queue-originated requests (when request object is None)
 # This should match your current Render deployment
