@@ -42,15 +42,18 @@ w3 = Web3(Web3.HTTPProvider(infura_url))
 
 # On-chain Analyzer (lazy initialization - imports after all modules loaded)
 onchain_analyzer = None
+_onchain_init_error = None  # Store error for later logging
+
 def get_onchain_analyzer():
     """Get or create on-chain analyzer instance."""
-    global onchain_analyzer
-    if onchain_analyzer is None:
+    global onchain_analyzer, _onchain_init_error
+    if onchain_analyzer is None and _onchain_init_error is None:
         try:
             from onchain_analyzer import OnChainAnalyzer as OCA
             onchain_analyzer = OCA(rpc_url=infura_url)
-        except Exception:
-            pass
+        except Exception as e:
+            _onchain_init_error = str(e)
+            # Will be logged once logger is available
     return onchain_analyzer
 
 import platform
@@ -429,7 +432,7 @@ app.add_middleware(
     session_cookie="session",
     max_age=14 * 24 * 60 * 60,  # 2 weeks
     same_site="lax",
-    https_only=os.getenv("ENVIRONMENT", "production") == "production"
+    https_only=os.getenv("ENVIRONMENT") == "production"  # Only True when explicitly set to production
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
