@@ -550,6 +550,15 @@ async def logout(request: Request):
 # === DATABASE SETUP AND DEPENDENCIES (MUST BE BEFORE ANY ROUTES) ===
 from pathlib import Path
 
+# Feature Flag: Enable tier persistence via Stripe sync
+# Set ENABLE_TIER_PERSISTENCE=true in production to restore user tiers from Stripe
+# Leave unset during testing to allow tier resets on each deploy
+ENABLE_TIER_PERSISTENCE = os.getenv("ENABLE_TIER_PERSISTENCE", "").lower() == "true"
+if ENABLE_TIER_PERSISTENCE:
+    logger.info("[CONFIG] ✓ Tier persistence ENABLED - user tiers will sync with Stripe")
+else:
+    logger.info("[CONFIG] Tier persistence DISABLED - tiers reset on deploy (testing mode)")
+
 # Database Configuration - Supports PostgreSQL (recommended) or SQLite (dev only)
 # Priority: DATABASE_URL env var > Render SQLite > Local SQLite
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -859,41 +868,43 @@ async def callback(request: Request):
         # Find or create user
         user = db.query(User).filter(User.email == email).first()
         if not user:
-            # Check if this user has a Stripe customer (returning after DB reset)
+            # Initialize defaults
             stripe_customer_id = None
             stripe_tier = "free"
             stripe_subscription_id = None
 
-            try:
-                customers = stripe.Customer.list(email=email, limit=1)
-                if customers.data:
-                    stripe_customer_id = customers.data[0].id
-                    logger.info(f"[CALLBACK] Found existing Stripe customer for {email}: {stripe_customer_id}")
+            # Only restore tier from Stripe if persistence is enabled
+            if ENABLE_TIER_PERSISTENCE:
+                try:
+                    customers = stripe.Customer.list(email=email, limit=1)
+                    if customers.data:
+                        stripe_customer_id = customers.data[0].id
+                        logger.info(f"[CALLBACK] Found existing Stripe customer for {email}: {stripe_customer_id}")
 
-                    # Check for active subscriptions
-                    subs = stripe.Subscription.list(customer=stripe_customer_id, status='active', limit=1)
-                    if subs.data:
-                        active_sub = subs.data[0]
-                        stripe_subscription_id = active_sub.id
-                        stripe_tier = active_sub.metadata.get('tier')
+                        # Check for active subscriptions
+                        subs = stripe.Subscription.list(customer=stripe_customer_id, status='active', limit=1)
+                        if subs.data:
+                            active_sub = subs.data[0]
+                            stripe_subscription_id = active_sub.id
+                            stripe_tier = active_sub.metadata.get('tier')
 
-                        if not stripe_tier:
-                            # Fallback: determine tier from price ID
-                            price_id = active_sub['items']['data'][0]['price']['id'] if active_sub.get('items', {}).get('data') else None
-                            price_to_tier = {
-                                os.getenv("STRIPE_PRICE_STARTER"): "starter",
-                                os.getenv("STRIPE_PRICE_PRO"): "pro",
-                                os.getenv("STRIPE_PRICE_ENTERPRISE"): "enterprise",
-                                os.getenv("STRIPE_PRICE_BEGINNER"): "starter",
-                                os.getenv("STRIPE_PRICE_DIAMOND"): "diamond",
-                            }
-                            stripe_tier = price_to_tier.get(price_id, "free")
+                            if not stripe_tier:
+                                # Fallback: determine tier from price ID
+                                price_id = active_sub['items']['data'][0]['price']['id'] if active_sub.get('items', {}).get('data') else None
+                                price_to_tier = {
+                                    os.getenv("STRIPE_PRICE_STARTER"): "starter",
+                                    os.getenv("STRIPE_PRICE_PRO"): "pro",
+                                    os.getenv("STRIPE_PRICE_ENTERPRISE"): "enterprise",
+                                    os.getenv("STRIPE_PRICE_BEGINNER"): "starter",
+                                    os.getenv("STRIPE_PRICE_DIAMOND"): "diamond",
+                                }
+                                stripe_tier = price_to_tier.get(price_id, "free")
 
-                        logger.info(f"[CALLBACK] Restored tier from Stripe for {email}: {stripe_tier}")
-            except stripe.error.StripeError as e:
-                logger.warning(f"[CALLBACK] Stripe lookup failed for {email}: {e}")
-            except Exception as e:
-                logger.error(f"[CALLBACK] Unexpected error looking up Stripe customer: {e}")
+                            logger.info(f"[CALLBACK] Restored tier from Stripe for {email}: {stripe_tier}")
+                except stripe.error.StripeError as e:
+                    logger.warning(f"[CALLBACK] Stripe lookup failed for {email}: {e}")
+                except Exception as e:
+                    logger.error(f"[CALLBACK] Unexpected error looking up Stripe customer: {e}")
 
             user = User(
                 username=username,
@@ -915,8 +926,8 @@ async def callback(request: Request):
                 user.auth0_sub = sub
                 db.commit()
 
-        # Verify tier with Stripe (restores tier if DB was reset during redeploy)
-        if user.stripe_customer_id:
+        # Verify tier with Stripe (only if persistence enabled)
+        if ENABLE_TIER_PERSISTENCE and user.stripe_customer_id:
             verified_tier = verify_tier_with_stripe(user, db)
             logger.info(f"[CALLBACK] Stripe tier verification for {user.username}: {verified_tier}")
 
@@ -957,8 +968,8 @@ async def me_endpoint(request: Request, db: Session = Depends(get_db)) -> dict[s
         if not user:
             raise HTTPException(status_code=401, detail="Not authenticated")
 
-        # Periodically verify tier with Stripe (handles DB resets)
-        if user.stripe_customer_id:
+        # Periodically verify tier with Stripe (only if persistence enabled)
+        if ENABLE_TIER_PERSISTENCE and user.stripe_customer_id:
             verify_tier_with_stripe(user, db)
 
         provider = getattr(user, 'provider', 'unknown')
