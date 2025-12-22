@@ -1836,10 +1836,14 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           }
         }
         
-        // Store PDF path if available
-        if (data.compliance_pdf) {
+        // Store PDF path if available (support both old and new field names)
+        if (data.pdf_report_url) {
+          window.currentAuditPdfUrl = data.pdf_report_url;
+          window.currentAuditPdfPath = data.pdf_report_url;  // Backwards compat
+          console.log(`[DEBUG] PDF available: ${data.pdf_report_url}`);
+        } else if (data.compliance_pdf) {
           window.currentAuditPdfPath = data.compliance_pdf;
-          console.log(`[DEBUG] PDF generated: ${data.compliance_pdf}`);
+          console.log(`[DEBUG] PDF generated (legacy): ${data.compliance_pdf}`);
         }
         
         if (overageCost) {
@@ -2029,34 +2033,48 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
 
       // PDF Download Button
       pdfDownloadButton?.addEventListener("click", async () => {
-        if (!window.currentAuditPdfPath) {
+        // Support both new URL format and legacy path format
+        const pdfUrl = window.currentAuditPdfUrl || window.currentAuditPdfPath;
+
+        if (!pdfUrl) {
           usageWarning.textContent = "No PDF available. Please run an audit first.";
           usageWarning.classList.add("error");
           return;
         }
-        
+
         try {
-          // The PDF path is a server file path, we need to download it
-          const filename = window.currentAuditPdfPath.split('/').pop();
-          const response = await fetch(`/static/reports/${filename}`, {
+          // Determine the correct fetch URL
+          let fetchUrl;
+          if (pdfUrl.startsWith('/api/reports/')) {
+            // New format: already a URL path
+            fetchUrl = pdfUrl;
+          } else {
+            // Legacy format: extract filename and use new endpoint
+            const filename = pdfUrl.split('/').pop();
+            fetchUrl = `/api/reports/${filename}`;
+          }
+
+          console.log(`[DEBUG] Fetching PDF from: ${fetchUrl}`);
+          const response = await fetch(fetchUrl, {
             credentials: "include"
           });
-          
+
           if (!response.ok) {
-            throw new Error("PDF not found");
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.detail || "PDF not found");
           }
-          
+
           const blob = await response.blob();
           const url = URL.createObjectURL(blob);
           const a = document.createElement("a");
           a.href = url;
-          a.download = filename;
+          a.download = pdfUrl.split('/').pop() || `DeFiGuard_Report_${Date.now()}.pdf`;
           a.click();
           URL.revokeObjectURL(url);
-          console.log("[DEBUG] PDF downloaded");
+          console.log("[DEBUG] PDF downloaded successfully");
         } catch (error) {
           console.error("[ERROR] PDF download failed:", error);
-          usageWarning.textContent = "PDF download failed. The report may have expired.";
+          usageWarning.textContent = `PDF download failed: ${error.message}`;
           usageWarning.classList.add("error");
         }
       });

@@ -1199,6 +1199,24 @@ small {
 .results-dashboard {
     display: grid;
     gap: var(--space-8);
+    max-width: 100%;
+    overflow-x: hidden;
+    overflow-wrap: break-word;
+    word-wrap: break-word;
+    word-break: break-word;
+}
+
+.results-dashboard * {
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+.results-dashboard pre,
+.results-dashboard code {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    max-width: 100%;
 }
 
 .risk-score-placeholder {
@@ -2211,32 +2229,62 @@ footer a:hover {
         --space-12: 2rem;
         --space-16: 2.5rem;
     }
-    
+
     .main-content {
         padding: var(--space-4);
         padding-left: var(--space-4);
+        overflow-x: hidden;
     }
-    
+
     .hero {
         padding: var(--space-8) var(--space-4);
     }
-    
+
     section {
         padding: var(--space-6);
+        overflow-x: hidden;
     }
-    
+
     .pricing-table {
         font-size: var(--text-sm);
     }
-    
+
     .pricing-table th,
     .pricing-table td {
         padding: var(--space-4);
     }
-    
+
     .hamburger {
         top: var(--space-4);
         left: var(--space-4);
+    }
+
+    /* Mobile results dashboard fixes */
+    .results-dashboard {
+        padding: var(--space-3);
+    }
+
+    .table-responsive {
+        margin: 0 calc(-1 * var(--space-3));
+        padding: 0 var(--space-3);
+        width: calc(100% + var(--space-6));
+    }
+
+    .issues-table-enhanced th,
+    .issues-table-enhanced td {
+        padding: var(--space-2);
+        font-size: var(--text-xs);
+    }
+
+    .issues-table-enhanced th:nth-child(4),
+    .issues-table-enhanced td:nth-child(4) {
+        display: none; /* Hide Quick Fix column on mobile */
+    }
+
+    .predictions-placeholder li,
+    .recommendations-placeholder li {
+        padding: var(--space-3);
+        font-size: var(--text-sm);
     }
 }
 

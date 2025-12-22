@@ -5651,6 +5651,7 @@ For Enterprise tier, also include: "proof_of_concept", "references"
             await notify_job_subscribers(job_id, {"status": "processing", "phase": "finalizing", "progress": 95})
         
         # Finalization: PDF, overage reporting, history, DB commit, cleanup
+        pdf_path = None  # Initialize before conditional
         if usage_tracker.feature_flags.get(tier_for_flags, {}).get("reports", False):
             pdf_path = generate_compliance_pdf(
                 report=report,
