@@ -6,7 +6,8 @@ Comprehensive on-chain analysis for smart contract security:
 - Storage slot analysis (owner, admin, paused state)
 - Backdoor scanning (20+ dangerous patterns)
 - Honeypot detection
-- Token security analysis
+- Token security analysis (ERC-20/721/1155)
+- Live state monitoring
 
 Usage:
     from onchain_analyzer import OnChainAnalyzer
@@ -15,10 +16,12 @@ Usage:
     result = await analyzer.analyze(contract_address)
 """
 
-from .core import OnChainAnalyzer
+from .core import OnChainAnalyzer, MultiChainAnalyzer
 from .proxy_detector import ProxyDetector
 from .storage_analyzer import StorageAnalyzer
 from .backdoor_scanner import BackdoorScanner, HoneypotDetector
+from .token_analyzer import TokenAnalyzer
+from .state_checker import StateChecker, ContractMonitor
 from .constants import (
     CHAIN_CONFIG,
     DEFAULT_CHAIN_ID,
@@ -28,17 +31,22 @@ from .constants import (
     DANGEROUS_SELECTORS,
     DANGEROUS_OPCODES,
     FUNCTION_SELECTORS,
+    ERC20_ABI,
 )
 
 __all__ = [
     # Main analyzer
     "OnChainAnalyzer",
+    "MultiChainAnalyzer",
 
     # Component analyzers
     "ProxyDetector",
     "StorageAnalyzer",
     "BackdoorScanner",
     "HoneypotDetector",
+    "TokenAnalyzer",
+    "StateChecker",
+    "ContractMonitor",
 
     # Constants
     "CHAIN_CONFIG",
@@ -49,6 +57,7 @@ __all__ = [
     "DANGEROUS_SELECTORS",
     "DANGEROUS_OPCODES",
     "FUNCTION_SELECTORS",
+    "ERC20_ABI",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
