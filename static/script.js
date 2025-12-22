@@ -1845,7 +1845,24 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           window.currentAuditPdfPath = data.compliance_pdf;
           console.log(`[DEBUG] PDF generated (legacy): ${data.compliance_pdf}`);
         }
-        
+
+        // Update mobile severity summary
+        const mobileSeveritySummary = document.getElementById('mobile-severity-summary');
+        if (mobileSeveritySummary) {
+          const criticalCount = report.critical_count || 0;
+          const highCount = report.high_count || 0;
+          const mediumCount = report.medium_count || 0;
+          const lowCount = report.low_count || 0;
+
+          mobileSeveritySummary.innerHTML = `
+            ${criticalCount > 0 ? `<span class="mobile-severity-badge critical">⚠️ ${criticalCount} Critical</span>` : ''}
+            ${highCount > 0 ? `<span class="mobile-severity-badge high">🔴 ${highCount} High</span>` : ''}
+            ${mediumCount > 0 ? `<span class="mobile-severity-badge medium">🟡 ${mediumCount} Medium</span>` : ''}
+            ${lowCount > 0 ? `<span class="mobile-severity-badge low">🟢 ${lowCount} Low</span>` : ''}
+            ${(criticalCount + highCount + mediumCount + lowCount) === 0 ? '<span class="mobile-severity-badge low">✅ No issues found</span>' : ''}
+          `;
+        }
+
         if (overageCost) {
           usageWarning.textContent = `Enterprise audit completed with $${overageCost.toFixed(2)} overage charged.`;
           usageWarning.classList.add("success");
@@ -2076,6 +2093,60 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           console.error("[ERROR] PDF download failed:", error);
           usageWarning.textContent = `PDF download failed: ${error.message}`;
           usageWarning.classList.add("error");
+        }
+      });
+
+      // Mobile PDF Download Button (same logic as desktop)
+      const mobilePdfDownload = document.getElementById('mobile-pdf-download');
+      mobilePdfDownload?.addEventListener("click", async () => {
+        const pdfUrl = window.currentAuditPdfUrl || window.currentAuditPdfPath;
+
+        if (!pdfUrl) {
+          alert("No PDF available yet. Please run an audit first.");
+          return;
+        }
+
+        try {
+          let fetchUrl;
+          if (pdfUrl.startsWith('/api/reports/')) {
+            fetchUrl = pdfUrl;
+          } else {
+            const filename = pdfUrl.split('/').pop();
+            fetchUrl = `/api/reports/${filename}`;
+          }
+
+          console.log(`[DEBUG] Mobile: Fetching PDF from: ${fetchUrl}`);
+
+          // Show loading state
+          mobilePdfDownload.textContent = "⏳ Downloading...";
+          mobilePdfDownload.disabled = true;
+
+          const response = await fetch(fetchUrl, {
+            credentials: "include"
+          });
+
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.detail || "PDF not found");
+          }
+
+          const blob = await response.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = pdfUrl.split('/').pop() || `DeFiGuard_Report_${Date.now()}.pdf`;
+          a.click();
+          URL.revokeObjectURL(url);
+
+          // Reset button
+          mobilePdfDownload.textContent = "📄 Download Full PDF Report";
+          mobilePdfDownload.disabled = false;
+          console.log("[DEBUG] Mobile PDF downloaded successfully");
+        } catch (error) {
+          console.error("[ERROR] Mobile PDF download failed:", error);
+          mobilePdfDownload.textContent = "📄 Download Full PDF Report";
+          mobilePdfDownload.disabled = false;
+          alert(`PDF download failed: ${error.message}`);
         }
       });
 
