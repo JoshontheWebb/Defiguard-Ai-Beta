@@ -3855,6 +3855,105 @@ def _build_tool_results_section(story: list, styles: dict, report: dict, tier: s
 
     story.append(Spacer(1, 10))
 
+
+def _build_onchain_section(story: list, styles: dict, report: dict) -> None:
+    """Build on-chain analysis section for PDF (Pro/Enterprise)."""
+    onchain = report.get("onchain_analysis")
+    if not onchain:
+        return
+
+    story.append(Paragraph("⛓️ On-Chain Analysis", styles['heading1']))
+
+    # Contract address and chain
+    address = onchain.get("address", "Unknown")
+    chain = onchain.get("chain", "Ethereum")
+    story.append(Paragraph(f"<b>Contract:</b> {address}", styles['normal']))
+    story.append(Paragraph(f"<b>Chain:</b> {chain}", styles['normal']))
+    story.append(Spacer(1, 8))
+
+    # Proxy Detection
+    proxy = onchain.get("proxy", {})
+    if proxy:
+        story.append(Paragraph("🔄 Proxy Status", styles['heading2']))
+        is_proxy = proxy.get("is_proxy", False)
+        if is_proxy:
+            proxy_type = proxy.get("proxy_type", "Unknown")
+            upgrade_risk = proxy.get("upgrade_risk", "N/A")
+            impl = proxy.get("implementation", "N/A")
+            story.append(Paragraph(f"• Type: {proxy_type} Proxy", styles['normal']))
+            story.append(Paragraph(f"• Upgrade Risk: {upgrade_risk}", styles['normal']))
+            if impl and impl != "N/A":
+                story.append(Paragraph(f"• Implementation: {impl[:20]}...{impl[-8:]}", styles['normal']))
+        else:
+            story.append(Paragraph("• Not a proxy contract (code is immutable)", styles['normal']))
+        story.append(Spacer(1, 6))
+
+    # Storage/Ownership
+    storage = onchain.get("storage", {})
+    if storage:
+        story.append(Paragraph("👤 Ownership & Access Control", styles['heading2']))
+        owner = storage.get("owner")
+        if owner:
+            story.append(Paragraph(f"• Owner: {owner[:20]}...{owner[-8:]}", styles['normal']))
+        central_risk = storage.get("centralization_risk", "LOW")
+        story.append(Paragraph(f"• Centralization Risk: {central_risk}", styles['normal']))
+        if storage.get("is_pausable"):
+            paused_status = "PAUSED" if storage.get("is_paused") else "Active"
+            story.append(Paragraph(f"• Pausable: Yes ({paused_status})", styles['normal']))
+        story.append(Spacer(1, 6))
+
+    # Backdoor Detection
+    backdoors = onchain.get("backdoors", {})
+    if backdoors:
+        story.append(Paragraph("🚨 Backdoor Scan", styles['heading2']))
+        has_backdoors = backdoors.get("has_backdoors", False)
+        risk_level = backdoors.get("risk_level", "LOW")
+        if has_backdoors:
+            story.append(Paragraph(f"• Risk Level: {risk_level}", styles['normal']))
+            summary = backdoors.get("summary", "")
+            if summary:
+                story.append(Paragraph(f"• {summary}", styles['normal']))
+            dangerous_funcs = backdoors.get("dangerous_functions", [])
+            if dangerous_funcs:
+                story.append(Paragraph("• Dangerous Functions Detected:", styles['normal']))
+                for func in dangerous_funcs[:5]:
+                    name = func.get("name", func.get("selector", "Unknown"))
+                    category = func.get("category", "unknown")
+                    story.append(Paragraph(f"    - {name} ({category})", styles['normal']))
+        else:
+            story.append(Paragraph("• No backdoor patterns detected", styles['normal']))
+        story.append(Spacer(1, 6))
+
+    # Honeypot Detection
+    honeypot = onchain.get("honeypot", {})
+    if honeypot:
+        story.append(Paragraph("🍯 Honeypot Analysis", styles['heading2']))
+        is_honeypot = honeypot.get("is_honeypot", False)
+        if is_honeypot:
+            confidence = honeypot.get("confidence", "LOW")
+            story.append(Paragraph(f"• ⚠️ HONEYPOT DETECTED (Confidence: {confidence})", styles['normal']))
+            recommendation = honeypot.get("recommendation", "")
+            if recommendation:
+                story.append(Paragraph(f"• {recommendation}", styles['normal']))
+        else:
+            story.append(Paragraph("• ✅ No honeypot indicators detected", styles['normal']))
+        story.append(Spacer(1, 6))
+
+    # Overall On-Chain Risk
+    overall = onchain.get("overall_risk", {})
+    if overall:
+        story.append(Paragraph("📊 Overall On-Chain Risk", styles['heading2']))
+        level = overall.get("level", "N/A")
+        score = overall.get("score", 0)
+        story.append(Paragraph(f"• Risk Level: {level}", styles['normal']))
+        story.append(Paragraph(f"• Risk Score: {score}/100", styles['normal']))
+        summary = overall.get("summary", "")
+        if summary:
+            story.append(Paragraph(f"• {summary}", styles['normal']))
+
+    story.append(Spacer(1, 10))
+
+
 def _build_footer(story: list, styles: dict, tier: str) -> None:
     """Build PDF footer."""
     story.append(Spacer(1, 20))
@@ -3911,6 +4010,7 @@ def generate_compliance_pdf(
         # Pro+ tier sections
         if tier in ["pro", "enterprise", "diamond"]:
             _build_tool_results_section(story, styles, report, tier)
+            _build_onchain_section(story, styles, report)
 
         # Enterprise tier sections
         if tier in ["enterprise", "diamond"]:
