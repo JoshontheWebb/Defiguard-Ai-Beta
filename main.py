@@ -124,9 +124,12 @@ import requests
 import subprocess
 import asyncio
 import heapq
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Flowable
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Flowable, Table, TableStyle, PageBreak, ListFlowable, ListItem, Preformatted
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from jinja2 import Environment, FileSystemLoader
 from compliance_checker import get_compliance_analysis, ComplianceChecker
 
@@ -2917,33 +2920,541 @@ def filter_issues_for_free_tier(report: dict[str, Any], tier: str) -> dict[str, 
     
     return filtered_report
 
-def generate_compliance_pdf(report: dict[str, Any], username: str, file_size: int) -> str | None:
-    """Generate MiCA/FIT21 compliance PDF report."""
+# =============================================================================
+# PDF GENERATION - Comprehensive Tier-Based Reports
+# =============================================================================
+
+def _get_severity_color(severity: str) -> colors.Color:
+    """Return color based on severity level."""
+    severity_lower = severity.lower() if severity else "medium"
+    return {
+        "critical": colors.Color(0.8, 0, 0),      # Dark red
+        "high": colors.Color(0.9, 0.4, 0),        # Orange
+        "medium": colors.Color(0.9, 0.7, 0),      # Yellow/Gold
+        "low": colors.Color(0.2, 0.6, 0.2),       # Green
+        "info": colors.Color(0.3, 0.5, 0.7),      # Blue
+    }.get(severity_lower, colors.gray)
+
+def _get_risk_color(score: float) -> colors.Color:
+    """Return color based on risk score (0-100)."""
+    if score >= 70:
+        return colors.Color(0.8, 0, 0)      # Red - Critical risk
+    elif score >= 50:
+        return colors.Color(0.9, 0.4, 0)    # Orange - High risk
+    elif score >= 30:
+        return colors.Color(0.9, 0.7, 0)    # Yellow - Medium risk
+    else:
+        return colors.Color(0.2, 0.6, 0.2)  # Green - Low risk
+
+def _create_pdf_styles() -> dict:
+    """Create custom paragraph styles for PDF."""
+    base_styles = getSampleStyleSheet()
+
+    custom_styles = {
+        'base': base_styles,
+        'title': ParagraphStyle(
+            'CustomTitle',
+            parent=base_styles['Title'],
+            fontSize=24,
+            spaceAfter=20,
+            textColor=colors.Color(0.1, 0.1, 0.3),
+        ),
+        'heading1': ParagraphStyle(
+            'CustomH1',
+            parent=base_styles['Heading1'],
+            fontSize=16,
+            spaceBefore=15,
+            spaceAfter=10,
+            textColor=colors.Color(0.15, 0.15, 0.35),
+        ),
+        'heading2': ParagraphStyle(
+            'CustomH2',
+            parent=base_styles['Heading2'],
+            fontSize=13,
+            spaceBefore=12,
+            spaceAfter=6,
+            textColor=colors.Color(0.2, 0.2, 0.4),
+        ),
+        'normal': base_styles['Normal'],
+        'code': ParagraphStyle(
+            'Code',
+            parent=base_styles['Normal'],
+            fontName='Courier',
+            fontSize=8,
+            backColor=colors.Color(0.95, 0.95, 0.95),
+            leftIndent=10,
+            rightIndent=10,
+        ),
+        'footer': ParagraphStyle(
+            'Footer',
+            parent=base_styles['Normal'],
+            fontSize=8,
+            textColor=colors.gray,
+            alignment=TA_CENTER,
+        ),
+    }
+    return custom_styles
+
+def _build_header_section(story: list, styles: dict, username: str, file_size: int, tier: str) -> None:
+    """Build PDF header with metadata."""
+    story.append(Paragraph("DeFiGuard AI", styles['title']))
+    story.append(Paragraph("<b>Smart Contract Security Audit Report</b>", styles['heading1']))
+    story.append(Spacer(1, 10))
+
+    # Metadata table
+    meta_data = [
+        ["Audit Date:", datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")],
+        ["Prepared For:", username],
+        ["Contract Size:", f"{file_size / 1024:.1f} KB" if file_size < 1024*1024 else f"{file_size / 1024 / 1024:.2f} MB"],
+        ["Report Type:", tier.title() + " Tier"],
+    ]
+
+    meta_table = Table(meta_data, colWidths=[1.5*inch, 4*inch])
+    meta_table.setStyle(TableStyle([
+        ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 10),
+        ('TEXTCOLOR', (0, 0), (0, -1), colors.Color(0.3, 0.3, 0.3)),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    story.append(meta_table)
+    story.append(Spacer(1, 15))
+
+def _build_executive_summary(story: list, styles: dict, report: dict) -> None:
+    """Build executive summary section."""
+    story.append(Paragraph("Executive Summary", styles['heading1']))
+
+    summary = report.get("executive_summary", "AI analysis completed. Review the identified issues below for detailed findings.")
+    story.append(Paragraph(summary, styles['normal']))
+    story.append(Spacer(1, 10))
+
+def _build_risk_score_section(story: list, styles: dict, report: dict) -> None:
+    """Build risk score section with visual indicator."""
+    story.append(Paragraph("Risk Assessment", styles['heading1']))
+
+    risk_score = float(report.get("risk_score", 50))
+    risk_color = _get_risk_color(risk_score)
+
+    # Determine risk level text
+    if risk_score >= 70:
+        risk_level = "CRITICAL RISK"
+        risk_desc = "This contract has severe vulnerabilities that must be addressed before deployment."
+    elif risk_score >= 50:
+        risk_level = "HIGH RISK"
+        risk_desc = "Significant security issues detected. Remediation strongly recommended."
+    elif risk_score >= 30:
+        risk_level = "MEDIUM RISK"
+        risk_desc = "Some security concerns identified. Review and address before production."
+    else:
+        risk_level = "LOW RISK"
+        risk_desc = "Contract appears relatively secure. Minor improvements may still be beneficial."
+
+    # Risk score display
+    score_style = ParagraphStyle('RiskScore', parent=styles['normal'], fontSize=36, textColor=risk_color, alignment=TA_CENTER)
+    story.append(Paragraph(f"<b>{risk_score:.0f}/100</b>", score_style))
+
+    level_style = ParagraphStyle('RiskLevel', parent=styles['normal'], fontSize=14, textColor=risk_color, alignment=TA_CENTER)
+    story.append(Paragraph(f"<b>{risk_level}</b>", level_style))
+    story.append(Spacer(1, 5))
+    story.append(Paragraph(risk_desc, styles['normal']))
+    story.append(Spacer(1, 10))
+
+def _build_severity_breakdown(story: list, styles: dict, report: dict) -> None:
+    """Build severity breakdown table."""
+    story.append(Paragraph("Findings Overview", styles['heading2']))
+
+    critical = report.get("critical_count", 0)
+    high = report.get("high_count", 0)
+    medium = report.get("medium_count", 0)
+    low = report.get("low_count", 0)
+    total = critical + high + medium + low
+
+    severity_data = [
+        ["Severity", "Count", "Description"],
+        ["CRITICAL", str(critical), "Immediate exploitation risk, potential total fund loss"],
+        ["HIGH", str(high), "Significant vulnerability, likely exploitable"],
+        ["MEDIUM", str(medium), "Security concern, should be addressed"],
+        ["LOW", str(low), "Minor issue or best practice recommendation"],
+        ["TOTAL", str(total), ""],
+    ]
+
+    severity_table = Table(severity_data, colWidths=[1.2*inch, 0.8*inch, 4*inch])
+    severity_table.setStyle(TableStyle([
+        # Header row
+        ('BACKGROUND', (0, 0), (-1, 0), colors.Color(0.2, 0.2, 0.3)),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+        # Severity colors
+        ('TEXTCOLOR', (0, 1), (0, 1), colors.Color(0.8, 0, 0)),       # Critical
+        ('TEXTCOLOR', (0, 2), (0, 2), colors.Color(0.9, 0.4, 0)),     # High
+        ('TEXTCOLOR', (0, 3), (0, 3), colors.Color(0.7, 0.5, 0)),     # Medium
+        ('TEXTCOLOR', (0, 4), (0, 4), colors.Color(0.2, 0.6, 0.2)),   # Low
+        ('FONTNAME', (0, 1), (0, -1), 'Helvetica-Bold'),
+        # Total row
+        ('BACKGROUND', (0, -1), (-1, -1), colors.Color(0.9, 0.9, 0.9)),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        # Grid
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.Color(0.7, 0.7, 0.7)),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('FONTSIZE', (0, 1), (-1, -1), 9),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+    ]))
+    story.append(severity_table)
+    story.append(Spacer(1, 15))
+
+def _build_issues_section(story: list, styles: dict, report: dict, tier: str) -> None:
+    """Build detailed issues section based on tier."""
+    issues = report.get("issues", [])
+    if not issues:
+        story.append(Paragraph("Detailed Findings", styles['heading1']))
+        story.append(Paragraph("No security issues were identified in this contract.", styles['normal']))
+        story.append(Spacer(1, 10))
+        return
+
+    story.append(Paragraph("Detailed Findings", styles['heading1']))
+
+    for idx, issue in enumerate(issues, 1):
+        severity = issue.get("severity", "Medium")
+        severity_color = _get_severity_color(severity)
+
+        # Issue header
+        header_style = ParagraphStyle('IssueHeader', parent=styles['heading2'], textColor=severity_color)
+        issue_type = issue.get("type", "Security Issue")
+        story.append(Paragraph(f"[{severity.upper()}] {idx}. {issue_type}", header_style))
+
+        # Issue ID
+        issue_id = issue.get("id", f"ISSUE-{idx:03d}")
+        story.append(Paragraph(f"<i>ID: {issue_id}</i>", styles['normal']))
+
+        # Description
+        description = issue.get("description", "No description provided.")
+        story.append(Paragraph(f"<b>Description:</b> {description}", styles['normal']))
+
+        # Fix recommendation (basic for all tiers)
+        fix = issue.get("fix", "Manual review recommended.")
+        story.append(Paragraph(f"<b>Recommendation:</b> {fix}", styles['normal']))
+
+        # Pro tier: Add location information
+        if tier in ["pro", "enterprise", "diamond"]:
+            line_num = issue.get("line_number")
+            func_name = issue.get("function_name")
+            if line_num or func_name:
+                location = []
+                if func_name:
+                    location.append(f"Function: {func_name}")
+                if line_num:
+                    location.append(f"Line: {line_num}")
+                story.append(Paragraph(f"<b>Location:</b> {' | '.join(location)}", styles['normal']))
+
+            # Vulnerable code snippet
+            vuln_code = issue.get("vulnerable_code")
+            if vuln_code:
+                story.append(Paragraph("<b>Vulnerable Code:</b>", styles['normal']))
+                # Escape HTML and format code
+                code_text = str(vuln_code).replace('<', '&lt;').replace('>', '&gt;')
+                story.append(Paragraph(f"<font face='Courier' size='8'>{code_text}</font>", styles['code']))
+
+            # Exploit scenario
+            exploit = issue.get("exploit_scenario")
+            if exploit:
+                story.append(Paragraph(f"<b>Exploit Scenario:</b> {exploit}", styles['normal']))
+
+            # Impact estimate
+            impact = issue.get("estimated_impact")
+            if impact:
+                story.append(Paragraph(f"<b>Estimated Impact:</b> {impact}", styles['normal']))
+
+            # Code fix (before/after)
+            code_fix = issue.get("code_fix")
+            if code_fix and isinstance(code_fix, dict):
+                before = code_fix.get("before", "")
+                after = code_fix.get("after", "")
+                explanation = code_fix.get("explanation", "")
+
+                if before or after:
+                    story.append(Paragraph("<b>Suggested Fix:</b>", styles['normal']))
+                    if before:
+                        before_text = str(before).replace('<', '&lt;').replace('>', '&gt;')
+                        story.append(Paragraph(f"<i>Before:</i>", styles['normal']))
+                        story.append(Paragraph(f"<font face='Courier' size='8'>{before_text}</font>", styles['code']))
+                    if after:
+                        after_text = str(after).replace('<', '&lt;').replace('>', '&gt;')
+                        story.append(Paragraph(f"<i>After:</i>", styles['normal']))
+                        story.append(Paragraph(f"<font face='Courier' size='8'>{after_text}</font>", styles['code']))
+                    if explanation:
+                        story.append(Paragraph(f"<i>Explanation:</i> {explanation}", styles['normal']))
+
+        # Enterprise tier: Add POC and references
+        if tier in ["enterprise", "diamond"]:
+            poc = issue.get("proof_of_concept")
+            if poc:
+                story.append(Paragraph("<b>Proof of Concept:</b>", styles['normal']))
+                poc_text = str(poc).replace('<', '&lt;').replace('>', '&gt;')
+                story.append(Paragraph(f"<font face='Courier' size='8'>{poc_text}</font>", styles['code']))
+
+            refs = issue.get("references", [])
+            if refs:
+                story.append(Paragraph("<b>References:</b>", styles['normal']))
+                for ref in refs:
+                    if isinstance(ref, dict):
+                        title = ref.get("title", "Reference")
+                        url = ref.get("url", "#")
+                        story.append(Paragraph(f"• {title}: {url}", styles['normal']))
+
+        story.append(Spacer(1, 10))
+
+def _build_predictions_section(story: list, styles: dict, report: dict, tier: str) -> None:
+    """Build attack predictions section."""
+    predictions = report.get("predictions", [])
+    if not predictions:
+        return
+
+    story.append(PageBreak())
+    story.append(Paragraph("Attack Scenario Predictions", styles['heading1']))
+    story.append(Paragraph(
+        "Based on the identified vulnerabilities, the following attack scenarios are possible:",
+        styles['normal']
+    ))
+    story.append(Spacer(1, 10))
+
+    for idx, pred in enumerate(predictions, 1):
+        if not isinstance(pred, dict):
+            continue
+
+        title = pred.get("title", f"Scenario {idx}")
+        severity = pred.get("severity", "Medium")
+        severity_color = _get_severity_color(severity)
+
+        header_style = ParagraphStyle('PredHeader', parent=styles['heading2'], textColor=severity_color)
+        story.append(Paragraph(f"{idx}. {title}", header_style))
+
+        # Core prediction info
+        probability = pred.get("probability", "Unknown")
+        story.append(Paragraph(f"<b>Probability:</b> {probability}", styles['normal']))
+
+        attack_vector = pred.get("attack_vector", "")
+        if attack_vector:
+            story.append(Paragraph(f"<b>Attack Vector:</b> {attack_vector}", styles['normal']))
+
+        financial_impact = pred.get("financial_impact", "")
+        if financial_impact:
+            story.append(Paragraph(f"<b>Financial Impact:</b> {financial_impact}", styles['normal']))
+
+        time_to_exploit = pred.get("time_to_exploit", "")
+        if time_to_exploit:
+            story.append(Paragraph(f"<b>Time to Exploit:</b> {time_to_exploit}", styles['normal']))
+
+        mitigation = pred.get("mitigation", "")
+        if mitigation:
+            story.append(Paragraph(f"<b>Mitigation:</b> {mitigation}", styles['normal']))
+
+        # Real world example
+        example = pred.get("real_world_example")
+        if example:
+            story.append(Paragraph(f"<b>Real-World Example:</b> {example}", styles['normal']))
+
+        story.append(Spacer(1, 8))
+
+def _build_recommendations_section(story: list, styles: dict, report: dict) -> None:
+    """Build recommendations section."""
+    recommendations = report.get("recommendations", {})
+    if not recommendations:
+        return
+
+    story.append(Paragraph("Recommendations", styles['heading1']))
+
+    # Immediate actions
+    immediate = recommendations.get("immediate", [])
+    if immediate:
+        story.append(Paragraph("Immediate Actions (Before Deployment)", styles['heading2']))
+        for rec in immediate:
+            story.append(Paragraph(f"• {rec}", styles['normal']))
+
+    # Short-term
+    short_term = recommendations.get("short_term", [])
+    if short_term:
+        story.append(Paragraph("Short-Term (Within 1 Week)", styles['heading2']))
+        for rec in short_term:
+            story.append(Paragraph(f"• {rec}", styles['normal']))
+
+    # Long-term
+    long_term = recommendations.get("long_term", [])
+    if long_term:
+        story.append(Paragraph("Long-Term (Ongoing)", styles['heading2']))
+        for rec in long_term:
+            story.append(Paragraph(f"• {rec}", styles['normal']))
+
+    story.append(Spacer(1, 10))
+
+def _build_compliance_section(story: list, styles: dict, compliance_data: dict) -> None:
+    """Build regulatory compliance section."""
+    if not compliance_data:
+        return
+
+    story.append(PageBreak())
+    story.append(Paragraph("Regulatory Compliance Analysis", styles['heading1']))
+
+    # MiCA Compliance
+    mica = compliance_data.get("mica_compliance", {})
+    if mica:
+        story.append(Paragraph("EU MiCA Compliance", styles['heading2']))
+        compliant = mica.get("compliant", True)
+        status = "COMPLIANT" if compliant else "NON-COMPLIANT"
+        status_color = colors.Color(0.2, 0.6, 0.2) if compliant else colors.Color(0.8, 0, 0)
+        status_style = ParagraphStyle('Status', parent=styles['normal'], textColor=status_color)
+        story.append(Paragraph(f"<b>Status: {status}</b>", status_style))
+
+        violations = mica.get("violations", [])
+        if violations:
+            story.append(Paragraph("Violations:", styles['normal']))
+            for v in violations:
+                if isinstance(v, dict):
+                    article = v.get("article", "Unknown")
+                    issue = v.get("issue", "")
+                    story.append(Paragraph(f"• {article}: {issue}", styles['normal']))
+
+    # SEC Compliance
+    sec = compliance_data.get("sec_compliance", {})
+    if sec:
+        story.append(Paragraph("SEC / Howey Test Analysis", styles['heading2']))
+        is_security = sec.get("is_security", False)
+        if is_security:
+            story.append(Paragraph("<b>Warning:</b> Token may be classified as a security.",
+                                   ParagraphStyle('Warning', parent=styles['normal'], textColor=colors.Color(0.8, 0, 0))))
+
+        howey_factors = sec.get("howey_factors", [])
+        if howey_factors:
+            story.append(Paragraph("Howey Test Factors Present:", styles['normal']))
+            for factor in howey_factors:
+                story.append(Paragraph(f"• {factor}", styles['normal']))
+
+    story.append(Spacer(1, 10))
+
+def _build_remediation_roadmap(story: list, styles: dict, report: dict) -> None:
+    """Build remediation roadmap section (Enterprise only)."""
+    roadmap = report.get("remediation_roadmap")
+    if not roadmap:
+        return
+
+    story.append(Paragraph("Remediation Roadmap", styles['heading1']))
+
+    # Split roadmap into lines and display
+    lines = str(roadmap).strip().split('\n')
+    for line in lines:
+        if line.strip():
+            story.append(Paragraph(f"• {line.strip()}", styles['normal']))
+
+    story.append(Spacer(1, 10))
+
+def _build_tool_results_section(story: list, styles: dict, report: dict, tier: str) -> None:
+    """Build tool results section (Pro+ only)."""
+    if tier not in ["pro", "enterprise", "diamond"]:
+        return
+
+    fuzzing = report.get("fuzzing_results", [])
+    mythril = report.get("mythril_results", [])
+
+    if not fuzzing and not mythril:
+        return
+
+    story.append(Paragraph("Static & Dynamic Analysis Results", styles['heading1']))
+
+    if fuzzing:
+        story.append(Paragraph("Echidna Fuzzing Results", styles['heading2']))
+        for result in fuzzing[:5]:  # Limit to first 5
+            if isinstance(result, dict):
+                test = result.get("test", "Unknown test")
+                status = result.get("status", "Unknown")
+                story.append(Paragraph(f"• {test}: {status}", styles['normal']))
+            elif isinstance(result, str):
+                story.append(Paragraph(f"• {result}", styles['normal']))
+
+    if mythril:
+        story.append(Paragraph("Mythril Symbolic Analysis", styles['heading2']))
+        for result in mythril[:5]:  # Limit to first 5
+            if isinstance(result, dict):
+                title = result.get("title", "Finding")
+                severity = result.get("severity", "Unknown")
+                story.append(Paragraph(f"• [{severity}] {title}", styles['normal']))
+            elif isinstance(result, str):
+                story.append(Paragraph(f"• {result}", styles['normal']))
+
+    story.append(Spacer(1, 10))
+
+def _build_footer(story: list, styles: dict, tier: str) -> None:
+    """Build PDF footer."""
+    story.append(Spacer(1, 20))
+    story.append(Paragraph("─" * 60, styles['footer']))
+    story.append(Paragraph(
+        f"Generated by DeFiGuard AI • {tier.title()} Tier Report • {datetime.now().strftime('%Y-%m-%d')}",
+        styles['footer']
+    ))
+    story.append(Paragraph(
+        "This report is provided for informational purposes. Always conduct additional security reviews.",
+        styles['footer']
+    ))
+
+def generate_compliance_pdf(
+    report: dict[str, Any],
+    username: str,
+    file_size: int,
+    tier: str = "starter",
+    compliance_data: dict[str, Any] | None = None
+) -> str | None:
+    """
+    Generate comprehensive PDF audit report based on user tier.
+
+    Tier capabilities:
+    - starter: Basic report with issues, risk score, recommendations
+    - pro: Adds code snippets, exploit scenarios, tool results
+    - enterprise: Adds POC, references, remediation roadmap, compliance
+    """
     try:
-        pdf_path = os.path.join(DATA_DIR, f"compliance_report_{username}_{int(time.time())}.pdf")
-        doc = SimpleDocTemplate(pdf_path, pagesize=letter)
-        styles = getSampleStyleSheet()
+        timestamp = int(time.time())
+        pdf_path = os.path.join(DATA_DIR, f"audit_report_{username}_{timestamp}.pdf")
+
+        doc = SimpleDocTemplate(
+            pdf_path,
+            pagesize=letter,
+            rightMargin=0.75*inch,
+            leftMargin=0.75*inch,
+            topMargin=0.75*inch,
+            bottomMargin=0.75*inch
+        )
+
+        styles = _create_pdf_styles()
         story: list[Flowable] = []
-        
-        story.append(Paragraph(f"<b>DeFiGuard AI Compliance Report</b>", styles['Title']))
-        story.append(Spacer(1, 12))
-        story.append(Paragraph(f"<b>User:</b> {username}", styles['Normal']))
-        story.append(Paragraph(f"<b>File Size:</b> {file_size / 1024 / 1024:.2f} MB", styles['Normal']))
-        story.append(Paragraph(f"<b>Date:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
-        story.append(Spacer(1, 12))
-        story.append(Paragraph("<b>MiCA/SEC FIT21 Compliance Summary:</b>", styles['Heading2']))
-        story.append(Paragraph("• Custody: High-severity reentrancy risks must be mitigated.", styles['Normal']))
-        story.append(Paragraph("• Transparency: All findings disclosed in audit report.", styles['Normal']))
-        story.append(Paragraph("• Risk Score: Below 30/100 recommended for production.", styles['Normal']))
-        story.append(Spacer(1, 12))
-        story.append(Paragraph(f"<b>Risk Score:</b> {report['risk_score']}/100", styles['Normal']))
-        story.append(Paragraph(f"<b>Issues Found:</b> {len(report['issues'])}", styles['Normal']))
-        
+
+        # Build report sections
+        _build_header_section(story, styles, username, file_size, tier)
+        _build_executive_summary(story, styles, report)
+        _build_risk_score_section(story, styles, report)
+        _build_severity_breakdown(story, styles, report)
+        _build_issues_section(story, styles, report, tier)
+        _build_predictions_section(story, styles, report, tier)
+        _build_recommendations_section(story, styles, report)
+
+        # Pro+ tier sections
+        if tier in ["pro", "enterprise", "diamond"]:
+            _build_tool_results_section(story, styles, report, tier)
+
+        # Enterprise tier sections
+        if tier in ["enterprise", "diamond"]:
+            if compliance_data:
+                _build_compliance_section(story, styles, compliance_data)
+            _build_remediation_roadmap(story, styles, report)
+
+        _build_footer(story, styles, tier)
+
         doc.build(story)
-        logger.info(f"Compliance PDF generated: {pdf_path}")
+        logger.info(f"[PDF] Comprehensive audit report generated: {pdf_path} (tier={tier})")
         return pdf_path
+
     except Exception as e:
-        logger.error(f"PDF generation failed: {str(e)}")
+        logger.error(f"[PDF] Generation failed: {str(e)}", exc_info=True)
         return None
 
 # Celery/Redis for scale
@@ -3098,6 +3609,44 @@ async def serve_static(file_path: str):
     if not os.path.isfile(file_full_path):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(file_full_path)
+
+@app.get("/api/reports/{report_filename}")
+async def download_report(
+    report_filename: str,
+    request: Request,
+    current_user: Optional[User] = Depends(get_authenticated_user)
+):
+    """
+    Protected PDF report download endpoint.
+    Only allows authenticated users to download their own reports.
+    """
+    # Require authentication
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required to download reports")
+
+    # Validate filename format (prevent path traversal)
+    if not report_filename.endswith('.pdf') or '..' in report_filename or '/' in report_filename:
+        raise HTTPException(status_code=400, detail="Invalid report filename")
+
+    # Check if the report belongs to this user (filename contains username)
+    # Format: audit_report_{username}_{timestamp}.pdf
+    if f"_{current_user.username}_" not in report_filename:
+        logger.warning(f"[REPORT] User {current_user.username} attempted to access report: {report_filename}")
+        raise HTTPException(status_code=403, detail="You can only download your own reports")
+
+    # Build full path
+    report_path = os.path.join(DATA_DIR, report_filename)
+
+    if not os.path.isfile(report_path):
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    logger.info(f"[REPORT] Serving PDF report: {report_filename} to {current_user.username}")
+    return FileResponse(
+        report_path,
+        media_type="application/pdf",
+        filename=report_filename,
+        headers={"Content-Disposition": f"attachment; filename={report_filename}"}
+    )
 
 ## Section 4.2: UI and Auth Endpoints
 
@@ -5103,7 +5652,13 @@ For Enterprise tier, also include: "proof_of_concept", "references"
         
         # Finalization: PDF, overage reporting, history, DB commit, cleanup
         if usage_tracker.feature_flags.get(tier_for_flags, {}).get("reports", False):
-            pdf_path = generate_compliance_pdf(report, effective_username, file_size)
+            pdf_path = generate_compliance_pdf(
+                report=report,
+                username=effective_username,
+                file_size=file_size,
+                tier=tier_for_flags,
+                compliance_data=compliance_scan if tier_for_flags in ["enterprise", "diamond"] else None
+            )
         
         try:
             overage_mb = max(0, (file_size - 1024 * 1024) / (1024 * 1024))
@@ -5317,8 +5872,8 @@ For Enterprise tier, also include: "proof_of_concept", "references"
         audit_limit = tier_limits.get(current_tier, FREE_LIMIT)
         
         response = {
-            "report": report, 
-            "risk_score": str(report.get("risk_score", "N/A")), 
+            "report": report,
+            "risk_score": str(report.get("risk_score", "N/A")),
             "overage_cost": overage_cost,
             "tier": current_tier,
             "audit_count": updated_audit_count,
@@ -5326,7 +5881,10 @@ For Enterprise tier, also include: "proof_of_concept", "references"
             "audits_remaining": max(0, audit_limit - updated_audit_count) if audit_limit != 9999 else "unlimited"
         }
         if pdf_path:
-            response["compliance_pdf"] = pdf_path
+            # Return download URL instead of file path
+            pdf_filename = os.path.basename(pdf_path)
+            response["pdf_report_url"] = f"/api/reports/{pdf_filename}"
+            response["pdf_filename"] = pdf_filename
         
         logger.info(f"[AUDIT_COMPLETE] {effective_username}: {updated_audit_count}/{audit_limit} audits used")
         return response
