@@ -65,6 +65,19 @@ infura_url = f"https://mainnet.infura.io/v3/{os.getenv('INFURA_PROJECT_ID')}"
 w3 = Web3(Web3.HTTPProvider(infura_url))
 print(f"[WEB3] Connected: {w3.is_connected()}")
 
+# On-chain Analyzer (lazy initialization - imports after all modules loaded)
+onchain_analyzer = None
+def get_onchain_analyzer():
+    """Get or create on-chain analyzer instance."""
+    global onchain_analyzer
+    if onchain_analyzer is None:
+        try:
+            onchain_analyzer = OnChainAnalyzer(rpc_url=infura_url)
+            print(f"[ONCHAIN] Analyzer initialized: {onchain_analyzer.is_connected}")
+        except Exception as e:
+            print(f"[ONCHAIN] Failed to initialize analyzer: {e}")
+    return onchain_analyzer
+
 print("=" * 80)
 
 import platform
@@ -87,6 +100,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from web3 import Web3
 import stripe
 import re  # For username sanitization
+
+# On-chain analysis module
+from onchain_analyzer import OnChainAnalyzer
 
 # === EARLY LOGGER SETUP (fixes NameError) ===
 logging.basicConfig(
@@ -3839,6 +3855,105 @@ def _build_tool_results_section(story: list, styles: dict, report: dict, tier: s
 
     story.append(Spacer(1, 10))
 
+
+def _build_onchain_section(story: list, styles: dict, report: dict) -> None:
+    """Build on-chain analysis section for PDF (Pro/Enterprise)."""
+    onchain = report.get("onchain_analysis")
+    if not onchain:
+        return
+
+    story.append(Paragraph("⛓️ On-Chain Analysis", styles['heading1']))
+
+    # Contract address and chain
+    address = onchain.get("address", "Unknown")
+    chain = onchain.get("chain", "Ethereum")
+    story.append(Paragraph(f"<b>Contract:</b> {address}", styles['normal']))
+    story.append(Paragraph(f"<b>Chain:</b> {chain}", styles['normal']))
+    story.append(Spacer(1, 8))
+
+    # Proxy Detection
+    proxy = onchain.get("proxy", {})
+    if proxy:
+        story.append(Paragraph("🔄 Proxy Status", styles['heading2']))
+        is_proxy = proxy.get("is_proxy", False)
+        if is_proxy:
+            proxy_type = proxy.get("proxy_type", "Unknown")
+            upgrade_risk = proxy.get("upgrade_risk", "N/A")
+            impl = proxy.get("implementation", "N/A")
+            story.append(Paragraph(f"• Type: {proxy_type} Proxy", styles['normal']))
+            story.append(Paragraph(f"• Upgrade Risk: {upgrade_risk}", styles['normal']))
+            if impl and impl != "N/A":
+                story.append(Paragraph(f"• Implementation: {impl[:20]}...{impl[-8:]}", styles['normal']))
+        else:
+            story.append(Paragraph("• Not a proxy contract (code is immutable)", styles['normal']))
+        story.append(Spacer(1, 6))
+
+    # Storage/Ownership
+    storage = onchain.get("storage", {})
+    if storage:
+        story.append(Paragraph("👤 Ownership & Access Control", styles['heading2']))
+        owner = storage.get("owner")
+        if owner:
+            story.append(Paragraph(f"• Owner: {owner[:20]}...{owner[-8:]}", styles['normal']))
+        central_risk = storage.get("centralization_risk", "LOW")
+        story.append(Paragraph(f"• Centralization Risk: {central_risk}", styles['normal']))
+        if storage.get("is_pausable"):
+            paused_status = "PAUSED" if storage.get("is_paused") else "Active"
+            story.append(Paragraph(f"• Pausable: Yes ({paused_status})", styles['normal']))
+        story.append(Spacer(1, 6))
+
+    # Backdoor Detection
+    backdoors = onchain.get("backdoors", {})
+    if backdoors:
+        story.append(Paragraph("🚨 Backdoor Scan", styles['heading2']))
+        has_backdoors = backdoors.get("has_backdoors", False)
+        risk_level = backdoors.get("risk_level", "LOW")
+        if has_backdoors:
+            story.append(Paragraph(f"• Risk Level: {risk_level}", styles['normal']))
+            summary = backdoors.get("summary", "")
+            if summary:
+                story.append(Paragraph(f"• {summary}", styles['normal']))
+            dangerous_funcs = backdoors.get("dangerous_functions", [])
+            if dangerous_funcs:
+                story.append(Paragraph("• Dangerous Functions Detected:", styles['normal']))
+                for func in dangerous_funcs[:5]:
+                    name = func.get("name", func.get("selector", "Unknown"))
+                    category = func.get("category", "unknown")
+                    story.append(Paragraph(f"    - {name} ({category})", styles['normal']))
+        else:
+            story.append(Paragraph("• No backdoor patterns detected", styles['normal']))
+        story.append(Spacer(1, 6))
+
+    # Honeypot Detection
+    honeypot = onchain.get("honeypot", {})
+    if honeypot:
+        story.append(Paragraph("🍯 Honeypot Analysis", styles['heading2']))
+        is_honeypot = honeypot.get("is_honeypot", False)
+        if is_honeypot:
+            confidence = honeypot.get("confidence", "LOW")
+            story.append(Paragraph(f"• ⚠️ HONEYPOT DETECTED (Confidence: {confidence})", styles['normal']))
+            recommendation = honeypot.get("recommendation", "")
+            if recommendation:
+                story.append(Paragraph(f"• {recommendation}", styles['normal']))
+        else:
+            story.append(Paragraph("• ✅ No honeypot indicators detected", styles['normal']))
+        story.append(Spacer(1, 6))
+
+    # Overall On-Chain Risk
+    overall = onchain.get("overall_risk", {})
+    if overall:
+        story.append(Paragraph("📊 Overall On-Chain Risk", styles['heading2']))
+        level = overall.get("level", "N/A")
+        score = overall.get("score", 0)
+        story.append(Paragraph(f"• Risk Level: {level}", styles['normal']))
+        story.append(Paragraph(f"• Risk Score: {score}/100", styles['normal']))
+        summary = overall.get("summary", "")
+        if summary:
+            story.append(Paragraph(f"• {summary}", styles['normal']))
+
+    story.append(Spacer(1, 10))
+
+
 def _build_footer(story: list, styles: dict, tier: str) -> None:
     """Build PDF footer."""
     story.append(Spacer(1, 20))
@@ -3895,6 +4010,7 @@ def generate_compliance_pdf(
         # Pro+ tier sections
         if tier in ["pro", "enterprise", "diamond"]:
             _build_tool_results_section(story, styles, report, tier)
+            _build_onchain_section(story, styles, report)
 
         # Enterprise tier sections
         if tier in ["enterprise", "diamond"]:
@@ -5829,29 +5945,68 @@ async def audit_contract(
         
         # On-chain analysis
         details = "Uploaded Solidity code for analysis."
+        onchain_analysis = None  # Store full on-chain analysis results
+
         if contract_address:
             if not usage_tracker.feature_flags.get(tier_for_flags, {}).get("onchain", False):
                 logger.warning(f"On-chain analysis denied for {effective_username} (tier: {current_tier})")
                 await broadcast_audit_log(effective_username, "On-chain analysis denied (tier restriction)")
-                raise HTTPException(status_code=403, detail="On-chain analysis requires Starter tier or higher.")
-            
-            if not os.getenv("INFURA_PROJECT_ID"):
-                logger.error("INFURA_PROJECT_ID not set")
-                await broadcast_audit_log(effective_username, "On-chain analysis failed: INFURA_PROJECT_ID not set")
-                raise HTTPException(status_code=503, detail="On-chain analysis unavailable: Please set INFURA_PROJECT_ID")
-            
+                raise HTTPException(status_code=403, detail="On-chain analysis requires Pro tier or higher.")
+
+            if not os.getenv("INFURA_PROJECT_ID") and not os.getenv("WEB3_PROVIDER_URL"):
+                logger.error("No Web3 provider configured")
+                await broadcast_audit_log(effective_username, "On-chain analysis failed: No Web3 provider")
+                raise HTTPException(status_code=503, detail="On-chain analysis unavailable: Please configure Web3 provider")
+
             if not w3.is_address(contract_address):
                 logger.error(f"Invalid Ethereum address: {contract_address}")
                 await broadcast_audit_log(effective_username, "Invalid Ethereum address")
                 raise HTTPException(status_code=400, detail="Invalid Ethereum address.")
-            
+
             try:
-                onchain_code = w3.eth.get_code(contract_address)
-                details += f" On-chain code fetched for {contract_address} (bytecode length: {len(onchain_code)})"
-                await broadcast_audit_log(effective_username, "On-chain code fetched")
+                # Get on-chain analyzer instance
+                analyzer = get_onchain_analyzer()
+                if analyzer and analyzer.is_connected:
+                    await broadcast_audit_log(effective_username, "Running on-chain analysis...")
+
+                    # Run comprehensive on-chain analysis
+                    onchain_analysis = await analyzer.analyze(
+                        contract_address,
+                        include_honeypot=True,
+                        tier=tier_for_flags
+                    )
+
+                    # Log results
+                    if onchain_analysis.get("is_contract"):
+                        proxy_info = onchain_analysis.get("proxy", {})
+                        backdoor_info = onchain_analysis.get("backdoors", {})
+                        overall_risk = onchain_analysis.get("overall_risk", {})
+
+                        logger.info(f"[ONCHAIN] Analysis complete: proxy={proxy_info.get('is_proxy')}, "
+                                   f"backdoor_risk={backdoor_info.get('risk_level')}, "
+                                   f"overall_risk={overall_risk.get('level')}")
+
+                        await broadcast_audit_log(effective_username,
+                            f"On-chain analysis complete: {overall_risk.get('level', 'N/A')} risk")
+
+                        # Add AI context from on-chain analysis
+                        if onchain_analysis.get("ai_context"):
+                            details += f"\n\n{onchain_analysis['ai_context']}"
+                    else:
+                        logger.info(f"[ONCHAIN] Address {contract_address} is not a contract (EOA)")
+                        await broadcast_audit_log(effective_username, "Address is EOA, not a contract")
+                        details += f" Note: {contract_address} is an EOA, not a deployed contract."
+                else:
+                    # Fallback to simple bytecode fetch
+                    onchain_code = w3.eth.get_code(contract_address)
+                    details += f" On-chain code fetched for {contract_address} (bytecode length: {len(onchain_code)})"
+                    await broadcast_audit_log(effective_username, "On-chain code fetched (basic mode)")
+
             except Exception as e:
-                logger.error(f"On-chain code fetch failed: {e}")
-                await broadcast_audit_log(effective_username, "No deployed code found")
+                logger.error(f"On-chain analysis failed: {e}")
+                await broadcast_audit_log(effective_username, f"On-chain analysis error: {str(e)[:50]}")
+                # Don't fail the whole audit, just note the error
+                details += f" On-chain analysis unavailable: {str(e)[:100]}"
         
         # Pre-calculate code metrics (don't rely on AI)
         lines_of_code = len([line for line in code_str.split('\n') if line.strip() and not line.strip().startswith('//')])
@@ -6337,6 +6492,33 @@ For Enterprise tier, also include: "proof_of_concept", "references"
             "audit_limit": audit_limit,
             "audits_remaining": max(0, audit_limit - updated_audit_count) if audit_limit != 9999 else "unlimited"
         }
+
+        # Add on-chain analysis results if available
+        if onchain_analysis and onchain_analysis.get("is_contract"):
+            response["onchain_analysis"] = {
+                "address": onchain_analysis.get("address"),
+                "chain": onchain_analysis.get("chain"),
+                "proxy": onchain_analysis.get("proxy", {}),
+                "storage": {
+                    "owner": onchain_analysis.get("storage", {}).get("owner"),
+                    "admin": onchain_analysis.get("storage", {}).get("admin"),
+                    "is_pausable": onchain_analysis.get("storage", {}).get("is_pausable"),
+                    "is_paused": onchain_analysis.get("storage", {}).get("is_paused"),
+                    "eth_balance": onchain_analysis.get("storage", {}).get("eth_balance"),
+                    "centralization_risk": onchain_analysis.get("storage", {}).get("centralization_risk"),
+                },
+                "backdoors": {
+                    "has_backdoors": onchain_analysis.get("backdoors", {}).get("has_backdoors"),
+                    "risk_level": onchain_analysis.get("backdoors", {}).get("risk_level"),
+                    "summary": onchain_analysis.get("backdoors", {}).get("summary"),
+                    "dangerous_functions": onchain_analysis.get("backdoors", {}).get("dangerous_functions", [])[:5],  # Top 5
+                },
+                "honeypot": onchain_analysis.get("honeypot"),
+                "overall_risk": onchain_analysis.get("overall_risk", {}),
+            }
+            # Also add to report for PDF generation
+            report["onchain_analysis"] = response["onchain_analysis"]
+
         if pdf_path:
             # Return download URL instead of file path
             pdf_filename = os.path.basename(pdf_path)

@@ -483,6 +483,61 @@
                 <!-- Content populated by JavaScript -->
             </div>
 
+            <!-- On-Chain Analysis Results (Pro/Enterprise) -->
+            <div id="onchain-analysis" class="onchain-analysis-section" style="display: none; margin: var(--space-6) 0;">
+                <h4>⛓️ On-Chain Analysis</h4>
+                <div class="onchain-grid">
+                    <!-- Proxy Detection -->
+                    <div class="onchain-card" id="onchain-proxy">
+                        <div class="onchain-card-header">
+                            <span class="onchain-icon">🔄</span>
+                            <span class="onchain-title">Proxy Status</span>
+                        </div>
+                        <div class="onchain-card-body" id="onchain-proxy-content">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+
+                    <!-- Storage/Ownership -->
+                    <div class="onchain-card" id="onchain-storage">
+                        <div class="onchain-card-header">
+                            <span class="onchain-icon">👤</span>
+                            <span class="onchain-title">Ownership & Access</span>
+                        </div>
+                        <div class="onchain-card-body" id="onchain-storage-content">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+
+                    <!-- Backdoor Detection -->
+                    <div class="onchain-card" id="onchain-backdoors">
+                        <div class="onchain-card-header">
+                            <span class="onchain-icon">🚨</span>
+                            <span class="onchain-title">Backdoor Scan</span>
+                        </div>
+                        <div class="onchain-card-body" id="onchain-backdoors-content">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+
+                    <!-- Honeypot Detection -->
+                    <div class="onchain-card" id="onchain-honeypot">
+                        <div class="onchain-card-header">
+                            <span class="onchain-icon">🍯</span>
+                            <span class="onchain-title">Honeypot Check</span>
+                        </div>
+                        <div class="onchain-card-body" id="onchain-honeypot-content">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Overall On-Chain Risk -->
+                <div class="onchain-overall-risk" id="onchain-overall-risk">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+
             <!-- Upgrade Prompt (Free Tier) -->
             <div id="upgrade-prompt" class="upgrade-prompt-container" style="display: none; margin: var(--space-6) 0;">
                 <!-- Content populated by JavaScript -->

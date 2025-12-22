@@ -4168,3 +4168,246 @@ a:focus-visible {
         margin-top: var(--space-4);
     }
 }
+/* ============================================================================
+   ON-CHAIN ANALYSIS SECTION - Phase 4 UI
+   ============================================================================ */
+.onchain-analysis-section {
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-6);
+    backdrop-filter: blur(10px);
+}
+
+.onchain-analysis-section h4 {
+    margin: 0 0 var(--space-5) 0;
+    font-size: var(--text-lg);
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.onchain-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: var(--space-4);
+    margin-bottom: var(--space-5);
+}
+
+.onchain-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    transition: all 0.3s ease;
+}
+
+.onchain-card:hover {
+    border-color: var(--accent-teal);
+    box-shadow: 0 0 20px rgba(0, 209, 178, 0.1);
+}
+
+.onchain-card-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--glass-border);
+}
+
+.onchain-icon {
+    font-size: var(--text-lg);
+}
+
+.onchain-title {
+    font-weight: 600;
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+}
+
+.onchain-card-body {
+    padding: var(--space-4);
+}
+
+.onchain-status {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+}
+
+.onchain-status-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.onchain-status-indicator.safe {
+    background: var(--success);
+    box-shadow: 0 0 8px var(--success);
+}
+
+.onchain-status-indicator.warning {
+    background: var(--warning);
+    box-shadow: 0 0 8px var(--warning);
+}
+
+.onchain-status-indicator.danger {
+    background: var(--error);
+    box-shadow: 0 0 8px var(--error);
+}
+
+.onchain-status-text {
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+}
+
+.onchain-detail {
+    font-size: var(--text-xs);
+    color: var(--text-tertiary);
+    margin-top: var(--space-2);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--glass-border);
+}
+
+.onchain-detail-row {
+    display: flex;
+    justify-content: space-between;
+    padding: var(--space-1) 0;
+}
+
+.onchain-detail-label {
+    color: var(--text-tertiary);
+}
+
+.onchain-detail-value {
+    color: var(--text-secondary);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+}
+
+.onchain-address {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    background: var(--bg-primary);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    word-break: break-all;
+}
+
+/* On-chain Overall Risk */
+.onchain-overall-risk {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-4);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+}
+
+.onchain-risk-left {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+}
+
+.onchain-risk-badge {
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-full);
+    font-weight: 700;
+    font-size: var(--text-sm);
+    text-transform: uppercase;
+}
+
+.onchain-risk-badge.low {
+    background: rgba(0, 209, 178, 0.2);
+    color: var(--success);
+    border: 1px solid var(--success);
+}
+
+.onchain-risk-badge.medium {
+    background: rgba(245, 158, 11, 0.2);
+    color: var(--warning);
+    border: 1px solid var(--warning);
+}
+
+.onchain-risk-badge.high {
+    background: rgba(239, 68, 68, 0.2);
+    color: var(--error);
+    border: 1px solid var(--error);
+}
+
+.onchain-risk-badge.critical {
+    background: rgba(239, 68, 68, 0.3);
+    color: #ff6b6b;
+    border: 1px solid #ff6b6b;
+    animation: pulse-critical 2s infinite;
+}
+
+@keyframes pulse-critical {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+    50% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
+}
+
+.onchain-risk-score {
+    font-size: var(--text-2xl);
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.onchain-risk-summary {
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    max-width: 400px;
+}
+
+/* Dangerous functions list */
+.onchain-danger-list {
+    list-style: none;
+    padding: 0;
+    margin: var(--space-2) 0 0 0;
+}
+
+.onchain-danger-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) 0;
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+}
+
+.onchain-danger-item::before {
+    content: '⚠️';
+    font-size: 0.7rem;
+}
+
+.onchain-danger-item code {
+    background: var(--bg-primary);
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--error);
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .onchain-grid {
+        grid-template-columns: 1fr;
+    }
+    
+    .onchain-overall-risk {
+        flex-direction: column;
+        text-align: center;
+    }
+    
+    .onchain-risk-left {
+        flex-direction: column;
+    }
+}

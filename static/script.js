@@ -2005,7 +2005,158 @@ document.addEventListener("DOMContentLoaded", () => {
           `;
           severityCountsEl.style.display = "block";
         }
-        
+
+        // ON-CHAIN ANALYSIS SECTION (Pro/Enterprise)
+        const onchainSection = document.getElementById("onchain-analysis");
+        if (onchainSection && data.onchain_analysis) {
+          const onchain = data.onchain_analysis;
+          log('ONCHAIN', 'Displaying on-chain analysis:', onchain);
+
+          // Proxy Detection
+          const proxyContent = document.getElementById("onchain-proxy-content");
+          if (proxyContent && onchain.proxy) {
+            const proxy = onchain.proxy;
+            const isProxy = proxy.is_proxy;
+            const statusClass = isProxy ? (proxy.upgrade_risk === 'HIGH' || proxy.upgrade_risk === 'CRITICAL' ? 'danger' : 'warning') : 'safe';
+
+            proxyContent.innerHTML = `
+              <div class="onchain-status">
+                <span class="onchain-status-indicator ${statusClass}"></span>
+                <span class="onchain-status-text">${isProxy ? (proxy.proxy_type || 'Unknown') + ' Proxy' : 'Not a Proxy'}</span>
+              </div>
+              ${isProxy ? `
+                <div class="onchain-detail">
+                  <div class="onchain-detail-row">
+                    <span class="onchain-detail-label">Upgrade Risk:</span>
+                    <span class="onchain-detail-value">${proxy.upgrade_risk || 'N/A'}</span>
+                  </div>
+                  ${proxy.implementation ? `
+                    <div class="onchain-detail-row">
+                      <span class="onchain-detail-label">Implementation:</span>
+                    </div>
+                    <div class="onchain-address">${proxy.implementation}</div>
+                  ` : ''}
+                </div>
+              ` : '<div class="onchain-detail">Contract code is immutable</div>'}
+            `;
+          }
+
+          // Storage/Ownership
+          const storageContent = document.getElementById("onchain-storage-content");
+          if (storageContent && onchain.storage) {
+            const storage = onchain.storage;
+            const centralRisk = storage.centralization_risk || 'LOW';
+            const statusClass = centralRisk === 'HIGH' || centralRisk === 'CRITICAL' ? 'danger' : (centralRisk === 'MEDIUM' ? 'warning' : 'safe');
+
+            storageContent.innerHTML = `
+              <div class="onchain-status">
+                <span class="onchain-status-indicator ${statusClass}"></span>
+                <span class="onchain-status-text">Centralization: ${centralRisk}</span>
+              </div>
+              <div class="onchain-detail">
+                ${storage.owner ? `
+                  <div class="onchain-detail-row">
+                    <span class="onchain-detail-label">Owner:</span>
+                  </div>
+                  <div class="onchain-address">${storage.owner}</div>
+                ` : '<div class="onchain-detail-row"><span class="onchain-detail-label">No owner detected</span></div>'}
+                ${storage.is_pausable !== undefined ? `
+                  <div class="onchain-detail-row">
+                    <span class="onchain-detail-label">Pausable:</span>
+                    <span class="onchain-detail-value">${storage.is_pausable ? (storage.is_paused ? '⏸️ PAUSED' : '✅ Active') : 'No'}</span>
+                  </div>
+                ` : ''}
+                ${storage.eth_balance ? `
+                  <div class="onchain-detail-row">
+                    <span class="onchain-detail-label">ETH Balance:</span>
+                    <span class="onchain-detail-value">${parseFloat(storage.eth_balance).toFixed(4)} ETH</span>
+                  </div>
+                ` : ''}
+              </div>
+            `;
+          }
+
+          // Backdoor Detection
+          const backdoorsContent = document.getElementById("onchain-backdoors-content");
+          if (backdoorsContent && onchain.backdoors) {
+            const backdoors = onchain.backdoors;
+            const hasBackdoors = backdoors.has_backdoors;
+            const riskLevel = backdoors.risk_level || 'LOW';
+            const statusClass = riskLevel === 'CRITICAL' || riskLevel === 'HIGH' ? 'danger' : (riskLevel === 'MEDIUM' ? 'warning' : 'safe');
+
+            backdoorsContent.innerHTML = `
+              <div class="onchain-status">
+                <span class="onchain-status-indicator ${statusClass}"></span>
+                <span class="onchain-status-text">${hasBackdoors ? riskLevel + ' Risk Detected' : 'No Backdoors Found'}</span>
+              </div>
+              ${backdoors.dangerous_functions && backdoors.dangerous_functions.length > 0 ? `
+                <ul class="onchain-danger-list">
+                  ${backdoors.dangerous_functions.slice(0, 3).map(fn => `
+                    <li class="onchain-danger-item">
+                      <code>${fn.name || fn.selector}</code>
+                      <span>(${fn.category || 'unknown'})</span>
+                    </li>
+                  `).join('')}
+                  ${backdoors.dangerous_functions.length > 3 ? `
+                    <li class="onchain-danger-item" style="color: var(--text-tertiary);">
+                      +${backdoors.dangerous_functions.length - 3} more...
+                    </li>
+                  ` : ''}
+                </ul>
+              ` : '<div class="onchain-detail">No dangerous functions detected</div>'}
+            `;
+          }
+
+          // Honeypot Detection
+          const honeypotContent = document.getElementById("onchain-honeypot-content");
+          if (honeypotContent && onchain.honeypot) {
+            const honeypot = onchain.honeypot;
+            const isHoneypot = honeypot.is_honeypot;
+            const confidence = honeypot.confidence || 'LOW';
+            const statusClass = isHoneypot ? (confidence === 'HIGH' ? 'danger' : 'warning') : 'safe';
+
+            honeypotContent.innerHTML = `
+              <div class="onchain-status">
+                <span class="onchain-status-indicator ${statusClass}"></span>
+                <span class="onchain-status-text">${isHoneypot ? '⚠️ Honeypot (' + confidence + ')' : '✅ Not a Honeypot'}</span>
+              </div>
+              <div class="onchain-detail">
+                ${honeypot.recommendation ? '<p style="margin: 0; font-size: 0.75rem;">' + honeypot.recommendation + '</p>' : ''}
+                ${honeypot.indicators && honeypot.indicators.length > 0 ? `
+                  <ul class="onchain-danger-list">
+                    ${honeypot.indicators.slice(0, 2).map(ind => `
+                      <li class="onchain-danger-item">${ind.description || ind.type}</li>
+                    `).join('')}
+                  </ul>
+                ` : ''}
+              </div>
+            `;
+          }
+
+          // Overall Risk
+          const overallRiskEl = document.getElementById("onchain-overall-risk");
+          if (overallRiskEl && onchain.overall_risk) {
+            const overall = onchain.overall_risk;
+            const level = (overall.level || 'LOW').toLowerCase();
+
+            overallRiskEl.innerHTML = `
+              <div class="onchain-risk-left">
+                <span class="onchain-risk-badge ${level}">${overall.level || 'N/A'}</span>
+                <span class="onchain-risk-score">${overall.score || 0}/100</span>
+              </div>
+              <div class="onchain-risk-summary">
+                ${overall.summary || 'On-chain analysis complete.'}
+              </div>
+            `;
+          }
+
+          // Show the section
+          onchainSection.style.display = "block";
+          log('ONCHAIN', 'On-chain section displayed');
+        } else if (onchainSection) {
+          onchainSection.style.display = "none";
+        }
+
         // FREE TIER UPGRADE PROMPT
         if (report.upgrade_prompt) {
           const upgradePromptEl = document.getElementById("upgrade-prompt");
