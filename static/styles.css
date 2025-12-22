@@ -922,6 +922,106 @@ button[type="submit"]:active,
     font-size: var(--text-lg);
 }
 
+/* ========================================
+   WALLET CONNECTION STYLES
+   ======================================== */
+
+.wallet-connect-group {
+    margin-bottom: var(--space-4);
+}
+
+.wallet-btn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+}
+
+.wallet-connected-info {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: var(--glass-bg);
+    border: 1px solid var(--accent-teal);
+    border-radius: var(--radius-md);
+}
+
+.wallet-status-dot {
+    width: 10px;
+    height: 10px;
+    background: var(--accent-teal);
+    border-radius: 50%;
+    animation: pulse-dot 2s infinite;
+}
+
+@keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+.wallet-address {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+    flex: 1;
+}
+
+.btn-icon {
+    background: transparent;
+    border: none;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    padding: var(--space-1);
+    border-radius: var(--radius-sm);
+    transition: all var(--transition-fast);
+}
+
+.btn-icon:hover {
+    background: var(--bg-hover);
+    color: var(--accent-coral);
+}
+
+#contract-selector-wrapper label {
+    display: block;
+    margin-bottom: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+}
+
+#deployed-contracts {
+    width: 100%;
+    padding: var(--space-3);
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+    cursor: pointer;
+}
+
+#deployed-contracts:focus {
+    outline: none;
+    border-color: var(--accent-teal);
+}
+
+#deployed-contracts option {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    padding: var(--space-2);
+}
+
+#import-contract-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+#wallet-contract-count {
+    display: block;
+    margin-top: var(--space-2);
+}
+
 /* Button states */
 button:disabled,
 .btn:disabled {
