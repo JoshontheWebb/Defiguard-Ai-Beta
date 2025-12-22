@@ -1332,6 +1332,116 @@ small {
     font-style: italic;
 }
 
+/* Mobile Issues List (Free Tier) */
+.mobile-issues-list {
+    margin: var(--space-4) 0;
+    text-align: left;
+}
+
+.mobile-issue-item {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    margin-bottom: var(--space-2);
+    background: var(--glass-bg);
+    border-radius: var(--radius-md);
+    border-left: 3px solid var(--accent-teal);
+}
+
+.mobile-issue-item.critical {
+    border-left-color: #ef4444;
+}
+
+.mobile-issue-item.high {
+    border-left-color: #f97316;
+}
+
+.mobile-issue-item.medium {
+    border-left-color: #eab308;
+}
+
+.mobile-issue-item.low {
+    border-left-color: #22c55e;
+}
+
+.mobile-issue-severity {
+    font-size: var(--text-lg);
+    flex-shrink: 0;
+}
+
+.mobile-issue-content {
+    flex: 1;
+    min-width: 0;
+}
+
+.mobile-issue-type {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+    margin-bottom: var(--space-1);
+}
+
+.mobile-issue-desc {
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+    line-height: var(--leading-relaxed);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.mobile-issues-more {
+    text-align: center;
+    padding: var(--space-3);
+    color: var(--text-tertiary);
+    font-size: var(--text-sm);
+    font-style: italic;
+}
+
+/* Mobile Upgrade CTA */
+.mobile-upgrade-cta {
+    margin-top: var(--space-6);
+    padding: var(--space-5);
+    background: linear-gradient(135deg, rgba(0, 209, 178, 0.1) 0%, rgba(255, 64, 129, 0.1) 100%);
+    border: 1px dashed var(--accent-teal);
+    border-radius: var(--radius-lg);
+    text-align: center;
+}
+
+.mobile-upgrade-cta > p:first-child {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: var(--space-3);
+}
+
+.mobile-upgrade-btn {
+    width: 100%;
+    padding: var(--space-3) var(--space-4);
+    font-size: var(--text-base);
+    font-weight: 600;
+    background: var(--gradient-accent);
+    border: none;
+    border-radius: var(--radius-md);
+    color: var(--primary-dark);
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-block;
+    transition: all var(--transition-base);
+}
+
+.mobile-upgrade-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--glow-teal);
+}
+
+.mobile-upgrade-hint {
+    margin-top: var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--text-tertiary);
+}
+
 .risk-score-placeholder {
     background: var(--gradient-card);
     border: 1px solid var(--glass-border);
