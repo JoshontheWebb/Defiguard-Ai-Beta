@@ -1197,7 +1197,6 @@ document.addEventListener("DOMContentLoaded", () => {
       logoutSidebar: "#logout-sidebar",
       authStatus: "#auth-status",
       auditLog: "#audit-log",
-      settingsModalButton: "#open-settings-modal",
       sidebarSettingsLink: "#sidebar-settings-link",
       settingsModal: "#settings-modal",
       settingsModalBackdrop: "#settings-modal-backdrop",
@@ -3187,7 +3186,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
       // ============================================================================
       
       const {
-        settingsModalButton, sidebarSettingsLink, settingsModal, settingsModalBackdrop, settingsModalClose,
+        sidebarSettingsLink, settingsModal, settingsModalBackdrop, settingsModalClose,
         modalUsername, modalEmail, modalTier, modalMemberSince, modalAuditsUsed,
         modalAuditsRemaining, modalSizeLimit, modalUsageProgress, modalUsageText,
         modalApiSection, apiKeyCountDisplay, apiKeysTableBody, createApiKeyButton,
@@ -3403,9 +3402,6 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
         settingsModalBackdrop?.classList.add("active");
         document.body.style.overflow = "hidden"; // Prevent background scroll
       };
-
-      // Open modal from old button (if it exists)
-      settingsModalButton?.addEventListener("click", openSettingsModal);
 
       // Open modal from sidebar settings link
       sidebarSettingsLink?.addEventListener("click", (e) => {
