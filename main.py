@@ -1749,17 +1749,9 @@ async def verify_csrf_token(request: Request):
 def initialize_client() -> tuple[Optional[OpenAI], Web3]:
     logger.info("Initializing clients...")
     global client, w3
-    
-    # DEBUG: Check if env var is available
-    grok_key = os.getenv("GROK_API_KEY")
-    print("=" * 80)
-    print("🔍 INITIALIZE_CLIENT DEBUG:")
-    print(f"GROK_API_KEY from os.getenv: {'YES ✅' if grok_key else 'NO ❌'}")
-    if grok_key:
-        print(f"First 20 chars: {grok_key[:20]}...")
-    print("=" * 80)
-    
+
     # Grok client – safe with fallback
+    grok_key = os.getenv("GROK_API_KEY")
     if grok_key and grok_key.strip():
         client = OpenAI(
             api_key=grok_key.strip(),
