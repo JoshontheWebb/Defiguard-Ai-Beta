@@ -5189,24 +5189,44 @@ async def upgrade_page():
         logger.error(f"Upgrade page error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
-@app.get("/facets/{contract_address}", dependencies=[Depends(verify_api_key)])
-async def get_facets(contract_address: str, request: Request, username: str = Query(None), db: Session = Depends(get_db)) -> dict[str, Any]:
+@app.get("/facets/{contract_address}")
+async def get_facets(contract_address: str, request: Request, username: str = Query(None), api_key: str = Header(None, alias="X-API-Key"), db: Session = Depends(get_db)) -> dict[str, Any]:
+    """
+    Get diamond proxy facets. Supports both session auth (web UI) and API key auth.
+    """
     try:
         logger.debug(f"Received /facets request for {contract_address} by {username or 'anonymous'}, session: {request.session}")
-        
+
         if w3 is None or not w3.is_address(contract_address):
             logger.error(f"Invalid Ethereum address or Web3 not initialized: {contract_address}")
             raise HTTPException(status_code=400, detail="Invalid Ethereum address or Web3 not initialized")
-        
+
+        # Try session auth first, then API key
         session_username = request.session.get("username")
         effective_username = username or session_username
-        user = db.query(User).filter(User.username == effective_username).first() if effective_username else None
-        
-        current_tier = user.tier if user else os.getenv("TIER", "free")
-        has_diamond = user.has_diamond if user else False
-        
+        user = None
+
+        # Check session auth
+        if effective_username:
+            user = db.query(User).filter(User.username == effective_username).first()
+
+        # If no session user, try API key auth
+        if not user and api_key:
+            api_key_obj = db.query(APIKey).filter(APIKey.key == api_key, APIKey.is_active == True).first()
+            if api_key_obj:
+                user = db.query(User).filter(User.id == api_key_obj.user_id).first()
+                if user:
+                    api_key_obj.last_used_at = datetime.now()
+                    db.commit()
+
+        if not user:
+            raise HTTPException(status_code=401, detail="Authentication required. Please sign in or provide API key.")
+
+        current_tier = user.tier
+        has_diamond = user.has_diamond
+
         if current_tier not in ["pro", "enterprise", "diamond"] and not has_diamond:
-            logger.warning(f"Facet preview denied for {effective_username or 'anonymous'} (tier: {current_tier}, has_diamond: {has_diamond})")
+            logger.warning(f"Facet preview denied for {user.username} (tier: {current_tier}, has_diamond: {has_diamond})")
             raise HTTPException(status_code=403, detail="Facet preview requires Pro/Enterprise tier. Upgrade at /ui.")
         
         if not os.getenv("INFURA_PROJECT_ID"):
