@@ -1265,7 +1265,8 @@ document.addEventListener("DOMContentLoaded", () => {
           sidebar.classList.toggle("open");
           hamburger.classList.toggle("open");
           document.body.classList.toggle('sidebar-open');
-          mainContent.style.marginLeft = sidebar.classList.contains("open") ? "270px" : "0";
+          // Use empty string when closed to let CSS handle centering
+          mainContent.style.marginLeft = sidebar.classList.contains("open") ? "270px" : "";
         });
         hamburger.setAttribute("tabindex", "0");
         hamburger.addEventListener("keydown", (e) => {
