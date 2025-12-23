@@ -1198,6 +1198,7 @@ document.addEventListener("DOMContentLoaded", () => {
       authStatus: "#auth-status",
       auditLog: "#audit-log",
       settingsModalButton: "#open-settings-modal",
+      sidebarSettingsLink: "#sidebar-settings-link",
       settingsModal: "#settings-modal",
       settingsModalBackdrop: "#settings-modal-backdrop",
       settingsModalClose: "#settings-modal-close",
@@ -3186,7 +3187,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
       // ============================================================================
       
       const {
-        settingsModalButton, settingsModal, settingsModalBackdrop, settingsModalClose,
+        settingsModalButton, sidebarSettingsLink, settingsModal, settingsModalBackdrop, settingsModalClose,
         modalUsername, modalEmail, modalTier, modalMemberSince, modalAuditsUsed,
         modalAuditsRemaining, modalSizeLimit, modalUsageProgress, modalUsageText,
         modalApiSection, apiKeyCountDisplay, apiKeysTableBody, createApiKeyButton,
@@ -3394,13 +3395,22 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
         }
       };
 
-      // Open modal
-      settingsModalButton?.addEventListener("click", async () => {
+      // Open modal helper function
+      const openSettingsModal = async () => {
         debugLog("[DEBUG] Opening settings modal");
         await populateSettingsModal();
         settingsModal?.classList.add("active");
         settingsModalBackdrop?.classList.add("active");
         document.body.style.overflow = "hidden"; // Prevent background scroll
+      };
+
+      // Open modal from old button (if it exists)
+      settingsModalButton?.addEventListener("click", openSettingsModal);
+
+      // Open modal from sidebar settings link
+      sidebarSettingsLink?.addEventListener("click", (e) => {
+        e.preventDefault();
+        openSettingsModal();
       });
 
       // Close modal
@@ -3420,7 +3430,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
         if ((e.metaKey || e.ctrlKey) && e.key === ",") {
           e.preventDefault();
           if (!settingsModal?.classList.contains("active")) {
-            settingsModalButton?.click();
+            openSettingsModal();
           }
         }
         
