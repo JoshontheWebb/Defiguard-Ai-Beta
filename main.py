@@ -449,6 +449,7 @@ async def terms_page():
     """Serve the terms of service page."""
     from fastapi.responses import FileResponse
     return FileResponse("static/terms-of-service.html", media_type="text/html")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
