@@ -486,6 +486,7 @@ if AUTH0_DOMAIN and AUTH0_CLIENT_ID and AUTH0_CLIENT_SECRET:
     logger.info("Auth0 OAuth client registered successfully")
 else:
     logger.warning("Auth0 env vars missing – running in legacy/local mode")
+
 @app.on_event("startup")
 async def startup_redis_pubsub():
     """Initialize Redis pub/sub for cross-worker WebSocket messaging."""
