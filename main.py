@@ -1033,7 +1033,7 @@ async def me_endpoint(request: Request, db: Session = Depends(get_db)) -> dict[s
         if provider == 'unknown' and 'userinfo' in request.session:
             ui = request.session['userinfo']
             provider = ui.get('identities', [{}])[0].get('provider', 'unknown') if ui.get('identities') else 'unknown'
-        
+
         return {
             "sub": user.auth0_sub,
             "email": user.email,
@@ -4273,12 +4273,12 @@ async def read_ui(
 ):
     try:
         if current_user is None:
-            # Guest mode
+            # Guest mode - not authenticated
             template = jinja_env.get_template("index.html")
             html_content = template.render(
                 session=request.session,
                 userinfo={},
-                username="Guest",
+                username=None,  # None = not authenticated, template shows generic welcome
                 upgrade=upgrade,
                 message=message or "Please sign in for full access"
             )
@@ -4311,8 +4311,19 @@ async def read_ui(
         init_js_cookie = request.cookies.get("init_js")
         if init_js_cookie:
             init_script = f"<script>{init_js_cookie}</script>"
-        
-        username = getattr(current_user, "username", None) or userinfo.get("email") or userinfo.get("name") or "Guest"
+
+        # Get display name from Auth0 userinfo with fallback chain
+        # Priority: preferred_username → name → nickname → email → database username → None
+        # Never default to "Guest" - authenticated users without display info get generic welcome
+        display_name = (
+            userinfo.get("preferred_username")
+            or userinfo.get("name")
+            or userinfo.get("nickname")
+            or userinfo.get("email")
+            or getattr(current_user, "username", None)
+        )
+        # Don't pass "Guest" for authenticated users - let template show generic welcome
+        username = display_name if display_name else None
         html_content = template.render(
             session=request.session,
             userinfo=userinfo,
