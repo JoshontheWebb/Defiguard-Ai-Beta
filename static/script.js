@@ -1668,33 +1668,66 @@ document.addEventListener("DOMContentLoaded", () => {
             sidebarTierUsage.textContent = `${remaining} audits remaining (${auditCount}/${auditLimit} used)`;
           }
           
-          // Build features list for sidebar
+          // Build features list for sidebar - Premium tier descriptions
           const featuresList = [];
+          const tierDisplayNames = {
+            "enterprise": "Enterprise",
+            "pro": "Team",
+            "starter": "Developer",
+            "free": "Free Trial"
+          };
+          const displayName = tierDisplayNames[tier] || tierNameCap;
+
           if (tier === "enterprise") {
-            featuresList.push("Unlimited everything", "White-label reports", "Team accounts", "Priority support");
+            featuresList.push(
+              "Unlimited audits & file size",
+              "Slither + Mythril + Echidna + Certora",
+              "Multi-AI consensus verification",
+              "White-label reports",
+              "Unlimited API keys",
+              "Team accounts & permissions",
+              "Dedicated account manager"
+            );
           } else if (tier === "pro") {
-            featuresList.push("Unlimited audits", "5MB file uploads", "API access", "Full analysis");
-            if (feature_flags.fuzzing) featuresList.push("Fuzzing");
-            if (feature_flags.priority_support) featuresList.push("Priority support");
+            featuresList.push(
+              "Unlimited audits",
+              "Slither + Mythril + Claude AI",
+              "Echidna fuzzing engine",
+              "On-chain data analysis",
+              "API access (3 keys)",
+              "Priority queue & support"
+            );
           } else if (tier === "starter") {
-            featuresList.push("50 audits/month", "1MB file uploads", "Full analysis", "Fix recommendations");
+            featuresList.push(
+              "25 audits/month",
+              "Slither + Claude AI analysis",
+              "Full vulnerability detection",
+              "AI-powered fix recommendations",
+              "PDF security reports",
+              "MiCA + SEC FIT21 compliance"
+            );
           } else {
-            featuresList.push("3 free audits", "250KB files", "Critical issues only");
+            featuresList.push(
+              "1 audit/month",
+              "Slither static analysis",
+              "Top 3 critical issues",
+              "Basic risk score"
+            );
           }
-          
+
           sidebarTierFeatures.innerHTML = featuresList
-            .map(f => `<div class="feature-item">${f}</div>`)
+            .map(f => `<div class="feature-item">✓ ${f}</div>`)
             .join("");
-          
-          // Update main tier description
-          tierDescription.textContent = `${tierNameCap} Tier: ${
+
+          // Update main tier description with professional copy
+          tierDescription.textContent = `${displayName} Plan: ${
             tier === "enterprise"
-              ? "Unlimited file size, full Enterprise audits, fuzzing, priority support"
+              ? "Protocol-grade security with Slither, Mythril, Echidna & Certora. White-label reports, unlimited API, dedicated support."
               : tier === "pro"
-              ? "Unlimited audits, 5MB files, API access, fuzzing, priority support"
+              ? "Unlimited audits with full security stack. Fuzzing, on-chain analysis, API access, priority support."
               : tier === "starter"
-              ? `50 audits/month, 1MB file size (${auditCount}/${auditLimit} remaining)`
-              : `3 free audits, 250KB files (${auditCount}/${auditLimit} remaining)`
+              ? `25 audits/month with AI-powered analysis & compliance scoring. (${auditCount}/${auditLimit} used)`
+              : `Trial plan: 1 audit/month with basic analysis. (${auditCount}/${auditLimit} used)`
           }`;
           
           sizeLimit.textContent = `Max file size: ${size_limit}`;
