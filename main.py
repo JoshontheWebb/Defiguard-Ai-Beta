@@ -851,16 +851,28 @@ async def callback(request: Request):
     try:
         token = cast(dict[str, Any], await oauth.auth0.authorize_access_token(request))
         userinfo = token.get("userinfo")
-        
+
         if not userinfo:
             logger.warning("Invalid Auth0 userinfo – no data")
             return RedirectResponse(url="/ui")
-        
+
+        # Check if email is verified (required for email/password sign-ups)
+        email = userinfo.get("email", "")
+        email_verified = userinfo.get("email_verified", True)  # Social logins are pre-verified
+
+        if email and not email_verified:
+            # Email not verified yet - show friendly message
+            logger.info(f"[CALLBACK] Email not verified for {email}, redirecting to verification page")
+            return RedirectResponse(url="/auth?verify_email=true")
+
+        if not email:
+            logger.warning("[CALLBACK] No email in userinfo, cannot create account")
+            return RedirectResponse(url="/auth?error=no_email")
+
         request.session["userinfo"] = userinfo
         request.session["id_token"] = token.get("id_token")
-        
+
         db = next(get_db())
-        email = userinfo.get("email", "")
         sub = userinfo.get("sub")
         
         # Extract username
