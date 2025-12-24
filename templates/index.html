@@ -78,14 +78,8 @@
         <div class="welcome-message has-text-centered" id="welcome" 
              data-sub="{% if userinfo.sub %}{{ userinfo.sub[:10] }}...{% endif %}"
              role="status" aria-live="polite">
-            {% if session %}
-                {% if userinfo.name %}
-                    Welcome back, {{ userinfo.name }}! 🚀
-                {% elif userinfo.email %}
-                    Welcome back, {{ userinfo.email }}! 🚀
-                {% else %}
-                    Welcome back, Guest! 🚀
-                {% endif %}
+            {% if username and username != "Guest" %}
+                Welcome back, {{ username }}! 🚀
             {% else %}
                 Welcome to DeFiGuard AI! 🛡️
             {% endif %}
