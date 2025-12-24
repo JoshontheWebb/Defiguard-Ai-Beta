@@ -513,21 +513,32 @@ async def debug_files(admin_key: str = Query(None)):
 
 @app.get("/login")
 async def login(request: Request, screen_hint: Optional[str] = None):
-    if not AUTH0_DOMAIN:
-        return HTMLResponse("Auth0 not configured – <a href='/ui'>continue locally</a>")
-    redirect_uri = request.url_for("callback")
-    response = await oauth.auth0.authorize_redirect(request, redirect_uri)
-    if screen_hint:
-        from urllib.parse import urlparse, parse_qs, urlencode
-        location = response.headers["Location"]
-        parsed = urlparse(location)
-        params = parse_qs(parsed.query)
-        params["screen_hint"] = [screen_hint]
-        new_query = urlencode(params, doseq=True)
-        new_location = parsed._replace(query=new_query).geturl()
-        response.headers["Location"] = new_location
-    logger.info(f"Redirecting to Auth0 for login, screen_hint={screen_hint}")
-    return response
+    try:
+        if not AUTH0_DOMAIN:
+            logger.error("[LOGIN] AUTH0_DOMAIN not configured")
+            return RedirectResponse(url="/auth?error=auth_not_configured")
+
+        redirect_uri = request.url_for("callback")
+        logger.info(f"[LOGIN] Initiating Auth0 redirect, callback={redirect_uri}, screen_hint={screen_hint}")
+
+        response = await oauth.auth0.authorize_redirect(request, redirect_uri)
+
+        if screen_hint:
+            from urllib.parse import urlparse, parse_qs, urlencode
+            location = response.headers["Location"]
+            parsed = urlparse(location)
+            params = parse_qs(parsed.query)
+            params["screen_hint"] = [screen_hint]
+            new_query = urlencode(params, doseq=True)
+            new_location = parsed._replace(query=new_query).geturl()
+            response.headers["Location"] = new_location
+
+        logger.info(f"[LOGIN] Redirecting to Auth0: {response.headers.get('Location', 'NO_LOCATION')[:100]}...")
+        return response
+
+    except Exception as e:
+        logger.error(f"[LOGIN] Failed to redirect to Auth0: {e}")
+        return RedirectResponse(url=f"/auth?error=login_failed")
 
 @app.get("/logout")
 async def logout(request: Request):
