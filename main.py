@@ -381,13 +381,13 @@ class AuditQueue:
             logger.info(f"[QUEUE] Cleaned up {len(to_remove)} old jobs")
 
 # Initialize global audit queue with admission control
-# For 2GB RAM: Allow 2 concurrent audits before queuing
-audit_queue = AuditQueue(max_concurrent=1)
+# For 2GB RAM: Allow 3 concurrent audits before queuing
+audit_queue = AuditQueue(max_concurrent=3)
 
 # Track currently executing audits (for admission control)
 active_audit_count = 0
 active_audit_lock = asyncio.Lock()
-MAX_CONCURRENT_AUDITS = 1  # Conservative limit for 2GB RAM with parallel tools
+MAX_CONCURRENT_AUDITS = 3  # 2GB RAM can handle 3 concurrent sequential audits (~500MB each)
 
 # WebSocket connections for job status updates
 active_job_websockets: dict[str, list[WebSocket]] = {}
