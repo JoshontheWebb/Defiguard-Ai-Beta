@@ -88,6 +88,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("DeFiGuard")
 
+# Unique worker ID for Redis pub/sub message deduplication (prevents duplicate audit log messages)
+WORKER_ID = str(uuid.uuid4())
+
 # Import stripe.error directly for exception handling
 try:
     from stripe import error as stripe_error
@@ -2132,32 +2135,39 @@ def _normalize_severity(severity: str) -> str:
     return severity_map.get(severity_lower, "Medium")
 
 async def broadcast_audit_log(username: str, message: str):
-    """Send audit log message via Redis pub/sub (cross-worker safe)."""
+    """Send audit log message via Redis pub/sub AND local WebSocket (reliable delivery)."""
     global redis_pubsub_client
-    
-    # Use Redis pub/sub to broadcast to all workers
-    if redis_pubsub_client:
-        try:
-            await redis_pubsub_client.publish("audit_log_broadcast", json.dumps({
-                "username": username,
-                "message": message
-            }))
-            logger.info(f"[AUDIT_LOG] 📤 Published via Redis for '{username}': {message}")
-            return
-        except Exception as e:
-            logger.warning(f"[AUDIT_LOG] Redis publish failed, falling back to local: {e}")
-    
-    # Fallback: local-only delivery (same worker)
+
+    delivered_locally = False
+
+    # ALWAYS try local delivery first (immediate for same-worker connections)
     ws = active_audit_websockets.get(username)
     if ws and ws.application_state == WebSocketState.CONNECTED:
         try:
             await ws.send_json({"type": "audit_log", "message": message})
-            logger.info(f"[AUDIT_LOG] ✅ Local send to {username}: {message}")
+            logger.info(f"[AUDIT_LOG] ✅ Local send to '{username}': {message}")
+            delivered_locally = True
         except Exception as e:
-            logger.error(f"[AUDIT_LOG] ❌ Local send failed: {e}")
+            logger.error(f"[AUDIT_LOG] ❌ Local send failed for '{username}': {e}")
             active_audit_websockets.pop(username, None)
-    else:
-        logger.warning(f"[AUDIT_LOG] ⚠️ No Redis and no local WebSocket for '{username}'")
+
+    # ALSO use Redis pub/sub for cross-worker messaging (if available)
+    if redis_pubsub_client:
+        try:
+            await redis_pubsub_client.publish("audit_log_broadcast", json.dumps({
+                "username": username,
+                "message": message,
+                "source_worker": WORKER_ID  # For deduplication on same worker
+            }))
+            logger.debug(f"[AUDIT_LOG] 📤 Published via Redis for '{username}': {message}")
+        except Exception as e:
+            logger.warning(f"[AUDIT_LOG] Redis publish failed for '{username}': {e}")
+
+    if not delivered_locally and not redis_pubsub_client:
+        logger.warning(f"[AUDIT_LOG] ⚠️ No local WebSocket and no Redis for '{username}' - message may be lost")
+
+    # Yield to event loop to allow message delivery
+    await asyncio.sleep(0)
 
 # Stripe setup
 STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
@@ -4081,32 +4091,43 @@ async def init_redis_pubsub():
     return False
 
 async def redis_audit_subscriber():
-    """Subscribe to audit log messages and deliver to local WebSockets."""
+    """Subscribe to audit log messages and deliver to local WebSockets (for cross-worker messaging)."""
     global redis_pubsub_client
     if not redis_pubsub_client:
         return
-    
+
     try:
         pubsub = redis_pubsub_client.pubsub()
         await pubsub.subscribe("audit_log_broadcast")
         logger.info("[REDIS] 📡 Subscribed to audit_log_broadcast channel")
-        
+
         async for message in pubsub.listen():
             if message["type"] == "message":
                 try:
                     data = json.loads(message["data"])
                     username = data.get("username")
                     msg = data.get("message")
-                    
-                    # Check if THIS worker has the WebSocket for this user
+                    source_worker = data.get("source_worker")
+
+                    # Skip if this message came from THIS worker (already delivered locally)
+                    if source_worker == WORKER_ID:
+                        logger.debug(f"[REDIS_SUB] Skipping own message for '{username}': {msg}")
+                        continue
+
+                    # Deliver to WebSocket if on THIS worker
                     ws = active_audit_websockets.get(username)
                     if ws and ws.application_state == WebSocketState.CONNECTED:
                         await ws.send_json({"type": "audit_log", "message": msg})
-                        logger.info(f"[REDIS_SUB] ✅ Delivered to {username}: {msg}")
+                        logger.info(f"[REDIS_SUB] ✅ Delivered to '{username}': {msg}")
                 except Exception as e:
                     logger.error(f"[REDIS_SUB] Message handling error: {e}")
+    except asyncio.CancelledError:
+        logger.info("[REDIS] Subscriber cancelled")
     except Exception as e:
         logger.error(f"[REDIS] Subscriber error: {e}")
+        # Try to restart subscriber after a delay
+        await asyncio.sleep(5)
+        asyncio.create_task(redis_audit_subscriber())
 
 # FIXED: Added stub for x_semantic_search to prevent NameError
 from typing import Optional, List
