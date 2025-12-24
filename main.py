@@ -2300,10 +2300,10 @@ STRIPE_METERED_PRICE_DIAMOND = stripe_metered_price_diamond
 # ============================================================================
 # TIER LIMITS AND MAPPING
 # ============================================================================
-FREE_LIMIT = 3
-STARTER_LIMIT = 50  # Changed from BEGINNER_LIMIT = 10
-PRO_LIMIT = 9999
-ENTERPRISE_LIMIT = 9999  # New tier
+FREE_LIMIT = 1       # 1 audit/month - prove value, drive upgrade
+STARTER_LIMIT = 25   # Developer tier: 25 audits/month
+PRO_LIMIT = 9999     # Team tier: Unlimited
+ENTERPRISE_LIMIT = 9999  # Enterprise: Unlimited
 
 # Support both old and new tier names for backward compatibility
 level_map = {
@@ -2597,10 +2597,10 @@ FREE TIER:
 - For each issue: type, severity, 2-3 sentence description
 - NO fix recommendations (upgrade required)
 - Calculate exact counts: critical_count, high_count, medium_count, low_count
-- Set upgrade_prompt: "⚠️ [X] critical and [Y] high-severity issues detected. [Z] total issues found. Upgrade to Starter ($29/mo) to get fix recommendations and see all issues."
+- Set upgrade_prompt: "⚠️ [X] critical and [Y] high-severity issues detected. [Z] total issues found. Upgrade to Developer ($59/mo) to get AI-powered fix recommendations and see all vulnerabilities."
 - Executive summary under 100 words focusing on most critical risk
 
-STARTER TIER ($29/mo):
+DEVELOPER PLAN ($59/mo):
 - Full executive summary (2-3 paragraphs with regulatory context)
 - ALL issues with: type, severity, detailed description (4-5 sentences), basic fix
 - Fix recommendations must be SPECIFIC and ACTIONABLE:
@@ -2632,7 +2632,7 @@ STARTER TIER ($29/mo):
 - Basic MiCA/SEC compliance analysis (high-level only)
 - NO line numbers, code snippets, or PoC exploits (Pro+ features)
 
-PRO TIER ($149/mo):
+TEAM PLAN ($199/mo):
 - Everything in Starter PLUS:
 - MANDATORY FOR EVERY ISSUE - ALL fields required:
   * line_number: INTEGER - Exact line number (1-indexed) where vulnerability exists
@@ -2666,7 +2666,7 @@ PRO TIER ($149/mo):
   * Testing strategy (unit tests, integration tests, fuzz tests)
   * External audit recommendations
 
-ENTERPRISE TIER ($499/mo):
+ENTERPRISE PLAN ($799/mo):
 - Everything in Pro PLUS:
 - PROOF OF CONCEPT (PoC) for EVERY Critical/High issue:
   * proof_of_concept: STRING - Complete, runnable exploit code (Solidity or JavaScript)
@@ -3000,7 +3000,7 @@ class UsageTracker:
                 overage_cost = self.calculate_diamond_overage(file_size) / 100
                 raise HTTPException(
                     status_code=400,
-                    detail=f"File size exceeds tier limit. Upgrade to Pro ($149/mo) or Enterprise ($499/mo) for larger files."
+                    detail=f"File size exceeds tier limit. Upgrade to Team ($199/mo) or Enterprise ($799/mo) for larger files."
                 )
             
             self.count += 1
@@ -3413,7 +3413,7 @@ def filter_issues_for_free_tier(report: dict[str, Any], tier: str) -> dict[str, 
     filtered_report["issues"] = top_3
     filtered_report["upgrade_message"] = (
         f"🔒 {hidden_count} more issue{'s' if hidden_count > 1 else ''} hidden. "
-        f"Upgrade to Starter ($29/mo) to see all vulnerabilities."
+        f"Upgrade to Developer ($59/mo) to see all vulnerabilities and get AI-powered fixes."
     )
     filtered_report["watermark"] = "FREE TIER - Upgrade for full analysis"
     
@@ -5241,7 +5241,7 @@ async def refer(request: Request, link: str = Query(...), db: Session = Depends(
 async def upgrade_page():
     try:
         logger.debug("Upgrade page accessed")
-        return {"message": "Upgrade at /ui for Starter ($29/mo), Pro ($149/mo), or Enterprise ($499/mo)."}
+        return {"message": "Upgrade at /ui for Developer ($59/mo), Team ($199/mo), or Enterprise ($799/mo)."}
     except Exception as e:
         logger.error(f"Upgrade page error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
