@@ -954,13 +954,54 @@ section h4 {
     border-left: 3px solid var(--accent-teal);
 }
 
-.pricing-table .popular-tier td:first-child::after {
-    content: ' POPULAR';
+/* Pricing badges */
+.pricing-badge {
     display: block;
     font-size: var(--text-xs);
-    color: var(--accent-teal);
     font-weight: 600;
     margin-top: var(--space-1);
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+.pricing-badge.popular { color: var(--accent-teal); }
+.pricing-badge.value { color: var(--warning-color); }
+.pricing-badge.enterprise { color: var(--info-color); }
+
+/* Pricing amounts */
+.pricing-amount {
+    font-size: var(--text-lg);
+    font-weight: 700;
+}
+
+.pricing-annual {
+    display: block;
+    font-size: var(--text-xs);
+    color: var(--text-tertiary);
+    margin-top: var(--space-1);
+}
+
+.pricing-limit {
+    display: block;
+    font-size: var(--text-xs);
+    color: var(--text-tertiary);
+    margin-top: var(--space-2);
+}
+
+/* Responsive pricing adjustments */
+@media (max-width: 640px) {
+    .pricing-amount {
+        font-size: var(--text-base);
+    }
+
+    .pricing-badge {
+        font-size: 0.65em;
+    }
+
+    .pricing-annual,
+    .pricing-limit {
+        font-size: 0.7em;
+    }
 }
 
 /* ============================================================================
@@ -2863,12 +2904,27 @@ footer a:hover {
     }
 
     .pricing-table {
-        font-size: var(--text-sm);
+        font-size: var(--text-xs);
+        display: block;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
     }
 
     .pricing-table th,
     .pricing-table td {
-        padding: var(--space-4);
+        padding: var(--space-3);
+        min-width: 120px;
+    }
+
+    /* Hide "Best For" column on mobile for cleaner display */
+    .pricing-table th:nth-child(4),
+    .pricing-table td:nth-child(4) {
+        display: none;
+    }
+
+    /* Ensure pricing text scales properly on mobile */
+    .pricing-table td strong {
+        font-size: var(--text-base) !important;
     }
 
     .hamburger {
