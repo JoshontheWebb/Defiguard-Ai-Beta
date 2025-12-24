@@ -88,9 +88,21 @@
 </head>
 <body>
     <div class="auth-container" role="region" aria-label="Authentication options">
+        <!-- Email verification message (shown when redirected after sign-up) -->
+        <div id="verify-email-message" style="display: none; background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(6, 182, 212, 0.1)); border: 1px solid var(--accent-teal); border-radius: var(--radius-lg); padding: var(--space-4); margin-bottom: var(--space-4);">
+            <h2 style="color: var(--accent-teal); margin-bottom: var(--space-2);">📧 Check Your Email</h2>
+            <p style="color: var(--text-secondary); margin-bottom: var(--space-2);">We've sent a verification link to your email address.</p>
+            <p style="color: var(--text-tertiary); font-size: 0.9rem;">Click the link in the email to verify your account, then come back and sign in.</p>
+        </div>
+
+        <!-- Error message -->
+        <div id="error-message" style="display: none; background: rgba(239, 68, 68, 0.1); border: 1px solid var(--accent-red); border-radius: var(--radius-lg); padding: var(--space-4); margin-bottom: var(--space-4);">
+            <p style="color: var(--accent-red);" id="error-text">An error occurred. Please try again.</p>
+        </div>
+
         <h1>🛡️ Welcome to DeFiGuard AI</h1>
         <p>Secure authentication via Auth0</p>
-        
+
         <div class="auth-buttons">
             <form action="/login" method="GET">
                 <button type="submit" class="cta-button">
@@ -110,5 +122,26 @@
             ← Back to Home
         </a>
     </div>
+
+    <script>
+        // Check URL parameters for messages
+        const urlParams = new URLSearchParams(window.location.search);
+
+        if (urlParams.get('verify_email') === 'true') {
+            document.getElementById('verify-email-message').style.display = 'block';
+        }
+
+        if (urlParams.get('error')) {
+            const errorDiv = document.getElementById('error-message');
+            const errorText = document.getElementById('error-text');
+            errorDiv.style.display = 'block';
+
+            const errorMessages = {
+                'no_email': 'Unable to retrieve email from your account. Please try again.',
+                'auth_failed': 'Authentication failed. Please try again.'
+            };
+            errorText.textContent = errorMessages[urlParams.get('error')] || 'An error occurred. Please try again.';
+        }
+    </script>
 </body>
 </html>
