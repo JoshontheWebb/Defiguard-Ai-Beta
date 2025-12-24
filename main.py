@@ -740,11 +740,34 @@ async def get_authenticated_user(request: Request, db: Session = Depends(get_db)
         user = db.query(User).filter(User.auth0_sub == auth0_sub).first()
         if user:
             return user
-        
+
+        # Check if user exists with same email (different auth provider)
+        email = auth0_user.get("email", "")
+        if email:
+            existing_user = db.query(User).filter(User.email == email).first()
+            if existing_user:
+                # Link this auth0_sub to existing account
+                logger.info(f"[AUTH] Linking new auth0_sub {auth0_sub} to existing user {existing_user.username}")
+                existing_user.auth0_sub = auth0_sub
+                db.commit()
+                return existing_user
+
         # Auto-create user on first Auth0 login
+        base_username = auth0_user.get("nickname") or auth0_user.get("email", "auth0_user").split("@")[0]
+        username = base_username
+
+        # Handle username collision by appending number
+        counter = 1
+        while db.query(User).filter(User.username == username).first():
+            username = f"{base_username}_{counter}"
+            counter += 1
+            if counter > 100:  # Safety limit
+                username = f"{base_username}_{auth0_sub[-8:]}"
+                break
+
         new_user = User(
-            username=auth0_user.get("nickname") or auth0_user.get("email", "auth0_user").split("@")[0],
-            email=auth0_user.get("email", ""),
+            username=username,
+            email=email,
             auth0_sub=auth0_sub,
             tier="free",
         )
