@@ -2764,7 +2764,7 @@ class UsageTracker:
         
         # NEW: Updated size limits for new tier structure
         self.size_limits = {
-            "free": 500 * 1024,              # 500KB (reduced from 1MB)
+            "free": 250 * 1024,              # 250KB - tight limit to encourage upgrades
             "starter": 1024 * 1024,          # 1MB
             "beginner": 1024 * 1024,         # Legacy support
             "pro": 5 * 1024 * 1024,          # 5MB (increased)
@@ -4397,7 +4397,7 @@ async def get_tier(request: Request, username: str = Query(None), db: Session = 
         logger.debug("No username provided for /tier; returning free tier defaults")
         return {
             "tier": "free",
-            "size_limit": "500KB",
+            "size_limit": "250KB",
             "feature_flags": usage_tracker.feature_flags["free"],
             "api_key": None,
             "audit_count": usage_tracker.count,
@@ -4415,14 +4415,14 @@ async def get_tier(request: Request, username: str = Query(None), db: Session = 
     
     # Map size limits based on tier
     size_limit_map = {
-        "free": "500KB",
+        "free": "250KB",
         "starter": "1MB",
         "beginner": "1MB",  # Legacy
         "pro": "5MB",
         "enterprise": "Unlimited",
         "diamond": "Unlimited"  # Legacy
     }
-    size_limit = size_limit_map.get(user_tier, "500KB")
+    size_limit = size_limit_map.get(user_tier, "250KB")
     
     feature_flags = usage_tracker.feature_flags.get(user_tier, usage_tracker.feature_flags["free"])
     api_key = user.api_key if user.tier in ["pro", "enterprise"] else None
@@ -5545,7 +5545,7 @@ async def submit_audit_to_queue(
         raise HTTPException(status_code=400, detail="Empty file uploaded")
     
     # Check file size limits
-    size_limit = usage_tracker.size_limits.get(tier, 500 * 1024)
+    size_limit = usage_tracker.size_limits.get(tier, 250 * 1024)
     if file_size > size_limit and tier not in ["enterprise", "diamond"]:
         raise HTTPException(
             status_code=400,
@@ -5746,7 +5746,7 @@ async def audit_contract(
             raise HTTPException(status_code=500, detail="Failed to save temporary file due to permissions")
         
         # Diamond large file redirect
-        if file_size > usage_tracker.size_limits.get(current_tier, 500 * 1024) and not has_diamond:
+        if file_size > usage_tracker.size_limits.get(current_tier, 250 * 1024) and not has_diamond:
             overage_cost = usage_tracker.calculate_diamond_overage(file_size) / 100
             
             if not STRIPE_API_KEY:
@@ -5794,7 +5794,7 @@ async def audit_contract(
             raise HTTPException(status_code=403, detail=f"Usage limit exceeded for {current_tier} tier. Limit is {current_limit}. Upgrade tier.")
         
         # Check file size limit (but don't increment count yet)
-        size_limit = usage_tracker.size_limits.get(current_tier, 500 * 1024)
+        size_limit = usage_tracker.size_limits.get(current_tier, 250 * 1024)
         if file_size > size_limit and not has_diamond_flag and current_tier not in ["enterprise", "diamond"]:
             raise HTTPException(status_code=400, detail=f"File size exceeds {current_tier} tier limit. Upgrade to continue.")
         
@@ -5802,7 +5802,7 @@ async def audit_contract(
     
     except HTTPException as e:
         # Handle size/usage limit redirects
-        if file_size > usage_tracker.size_limits.get(current_tier, 500 * 1024) and not has_diamond_flag:
+        if file_size > usage_tracker.size_limits.get(current_tier, 250 * 1024) and not has_diamond_flag:
             logger.info(f"File size exceeds limit for {effective_username}; redirecting to upgrade")
             
             if not temp_path:

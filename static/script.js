@@ -1679,7 +1679,7 @@ document.addEventListener("DOMContentLoaded", () => {
           } else if (tier === "starter") {
             featuresList.push("50 audits/month", "1MB file uploads", "Full analysis", "Fix recommendations");
           } else {
-            featuresList.push("3 free audits", "500KB files", "Critical issues only");
+            featuresList.push("3 free audits", "250KB files", "Critical issues only");
           }
           
           sidebarTierFeatures.innerHTML = featuresList
@@ -1694,7 +1694,7 @@ document.addEventListener("DOMContentLoaded", () => {
               ? "Unlimited audits, 5MB files, API access, fuzzing, priority support"
               : tier === "starter"
               ? `50 audits/month, 1MB file size (${auditCount}/${auditLimit} remaining)`
-              : `3 free audits, 500KB files (${auditCount}/${auditLimit} remaining)`
+              : `3 free audits, 250KB files (${auditCount}/${auditLimit} remaining)`
           }`;
           
           sizeLimit.textContent = `Max file size: ${size_limit}`;
