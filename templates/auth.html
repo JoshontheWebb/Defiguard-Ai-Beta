@@ -118,9 +118,7 @@
             </form>
         </div>
 
-        <a href="/ui" class="back-link">
-            ← Back to Home
-        </a>
+        <!-- Removed "Back to Home" link - users must authenticate -->
     </div>
 
     <script>
@@ -138,10 +136,19 @@
 
             const errorMessages = {
                 'no_email': 'Unable to retrieve email from your account. Please try again.',
-                'auth_failed': 'Authentication failed. Please try again.'
+                'auth_failed': 'Authentication failed. Please try again.',
+                'auth_not_configured': 'Authentication service not configured. Contact support.',
+                'login_failed': 'Unable to connect to authentication service. Please try again.'
             };
             errorText.textContent = errorMessages[urlParams.get('error')] || 'An error occurred. Please try again.';
         }
+
+        // Debug: Log form submissions
+        document.querySelectorAll('form').forEach(form => {
+            form.addEventListener('submit', (e) => {
+                console.log('[AUTH] Form submitting to:', form.action);
+            });
+        });
     </script>
 </body>
 </html>

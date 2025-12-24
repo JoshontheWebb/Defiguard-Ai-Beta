@@ -513,21 +513,32 @@ async def debug_files(admin_key: str = Query(None)):
 
 @app.get("/login")
 async def login(request: Request, screen_hint: Optional[str] = None):
-    if not AUTH0_DOMAIN:
-        return HTMLResponse("Auth0 not configured – <a href='/ui'>continue locally</a>")
-    redirect_uri = request.url_for("callback")
-    response = await oauth.auth0.authorize_redirect(request, redirect_uri)
-    if screen_hint:
-        from urllib.parse import urlparse, parse_qs, urlencode
-        location = response.headers["Location"]
-        parsed = urlparse(location)
-        params = parse_qs(parsed.query)
-        params["screen_hint"] = [screen_hint]
-        new_query = urlencode(params, doseq=True)
-        new_location = parsed._replace(query=new_query).geturl()
-        response.headers["Location"] = new_location
-    logger.info(f"Redirecting to Auth0 for login, screen_hint={screen_hint}")
-    return response
+    try:
+        if not AUTH0_DOMAIN:
+            logger.error("[LOGIN] AUTH0_DOMAIN not configured")
+            return RedirectResponse(url="/auth?error=auth_not_configured")
+
+        redirect_uri = request.url_for("callback")
+        logger.info(f"[LOGIN] Initiating Auth0 redirect, callback={redirect_uri}, screen_hint={screen_hint}")
+
+        response = await oauth.auth0.authorize_redirect(request, redirect_uri)
+
+        if screen_hint:
+            from urllib.parse import urlparse, parse_qs, urlencode
+            location = response.headers["Location"]
+            parsed = urlparse(location)
+            params = parse_qs(parsed.query)
+            params["screen_hint"] = [screen_hint]
+            new_query = urlencode(params, doseq=True)
+            new_location = parsed._replace(query=new_query).geturl()
+            response.headers["Location"] = new_location
+
+        logger.info(f"[LOGIN] Redirecting to Auth0: {response.headers.get('Location', 'NO_LOCATION')[:100]}...")
+        return response
+
+    except Exception as e:
+        logger.error(f"[LOGIN] Failed to redirect to Auth0: {e}")
+        return RedirectResponse(url=f"/auth?error=login_failed")
 
 @app.get("/logout")
 async def logout(request: Request):
@@ -740,11 +751,34 @@ async def get_authenticated_user(request: Request, db: Session = Depends(get_db)
         user = db.query(User).filter(User.auth0_sub == auth0_sub).first()
         if user:
             return user
-        
+
+        # Check if user exists with same email (different auth provider)
+        email = auth0_user.get("email", "")
+        if email:
+            existing_user = db.query(User).filter(User.email == email).first()
+            if existing_user:
+                # Link this auth0_sub to existing account
+                logger.info(f"[AUTH] Linking new auth0_sub {auth0_sub} to existing user {existing_user.username}")
+                existing_user.auth0_sub = auth0_sub
+                db.commit()
+                return existing_user
+
         # Auto-create user on first Auth0 login
+        base_username = auth0_user.get("nickname") or auth0_user.get("email", "auth0_user").split("@")[0]
+        username = base_username
+
+        # Handle username collision by appending number
+        counter = 1
+        while db.query(User).filter(User.username == username).first():
+            username = f"{base_username}_{counter}"
+            counter += 1
+            if counter > 100:  # Safety limit
+                username = f"{base_username}_{auth0_sub[-8:]}"
+                break
+
         new_user = User(
-            username=auth0_user.get("nickname") or auth0_user.get("email", "auth0_user").split("@")[0],
-            email=auth0_user.get("email", ""),
+            username=username,
+            email=email,
             auth0_sub=auth0_sub,
             tier="free",
         )
@@ -985,23 +1019,11 @@ async def callback(request: Request):
         return RedirectResponse(url="/ui")
 
 @app.get("/me")
-async def me_endpoint(request: Request, db: Session = Depends(get_db)):
-    """Get current user info. Never cached - always requires fresh session validation."""
-    from fastapi.responses import JSONResponse
-
+async def me_endpoint(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
         user = await get_authenticated_user(request, db)
         if not user:
-            # Return 401 with no-cache headers
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Not authenticated"},
-                headers={
-                    "Cache-Control": "no-store, no-cache, must-revalidate, private",
-                    "Pragma": "no-cache",
-                    "Expires": "0"
-                }
-            )
+            raise HTTPException(status_code=401, detail="Not authenticated")
 
         # Periodically verify tier with Stripe (only if persistence enabled)
         if ENABLE_TIER_PERSISTENCE and user.stripe_customer_id:
@@ -1012,22 +1034,14 @@ async def me_endpoint(request: Request, db: Session = Depends(get_db)):
             ui = request.session['userinfo']
             provider = ui.get('identities', [{}])[0].get('provider', 'unknown') if ui.get('identities') else 'unknown'
 
-        # Return user data with no-cache headers to prevent CDN caching
-        return JSONResponse(
-            content={
-                "sub": user.auth0_sub,
-                "email": user.email,
-                "username": user.username,
-                "provider": user.auth0_sub.split("|")[0] if user.auth0_sub and "|" in user.auth0_sub else "auth0",
-                "logged_in": True,
-                "tier": user.tier
-            },
-            headers={
-                "Cache-Control": "no-store, no-cache, must-revalidate, private",
-                "Pragma": "no-cache",
-                "Expires": "0"
-            }
-        )
+        return {
+            "sub": user.auth0_sub,
+            "email": user.email,
+            "username": user.username,
+            "provider": user.auth0_sub.split("|")[0] if user.auth0_sub and "|" in user.auth0_sub else "auth0",
+            "logged_in": True,
+            "tier": user.tier
+        }
     except HTTPException:
         raise
     except Exception as e:
