@@ -973,11 +973,23 @@ async def callback(request: Request):
         return RedirectResponse(url="/ui")
 
 @app.get("/me")
-async def me_endpoint(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+async def me_endpoint(request: Request, db: Session = Depends(get_db)):
+    """Get current user info. Never cached - always requires fresh session validation."""
+    from fastapi.responses import JSONResponse
+
     try:
         user = await get_authenticated_user(request, db)
         if not user:
-            raise HTTPException(status_code=401, detail="Not authenticated")
+            # Return 401 with no-cache headers
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Not authenticated"},
+                headers={
+                    "Cache-Control": "no-store, no-cache, must-revalidate, private",
+                    "Pragma": "no-cache",
+                    "Expires": "0"
+                }
+            )
 
         # Periodically verify tier with Stripe (only if persistence enabled)
         if ENABLE_TIER_PERSISTENCE and user.stripe_customer_id:
@@ -987,15 +999,23 @@ async def me_endpoint(request: Request, db: Session = Depends(get_db)) -> dict[s
         if provider == 'unknown' and 'userinfo' in request.session:
             ui = request.session['userinfo']
             provider = ui.get('identities', [{}])[0].get('provider', 'unknown') if ui.get('identities') else 'unknown'
-        
-        return {
-            "sub": user.auth0_sub,
-            "email": user.email,
-            "username": user.username,
-            "provider": user.auth0_sub.split("|")[0] if user.auth0_sub and "|" in user.auth0_sub else "auth0",
-            "logged_in": True,
-            "tier": user.tier
-        }
+
+        # Return user data with no-cache headers to prevent CDN caching
+        return JSONResponse(
+            content={
+                "sub": user.auth0_sub,
+                "email": user.email,
+                "username": user.username,
+                "provider": user.auth0_sub.split("|")[0] if user.auth0_sub and "|" in user.auth0_sub else "auth0",
+                "logged_in": True,
+                "tier": user.tier
+            },
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, private",
+                "Pragma": "no-cache",
+                "Expires": "0"
+            }
+        )
     except HTTPException:
         raise
     except Exception as e:
