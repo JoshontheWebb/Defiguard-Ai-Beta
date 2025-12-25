@@ -2251,61 +2251,29 @@ APP_BASE_URL = os.getenv("APP_BASE_URL", "https://defiguard-ai-beta.onrender.com
 # Env fallback: Parse prices.txt if env missing
 import csv
 
-# NEW TIER PRICES (Primary)
-stripe_price_starter = os.getenv("STRIPE_PRICE_STARTER")
-if not stripe_price_starter:
-    stripe_price_starter = "price_1SbnJ0EqXlKjClpj2CDRYguO"  # Default
-STRIPE_PRICE_STARTER = stripe_price_starter
+# ============================================================================
+# STRIPE PRICE IDS (Required environment variables - no hardcoded fallbacks)
+# ============================================================================
+STRIPE_PRICE_STARTER = os.getenv("STRIPE_PRICE_STARTER")
+STRIPE_PRICE_PRO = os.getenv("STRIPE_PRICE_PRO")
+STRIPE_PRICE_ENTERPRISE = os.getenv("STRIPE_PRICE_ENTERPRISE")
 
-stripe_price_pro = os.getenv("STRIPE_PRICE_PRO")
-if not stripe_price_pro:
-    stripe_price_pro = "price_1SbnM2EqXlKjClpjt9DeOFQw"  # Default  
-STRIPE_PRICE_PRO = stripe_price_pro
+# Legacy tier support (optional - only needed if supporting old subscriptions)
+STRIPE_PRICE_BEGINNER = os.getenv("STRIPE_PRICE_BEGINNER")  # Maps to starter
+STRIPE_PRICE_DIAMOND = os.getenv("STRIPE_PRICE_DIAMOND")    # Diamond add-on
+STRIPE_METERED_PRICE_DIAMOND = os.getenv("STRIPE_METERED_PRICE_DIAMOND")  # Metered billing
 
-stripe_price_enterprise = os.getenv("STRIPE_PRICE_ENTERPRISE")
-if not stripe_price_enterprise:
-    stripe_price_enterprise = "price_1SbnNTEqXlKjClpjDYVndZ98"  # Default
-STRIPE_PRICE_ENTERPRISE = stripe_price_enterprise
+# Log warnings for missing required price IDs
+_missing_prices = []
+if not STRIPE_PRICE_STARTER:
+    _missing_prices.append("STRIPE_PRICE_STARTER")
+if not STRIPE_PRICE_PRO:
+    _missing_prices.append("STRIPE_PRICE_PRO")
+if not STRIPE_PRICE_ENTERPRISE:
+    _missing_prices.append("STRIPE_PRICE_ENTERPRISE")
 
-# LEGACY PRICES (For backward compatibility)
-stripe_price_beginner = os.getenv("STRIPE_PRICE_BEGINNER")
-if not stripe_price_beginner:
-    try:
-        with open('prices.txt') as f:
-            reader = csv.reader(f)
-            next(reader)
-            for row in reader:
-                if row[2] == "DeFiGuard Beginner Tier":
-                    stripe_price_beginner = row[0]
-    except FileNotFoundError:
-        stripe_price_beginner = "price_1SFoJGEqXlKjClpjj2RZ10bf"
-STRIPE_PRICE_BEGINNER = stripe_price_beginner
-
-stripe_price_diamond = os.getenv("STRIPE_PRICE_DIAMOND")
-if not stripe_price_diamond:
-    try:
-        with open('prices.txt') as f:
-            reader = csv.reader(f)
-            next(reader)
-            for row in reader:
-                if row[2] == "DeFiGuard Diamond Tier":
-                    stripe_price_diamond = row[0]
-    except FileNotFoundError:
-        stripe_price_diamond = "price_1SFoVMEqXlKjClpjTyRtHJcD"
-STRIPE_PRICE_DIAMOND = stripe_price_diamond
-
-stripe_metered_price_diamond = os.getenv("STRIPE_METERED_PRICE_DIAMOND")
-if not stripe_metered_price_diamond:
-    try:
-        with open('prices.txt') as f:
-            reader = csv.reader(f)
-            next(reader)
-            for row in reader:
-                if row[2] == "DeFiGuard Metered Diamond":
-                    stripe_metered_price_diamond = row[0]
-    except FileNotFoundError:
-        stripe_metered_price_diamond = "price_1SFpPTEqXlKjClpjeGFNYSgF"
-STRIPE_METERED_PRICE_DIAMOND = stripe_metered_price_diamond
+if _missing_prices:
+    logger.warning(f"[STRIPE] Missing price IDs (checkout will fail): {', '.join(_missing_prices)}")
 
 # ============================================================================
 # TIER LIMITS AND MAPPING
