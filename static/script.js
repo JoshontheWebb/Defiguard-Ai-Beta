@@ -1681,7 +1681,8 @@ document.addEventListener("DOMContentLoaded", () => {
           if (tier === "enterprise") {
             featuresList.push(
               "Unlimited audits & file size",
-              "Slither + Mythril + Echidna + Certora",
+              "Slither + Mythril + Echidna",
+              "Formal Verification (Coming Soon)",
               "Multi-AI consensus verification",
               "White-label reports",
               "Unlimited API keys",
@@ -1722,7 +1723,7 @@ document.addEventListener("DOMContentLoaded", () => {
           // Update main tier description with professional copy
           tierDescription.textContent = `${displayName} Plan: ${
             tier === "enterprise"
-              ? "Protocol-grade security with Slither, Mythril, Echidna & Certora. White-label reports, unlimited API, dedicated support."
+              ? "Protocol-grade security with Slither, Mythril & Echidna. Formal Verification coming soon. White-label reports, unlimited API, dedicated support."
               : tier === "pro"
               ? "Unlimited audits with full security stack. Fuzzing, on-chain analysis, API access, priority support."
               : tier === "starter"
