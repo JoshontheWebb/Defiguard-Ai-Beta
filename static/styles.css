@@ -3944,6 +3944,125 @@ a:focus-visible {
 }
 
 /* ============================================================================
+   CERTORA FORMAL VERIFICATION CARD STYLES
+   ============================================================================ */
+
+.certora-placeholder {
+    margin-top: var(--space-4);
+}
+
+.certora-results-card {
+    background: var(--glass-bg);
+    backdrop-filter: blur(10px);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-5);
+    margin-top: var(--space-4);
+}
+
+.certora-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: var(--space-4);
+    margin-bottom: var(--space-4);
+    border-bottom: 1px solid var(--glass-border);
+}
+
+.certora-header.success { border-bottom-color: var(--success); }
+.certora-header.warning { border-bottom-color: var(--warning); }
+.certora-header.info { border-bottom-color: var(--accent-teal); }
+
+.certora-status {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+}
+
+.certora-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-4);
+    margin-bottom: var(--space-5);
+}
+
+@media (max-width: 768px) {
+    .certora-stats-grid { grid-template-columns: repeat(3, 1fr); }
+}
+
+.certora-stat {
+    text-align: center;
+    padding: var(--space-4);
+    background: var(--bg-secondary);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--glass-border);
+}
+
+.certora-stat.verified .stat-value { color: var(--success); }
+.certora-stat.violated .stat-value { color: var(--error); }
+.certora-stat.skipped .stat-value { color: var(--text-tertiary); }
+
+.certora-stat .stat-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: var(--space-1);
+}
+
+.certora-stat .stat-label {
+    font-size: var(--text-xs);
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.certora-rules-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+
+.certora-rule {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    background: var(--bg-secondary);
+    border-radius: var(--radius-md);
+    border-left: 3px solid var(--glass-border);
+}
+
+.certora-rule.verified { border-left-color: var(--success); }
+.certora-rule.violated { border-left-color: var(--error); }
+.certora-rule.skipped { border-left-color: var(--text-tertiary); }
+
+.certora-rule .rule-icon {
+    font-size: 1.2rem;
+    flex-shrink: 0;
+}
+
+.certora-rule .rule-info {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+}
+
+.certora-rule .rule-name {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.certora-rule .rule-description {
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+}
+
+.certora-empty {
+    text-align: center;
+    padding: var(--space-6);
+    color: var(--text-tertiary);
+}
+
+/* ============================================================================
    AUDIT QUEUE STATUS UI - Phase 1 Scaling
    ============================================================================ */
 

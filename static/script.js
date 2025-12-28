@@ -231,7 +231,8 @@ class AuditQueueTracker {
             'slither': { icon: '🔍', label: 'Running Slither Analysis', progress: 10 },
             'mythril': { icon: '🧠', label: 'Running Mythril Symbolic Analysis', progress: 25 },
             'echidna': { icon: '🧪', label: 'Running Echidna Fuzzing', progress: 40 },
-            'grok': { icon: '🤖', label: 'Claude AI Analysis & Report Generation', progress: 60 },
+            'certora': { icon: '🔒', label: 'Running Formal Verification', progress: 55 },
+            'grok': { icon: '🤖', label: 'Claude AI Analysis & Report Generation', progress: 65 },
             'finalizing': { icon: '✨', label: 'Finalizing Report', progress: 90 },
             'complete': { icon: '✅', label: 'Complete!', progress: 100 }
         };
@@ -2751,7 +2752,76 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
         };
         
         fuzzingList.innerHTML = renderFuzzingResults(report.fuzzing_results);
-        
+
+        // Certora formal verification results renderer
+        const renderCertoraResults = (certoraResults) => {
+          if (!certoraResults || certoraResults.length === 0) {
+            return `<div class="certora-empty"><p>🔒 No formal verification results available.</p></div>`;
+          }
+
+          const verified = certoraResults.filter(r => r.status === 'verified').length;
+          const violated = certoraResults.filter(r => r.status === 'violated').length;
+          const skipped = certoraResults.filter(r => r.status === 'skipped').length;
+          const errors = certoraResults.filter(r => r.status === 'error').length;
+
+          const overallStatus = violated > 0 ? 'warning' : verified > 0 ? 'success' : 'info';
+          const statusIcon = violated > 0 ? '⚠️' : verified > 0 ? '✅' : '🔒';
+
+          let html = `
+            <div class="certora-results-card">
+              <div class="certora-header ${overallStatus}">
+                <div class="certora-status">
+                  <span class="status-icon">${statusIcon}</span>
+                  <span class="status-text">Formal Verification ${violated > 0 ? 'Found Issues' : 'Complete'}</span>
+                </div>
+              </div>
+
+              <div class="certora-stats-grid">
+                <div class="certora-stat verified">
+                  <div class="stat-value">${verified}</div>
+                  <div class="stat-label">Verified</div>
+                </div>
+                <div class="certora-stat violated">
+                  <div class="stat-value">${violated}</div>
+                  <div class="stat-label">Violations</div>
+                </div>
+                <div class="certora-stat skipped">
+                  <div class="stat-value">${skipped + errors}</div>
+                  <div class="stat-label">Skipped/Errors</div>
+                </div>
+              </div>
+
+              <div class="certora-rules-list">
+          `;
+
+          certoraResults.forEach(result => {
+            const ruleIcon = result.status === 'verified' ? '✅' :
+                            result.status === 'violated' ? '❌' :
+                            result.status === 'skipped' ? '⏭️' : '⚠️';
+            const ruleClass = result.status === 'verified' ? 'verified' :
+                             result.status === 'violated' ? 'violated' : 'skipped';
+
+            html += `
+              <div class="certora-rule ${ruleClass}">
+                <span class="rule-icon">${ruleIcon}</span>
+                <div class="rule-info">
+                  <span class="rule-name">${escapeHtml(result.rule || 'Unknown rule')}</span>
+                  <span class="rule-description">${escapeHtml(result.description || result.reason || '')}</span>
+                </div>
+              </div>
+            `;
+          });
+
+          html += `</div></div>`;
+          return html;
+        };
+
+        // Render Certora results (Enterprise only)
+        const certoraList = document.getElementById("certora-list");
+        if (certoraList && report.certora_results) {
+          certoraList.innerHTML = renderCertoraResults(report.certora_results);
+        }
+
         // CODE QUALITY METRICS (if available)
         const codeQualityEl = document.getElementById("code-quality-metrics");
         if (codeQualityEl && report.code_quality_metrics) {
