@@ -2,6 +2,7 @@
 FROM ghcr.io/crytic/echidna/echidna:latest
 
 # Install Python 3.12 (available in Ubuntu 24.04) and system dependencies
+# Including JDK 21 for Certora Prover
 RUN apt-get update && \
     apt-get install -y \
         python3.12 \
@@ -10,7 +11,8 @@ RUN apt-get update && \
         libssl-dev \
         libffi-dev \
         build-essential \
-        git && \
+        git \
+        openjdk-21-jdk && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -26,6 +28,9 @@ RUN pip3 install --break-system-packages --no-cache-dir -r requirements.txt
 
 # Install Mythril
 RUN pip3 install --break-system-packages mythril
+
+# Install Certora CLI for formal verification
+RUN pip3 install --break-system-packages certora-cli
 
 # Copy application code
 COPY . .
@@ -44,6 +49,7 @@ RUN echo "========== Tool Verification ==========" && \
     myth version && \
     python3 --version && \
     solc --version && \
+    certoraRun --version && \
     echo "========== All Tools Ready ==========="
 
 # Expose port for FastAPI
