@@ -2414,6 +2414,18 @@ AUDIT_SCHEMA: dict[str, Any] = {
                 },
                 "required": ["vulnerability", "description"]
             }
+        },
+        "certora_results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "rule": {"type": "string"},
+                    "status": {"type": "string"},
+                    "description": {"type": "string"}
+                },
+                "required": ["rule", "status"]
+            }
         }
     },
     "required": ["risk_score", "issues", "executive_summary"]
@@ -2434,6 +2446,7 @@ TIER: {tier}
 CONTRACT TYPE: {contract_type}
 STATIC ANALYSIS CONTEXT: {context}
 FUZZING RESULTS: {fuzzing_results}
+FORMAL VERIFICATION: {certora_results}
 COMPLIANCE PRE-SCAN: {compliance_scan}
 ═══════════════════════════════════════════════════════════════════
 
@@ -5354,10 +5367,77 @@ async def get_facets(contract_address: str, request: Request, username: str = Qu
 
 ## Section 4.6 Main Audit Endpoint
 
-def run_certora(temp_path: str) -> list[dict[str, str]]:
-    """Minimal typed stub for Certora invocation"""
-    logger.warning(f"Stub run_certora called for {temp_path}")
-    return [{"rule": "Sample rule", "status": "Passed (dummy)"}]
+def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str, Any]]:
+    """
+    Run Certora formal verification via cloud API.
+
+    Generates CVL specifications using AI and submits to Certora Prover.
+    Returns verification results or empty list on error (non-blocking).
+    """
+    try:
+        # Check if Certora is configured
+        if not os.getenv("CERTORAKEY"):
+            logger.info("Certora: CERTORAKEY not configured, skipping formal verification")
+            return [{"status": "skipped", "reason": "API key not configured"}]
+
+        # Import certora module (lazy import to avoid startup cost)
+        from certora import CVLGenerator, CertoraRunner
+
+        # Read contract code
+        with open(temp_path, 'r') as f:
+            contract_code = f.read()
+
+        logger.info(f"Certora: Generating CVL specifications for {temp_path}")
+
+        # Generate CVL specs using AI
+        generator = CVLGenerator()
+        cvl_specs = generator.generate_specs_sync(contract_code, slither_findings)
+
+        if not cvl_specs:
+            logger.warning("Certora: Could not generate CVL specifications")
+            return [{"status": "skipped", "reason": "Could not generate specifications"}]
+
+        logger.info(f"Certora: Generated {len(cvl_specs)} chars of CVL specs")
+
+        # Run verification
+        runner = CertoraRunner()
+        results = runner.run_verification_sync(temp_path, cvl_specs)
+
+        logger.info(f"Certora: Verification complete - {results.get('rules_verified', 0)} verified, {results.get('rules_violated', 0)} violated")
+
+        # Format results for report
+        formatted_results = []
+
+        # Add verified rules
+        for rule in results.get("verified_rules", []):
+            formatted_results.append({
+                "rule": rule.get("rule", "Unknown"),
+                "status": "verified",
+                "description": f"Rule '{rule.get('rule')}' formally verified"
+            })
+
+        # Add violations
+        for violation in results.get("violations", []):
+            formatted_results.append({
+                "rule": violation.get("rule", "Unknown"),
+                "status": violation.get("status", "violated"),
+                "description": violation.get("description", "Verification failed")
+            })
+
+        # Add summary if no specific results
+        if not formatted_results:
+            formatted_results.append({
+                "rule": "verification",
+                "status": results.get("status", "complete"),
+                "description": f"Formal verification {results.get('status', 'complete')}",
+                "job_url": results.get("job_url")
+            })
+
+        return formatted_results
+
+    except Exception as e:
+        logger.error(f"Certora: Verification failed with error: {e}")
+        return [{"status": "error", "reason": str(e)}]
 
 def analyze_slither(temp_path: str) -> list[dict[str, Any]]:
     """Run Slither via Docker image (solc pre-installed)."""
@@ -5993,6 +6073,27 @@ async def audit_contract(
             await asyncio.sleep(0)  # Yield to event loop
             await broadcast_audit_log(effective_username, f"Echidna completed with {len(fuzzing_results)} results")
 
+        # Phase 4: Certora Formal Verification (Enterprise only)
+        certora_results = []
+        certora_enabled = usage_tracker.feature_flags.get(tier_for_flags, {}).get("certora", False)
+
+        if certora_enabled:
+            await broadcast_audit_log(effective_username, "Running formal verification...")
+            if job_id:
+                await audit_queue.update_phase(job_id, "certora", 55)
+                await notify_job_subscribers(job_id, {"status": "processing", "phase": "certora", "progress": 55})
+            await asyncio.sleep(0)  # Yield to event loop
+
+            try:
+                certora_results = await asyncio.to_thread(run_certora, temp_path, slither_findings)
+            except Exception as e:
+                logger.error(f"Certora failed: {e}")
+                certora_results = [{"status": "error", "reason": str(e)}]
+
+            await asyncio.sleep(0)  # Yield to event loop
+            verified_count = sum(1 for r in certora_results if r.get("status") == "verified")
+            await broadcast_audit_log(effective_username, f"Formal verification: {verified_count} properties verified")
+
         # Results already handled above in sequential execution
         
         context = json.dumps([f if isinstance(f, dict) else getattr(f, "__dict__", str(f)) for f in slither_findings]).replace('"', '\"') if slither_findings else "No static issues found"
@@ -6097,6 +6198,7 @@ async def audit_contract(
             prompt = PROMPT_TEMPLATE.format(
                 context=context,
                 fuzzing_results=json.dumps(fuzzing_results),
+                certora_results=json.dumps(certora_results) if certora_results else "N/A (Enterprise tier only)",
                 code=code_str,
                 details=details,
                 tier=tier_for_flags,
@@ -6257,11 +6359,9 @@ For Enterprise tier, also include: "proof_of_concept", "references"
             # Add Enterprise/Diamond extras
             if tier_for_flags in ["enterprise", "diamond"] or getattr(user, "has_diamond", False):
                 audit_json["fuzzing_results"] = fuzzing_results
-                try:
-                    certora_result = await asyncio.to_thread(run_certora, temp_path)
-                    audit_json["formal_verification"] = certora_result
-                except Exception as e:
-                    audit_json["formal_verification"] = f"Certora failed: {e}"
+                # Use pre-computed certora_results from Phase 4
+                audit_json["certora_results"] = certora_results
+                audit_json["formal_verification"] = certora_results
             
             report = audit_json
             
