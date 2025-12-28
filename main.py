@@ -3851,8 +3851,9 @@ def _build_tool_results_section(story: list, styles: dict, report: dict, tier: s
 
     fuzzing = report.get("fuzzing_results", [])
     mythril = report.get("mythril_results", [])
+    certora = report.get("certora_results", [])
 
-    if not fuzzing and not mythril:
+    if not fuzzing and not mythril and not certora:
         return
 
     story.append(Paragraph("Static & Dynamic Analysis Results", styles['heading1']))
@@ -3876,6 +3877,21 @@ def _build_tool_results_section(story: list, styles: dict, report: dict, tier: s
                 story.append(Paragraph(f"• [{severity}] {title}", styles['normal']))
             elif isinstance(result, str):
                 story.append(Paragraph(f"• {result}", styles['normal']))
+
+    # Certora Formal Verification (Enterprise only)
+    if certora and tier in ["enterprise", "diamond"]:
+        story.append(Paragraph("Certora Formal Verification", styles['heading2']))
+        verified_count = sum(1 for r in certora if isinstance(r, dict) and r.get("status") == "verified")
+        violated_count = sum(1 for r in certora if isinstance(r, dict) and r.get("status") == "violated")
+        story.append(Paragraph(f"<b>Summary:</b> {verified_count} rules verified, {violated_count} violations found", styles['normal']))
+
+        for result in certora[:10]:  # Limit to first 10
+            if isinstance(result, dict):
+                rule = result.get("rule", "Unknown rule")
+                status = result.get("status", "unknown")
+                description = result.get("description", result.get("reason", ""))
+                status_icon = "✓" if status == "verified" else "✗" if status == "violated" else "○"
+                story.append(Paragraph(f"• {status_icon} <b>{rule}</b>: {description[:100]}", styles['normal']))
 
     story.append(Spacer(1, 10))
 
