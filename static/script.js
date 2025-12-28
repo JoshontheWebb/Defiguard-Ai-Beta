@@ -2761,20 +2761,41 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           }
 
           const verified = certoraResults.filter(r => r.status === 'verified').length;
-          const violated = certoraResults.filter(r => r.status === 'violated').length;
+          const violated = certoraResults.filter(r => r.status === 'violated' || r.status === 'issues_found').length;
           const skipped = certoraResults.filter(r => r.status === 'skipped').length;
-          const errors = certoraResults.filter(r => r.status === 'error').length;
+          const errors = certoraResults.filter(r => r.status === 'error' || r.status === 'incomplete' || r.status === 'timeout').length;
 
-          const overallStatus = violated > 0 ? 'warning' : verified > 0 ? 'success' : 'info';
-          const statusIcon = violated > 0 ? '⚠️' : verified > 0 ? '✅' : '🔒';
+          // Determine overall status and messaging
+          let overallStatus, statusIcon, statusText;
+          if (violated > 0) {
+            overallStatus = 'warning';
+            statusIcon = '⚠️';
+            statusText = `Found ${violated} Issue${violated > 1 ? 's' : ''} Requiring Review`;
+          } else if (errors > 0) {
+            overallStatus = 'info';
+            statusIcon = '🔄';
+            statusText = 'Verification Incomplete';
+          } else if (verified > 0) {
+            overallStatus = 'success';
+            statusIcon = '✅';
+            statusText = `${verified} Propert${verified > 1 ? 'ies' : 'y'} Verified`;
+          } else {
+            overallStatus = 'info';
+            statusIcon = '🔒';
+            statusText = 'Formal Verification Complete';
+          }
+
+          // Find job URL if available
+          const jobUrl = certoraResults.find(r => r.job_url)?.job_url;
 
           let html = `
             <div class="certora-results-card">
               <div class="certora-header ${overallStatus}">
                 <div class="certora-status">
                   <span class="status-icon">${statusIcon}</span>
-                  <span class="status-text">Formal Verification ${violated > 0 ? 'Found Issues' : 'Complete'}</span>
+                  <span class="status-text">${statusText}</span>
                 </div>
+                ${jobUrl ? `<a href="${escapeHtml(jobUrl)}" target="_blank" class="certora-job-link">View Full Report →</a>` : ''}
               </div>
 
               <div class="certora-stats-grid">
@@ -2784,7 +2805,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
                 </div>
                 <div class="certora-stat violated">
                   <div class="stat-value">${violated}</div>
-                  <div class="stat-label">Violations</div>
+                  <div class="stat-label">Issues Found</div>
                 </div>
                 <div class="certora-stat skipped">
                   <div class="stat-value">${skipped + errors}</div>
@@ -2796,18 +2817,45 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           `;
 
           certoraResults.forEach(result => {
-            const ruleIcon = result.status === 'verified' ? '✅' :
-                            result.status === 'violated' ? '❌' :
-                            result.status === 'skipped' ? '⏭️' : '⚠️';
-            const ruleClass = result.status === 'verified' ? 'verified' :
-                             result.status === 'violated' ? 'violated' : 'skipped';
+            // Map status to icon
+            let ruleIcon, ruleClass;
+            switch(result.status) {
+              case 'verified':
+                ruleIcon = '✅';
+                ruleClass = 'verified';
+                break;
+              case 'violated':
+              case 'issues_found':
+                ruleIcon = '❌';
+                ruleClass = 'violated';
+                break;
+              case 'timeout':
+                ruleIcon = '⏱️';
+                ruleClass = 'timeout';
+                break;
+              case 'error':
+              case 'incomplete':
+                ruleIcon = '⚠️';
+                ruleClass = 'error';
+                break;
+              case 'skipped':
+                ruleIcon = '⏭️';
+                ruleClass = 'skipped';
+                break;
+              default:
+                ruleIcon = '🔍';
+                ruleClass = 'info';
+            }
+
+            // Get description, falling back to reason
+            const description = result.description || result.reason || 'No additional details available';
 
             html += `
               <div class="certora-rule ${ruleClass}">
                 <span class="rule-icon">${ruleIcon}</span>
                 <div class="rule-info">
-                  <span class="rule-name">${escapeHtml(result.rule || 'Unknown rule')}</span>
-                  <span class="rule-description">${escapeHtml(result.description || result.reason || '')}</span>
+                  <span class="rule-name">${escapeHtml(result.rule || 'Verification Check')}</span>
+                  <span class="rule-description">${escapeHtml(description)}</span>
                 </div>
               </div>
             `;
@@ -2899,12 +2947,56 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
         `;
 
         if (hasPdfAccess) {
-          // PAID tier: Show PDF download view
+          // PAID tier: Show PDF download view with tool results
           if (mobilePaidView) mobilePaidView.style.display = 'block';
           if (mobileFreeView) mobileFreeView.style.display = 'none';
 
           const paidSeveritySummary = document.getElementById('mobile-severity-summary-paid');
-          if (paidSeveritySummary) paidSeveritySummary.innerHTML = severityHtml;
+          if (paidSeveritySummary) {
+            // Build comprehensive tool results summary for mobile
+            let toolsHtml = severityHtml;
+
+            // Add tools that ran
+            const toolsRan = [];
+            if (report.slither_time || (report.issues && report.issues.length > 0)) toolsRan.push('🔍 Slither');
+            if (report.mythril_results && report.mythril_results.length > 0) toolsRan.push('🧠 Mythril');
+            if (report.fuzzing_results && report.fuzzing_results.length > 0) toolsRan.push('🧪 Echidna');
+            if (report.certora_results && report.certora_results.length > 0) toolsRan.push('🔒 Certora');
+            if (report.onchain_analysis) toolsRan.push('⛓️ On-Chain');
+
+            if (toolsRan.length > 0) {
+              toolsHtml += `<div class="mobile-tools-summary" style="margin-top: 12px; padding: 8px; background: rgba(var(--accent-teal-rgb), 0.1); border-radius: 8px; font-size: 0.85em;">
+                <strong>Tools Used:</strong> ${toolsRan.join(' • ')}
+              </div>`;
+            }
+
+            // Add Certora summary if available
+            if (report.certora_results && report.certora_results.length > 0) {
+              const certoraVerified = report.certora_results.filter(r => r.status === 'verified').length;
+              const certoraViolated = report.certora_results.filter(r => r.status === 'violated' || r.status === 'issues_found').length;
+              const certoraStatus = certoraViolated > 0 ? '⚠️ Issues Found' : certoraVerified > 0 ? '✅ Verified' : '🔍 Complete';
+
+              toolsHtml += `<div class="mobile-certora-summary" style="margin-top: 8px; padding: 8px; background: rgba(var(--accent-purple-rgb), 0.1); border-radius: 8px; font-size: 0.85em;">
+                <strong>🔒 Formal Verification:</strong> ${certoraStatus}
+                ${certoraVerified > 0 ? `<br><span style="color: var(--green);">✓ ${certoraVerified} properties proven</span>` : ''}
+                ${certoraViolated > 0 ? `<br><span style="color: var(--red);">✗ ${certoraViolated} issues to review</span>` : ''}
+              </div>`;
+            }
+
+            // Add fuzzing summary if available
+            if (report.fuzzing_results && report.fuzzing_results.length > 0) {
+              const fuzzResult = report.fuzzing_results[0];
+              const fuzzParsed = fuzzResult.parsed || {};
+              const fuzzStatus = fuzzParsed.tests_passed === fuzzParsed.tests_total ? '✅ All Passed' : '⚠️ Issues Found';
+
+              toolsHtml += `<div class="mobile-fuzz-summary" style="margin-top: 8px; padding: 8px; background: rgba(var(--accent-orange-rgb), 0.1); border-radius: 8px; font-size: 0.85em;">
+                <strong>🧪 Fuzzing:</strong> ${fuzzStatus}
+                ${fuzzParsed.tests_total ? `<br>${fuzzParsed.tests_passed || 0}/${fuzzParsed.tests_total} tests passed` : ''}
+              </div>`;
+            }
+
+            paidSeveritySummary.innerHTML = toolsHtml;
+          }
 
         } else {
           // FREE tier: Show issues list + upgrade CTA
@@ -3139,14 +3231,22 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
       pdfDownloadButton?.addEventListener("click", async () => {
         // Support both new URL format and legacy path format
         const pdfUrl = window.currentAuditPdfUrl || window.currentAuditPdfPath;
+        const originalText = pdfDownloadButton.textContent;
+
+        debugLog(`[DEBUG] PDF Download clicked. URL: ${pdfUrl}`);
 
         if (!pdfUrl) {
           usageWarning.textContent = "No PDF available. Please run an audit first.";
           usageWarning.classList.add("error");
+          alert("No PDF available. Please run an audit first, then download.");
           return;
         }
 
         try {
+          // Show loading state
+          pdfDownloadButton.textContent = "⏳ Downloading...";
+          pdfDownloadButton.disabled = true;
+
           // Determine the correct fetch URL
           let fetchUrl;
           if (pdfUrl.startsWith('/api/reports/')) {
@@ -3165,21 +3265,37 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
 
           if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.detail || "PDF not found");
+            throw new Error(errorData.detail || `HTTP ${response.status}: PDF not found`);
           }
 
           const blob = await response.blob();
+
+          if (blob.size === 0) {
+            throw new Error("PDF file is empty");
+          }
+
           const url = URL.createObjectURL(blob);
           const a = document.createElement("a");
           a.href = url;
           a.download = pdfUrl.split('/').pop() || `DeFiGuard_Report_${Date.now()}.pdf`;
+          document.body.appendChild(a);
           a.click();
+          document.body.removeChild(a);
           URL.revokeObjectURL(url);
+
           debugLog("[DEBUG] PDF downloaded successfully");
+          pdfDownloadButton.textContent = "✅ Downloaded!";
+          setTimeout(() => {
+            pdfDownloadButton.textContent = originalText;
+            pdfDownloadButton.disabled = false;
+          }, 2000);
         } catch (error) {
           console.error("[ERROR] PDF download failed:", error);
           usageWarning.textContent = `PDF download failed: ${error.message}`;
           usageWarning.classList.add("error");
+          alert(`PDF download failed: ${error.message}`);
+          pdfDownloadButton.textContent = originalText;
+          pdfDownloadButton.disabled = false;
         }
       });
 
@@ -3187,6 +3303,8 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
       const mobilePdfDownload = document.getElementById('mobile-pdf-download');
       mobilePdfDownload?.addEventListener("click", async () => {
         const pdfUrl = window.currentAuditPdfUrl || window.currentAuditPdfPath;
+
+        debugLog(`[DEBUG] Mobile PDF Download clicked. URL: ${pdfUrl}`);
 
         if (!pdfUrl) {
           alert("No PDF available yet. Please run an audit first.");
@@ -3214,21 +3332,31 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
 
           if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.detail || "PDF not found");
+            throw new Error(errorData.detail || `HTTP ${response.status}: PDF not found`);
           }
 
           const blob = await response.blob();
+
+          if (blob.size === 0) {
+            throw new Error("PDF file is empty");
+          }
+
           const url = URL.createObjectURL(blob);
           const a = document.createElement("a");
           a.href = url;
           a.download = pdfUrl.split('/').pop() || `DeFiGuard_Report_${Date.now()}.pdf`;
+          document.body.appendChild(a);
           a.click();
+          document.body.removeChild(a);
           URL.revokeObjectURL(url);
 
-          // Reset button
-          mobilePdfDownload.textContent = "📄 Download Full PDF Report";
-          mobilePdfDownload.disabled = false;
+          // Show success briefly
+          mobilePdfDownload.textContent = "✅ Downloaded!";
           debugLog("[DEBUG] Mobile PDF downloaded successfully");
+          setTimeout(() => {
+            mobilePdfDownload.textContent = "📄 Download Full PDF Report";
+            mobilePdfDownload.disabled = false;
+          }, 2000);
         } catch (error) {
           console.error("[ERROR] Mobile PDF download failed:", error);
           mobilePdfDownload.textContent = "📄 Download Full PDF Report";

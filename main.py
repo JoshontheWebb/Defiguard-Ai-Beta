@@ -5428,30 +5428,54 @@ def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str,
         # Format results for report
         formatted_results = []
 
-        # Add verified rules
+        # Add verified rules with meaningful descriptions
         for rule in results.get("verified_rules", []):
+            rule_name = rule.get("rule", "Property Check")
             formatted_results.append({
-                "rule": rule.get("rule", "Unknown"),
+                "rule": rule_name,
                 "status": "verified",
-                "description": f"Rule '{rule.get('rule')}' formally verified"
+                "description": rule.get("description", f"Property '{rule_name}' mathematically proven to hold"),
+                "job_url": results.get("job_url")
             })
 
-        # Add violations
+        # Add violations with context
         for violation in results.get("violations", []):
+            rule_name = violation.get("rule", "Property Check")
             formatted_results.append({
-                "rule": violation.get("rule", "Unknown"),
+                "rule": rule_name,
                 "status": violation.get("status", "violated"),
-                "description": violation.get("description", "Verification failed")
+                "description": violation.get("description", f"Verification of '{rule_name}' found potential issues"),
+                "job_url": results.get("job_url")
             })
 
         # Add summary if no specific results
         if not formatted_results:
-            formatted_results.append({
-                "rule": "verification",
-                "status": results.get("status", "complete"),
-                "description": f"Formal verification {results.get('status', 'complete')}",
-                "job_url": results.get("job_url")
-            })
+            status = results.get("status", "complete")
+            if status == "verified":
+                formatted_results.append({
+                    "rule": "Contract Verification",
+                    "status": "verified",
+                    "description": "All formal verification checks passed successfully",
+                    "job_url": results.get("job_url")
+                })
+            elif status in ["error", "skipped"]:
+                formatted_results.append({
+                    "rule": "Verification Status",
+                    "status": status,
+                    "description": results.get("error", "Verification could not be completed"),
+                    "job_url": results.get("job_url")
+                })
+            else:
+                formatted_results.append({
+                    "rule": "Contract Analysis",
+                    "status": status,
+                    "description": f"Formal verification completed with status: {status}",
+                    "job_url": results.get("job_url")
+                })
+
+        # Add job URL to first result if not already there
+        if results.get("job_url") and formatted_results:
+            formatted_results[0]["job_url"] = results.get("job_url")
 
         return formatted_results
 
