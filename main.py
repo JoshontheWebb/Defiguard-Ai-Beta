@@ -4441,9 +4441,15 @@ async def get_tier(request: Request, username: str = Query(None), db: Session = 
         "diamond": "Unlimited"  # Legacy
     }
     size_limit = size_limit_map.get(user_tier, "250KB")
-    
-    feature_flags = usage_tracker.feature_flags.get(user_tier, usage_tracker.feature_flags["free"])
-    api_key = user.api_key if user.tier in ["pro", "enterprise"] else None
+
+    # Map tier for feature flags (diamond users get enterprise features)
+    has_diamond = getattr(user, "has_diamond", False)
+    flags_tier = "enterprise" if user_tier == "enterprise" else ("enterprise" if has_diamond else user_tier)
+    tier_flags_map = {"beginner": "starter", "diamond": "enterprise"}
+    flags_tier = tier_flags_map.get(flags_tier, flags_tier)
+
+    feature_flags = usage_tracker.feature_flags.get(flags_tier, usage_tracker.feature_flags["free"])
+    api_key = user.api_key if user.tier in ["pro", "enterprise"] or has_diamond else None
     audit_count = usage_tracker.count
     
     # Map audit limits
@@ -4459,9 +4465,7 @@ async def get_tier(request: Request, username: str = Query(None), db: Session = 
     
     if audit_limit == float("inf"):
         audit_limit = 9999
-    
-    has_diamond = user.has_diamond
-    
+
     logger.debug(f"Retrieved tier for {effective_username}: {user_tier}, audit count: {audit_count}, has_diamond: {has_diamond}")
     logger.debug("Flushing log file after tier retrieval")
     for handler in logging.getLogger().handlers:
