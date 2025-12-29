@@ -3858,23 +3858,46 @@ def _build_tool_results_section(story: list, styles: dict, report: dict, tier: s
 
     story.append(Paragraph("Static & Dynamic Analysis Results", styles['heading1']))
 
+    # Echidna Fuzzing Results
     if fuzzing:
         story.append(Paragraph("Echidna Fuzzing Results", styles['heading2']))
         for result in fuzzing[:5]:  # Limit to first 5
             if isinstance(result, dict):
-                test = result.get("test", "Unknown test")
-                status = result.get("status", "Unknown")
-                story.append(Paragraph(f"• {test}: {status}", styles['normal']))
+                # Handle the actual Echidna data structure
+                parsed = result.get("parsed", {})
+                if parsed:
+                    tests_passed = parsed.get("tests_passed", 0)
+                    tests_total = parsed.get("tests_total", 0)
+                    iterations = parsed.get("fuzzing_iterations", 0)
+                    story.append(Paragraph(f"• Tests: {tests_passed}/{tests_total} passed", styles['normal']))
+                    story.append(Paragraph(f"• Fuzzing iterations: {iterations}", styles['normal']))
+                    if parsed.get("execution_summary"):
+                        story.append(Paragraph(f"• {parsed['execution_summary'][:200]}", styles['normal']))
+                else:
+                    # Fallback for error/timeout results
+                    vuln = result.get("vulnerability", result.get("test", "Fuzzing"))
+                    desc = result.get("description", result.get("status", ""))
+                    story.append(Paragraph(f"• {vuln}: {desc[:200]}", styles['normal']))
             elif isinstance(result, str):
                 story.append(Paragraph(f"• {result}", styles['normal']))
 
+    # Mythril Symbolic Analysis Results
     if mythril:
         story.append(Paragraph("Mythril Symbolic Analysis", styles['heading2']))
         for result in mythril[:5]:  # Limit to first 5
             if isinstance(result, dict):
-                title = result.get("title", "Finding")
-                severity = result.get("severity", "Unknown")
-                story.append(Paragraph(f"• [{severity}] {title}", styles['normal']))
+                # Handle actual Mythril data structure: vulnerability, description
+                vuln = result.get("vulnerability", result.get("title", "Finding"))
+                desc = result.get("description", "")
+                # Mythril severity comes from title patterns
+                severity = "Medium"
+                if "Ether" in vuln or "selfdestruct" in vuln.lower():
+                    severity = "High"
+                elif "Integer" in vuln or "Overflow" in vuln:
+                    severity = "Medium"
+                story.append(Paragraph(f"• [{severity}] <b>{vuln}</b>", styles['normal']))
+                if desc and desc != "No description":
+                    story.append(Paragraph(f"  {desc[:150]}", styles['normal']))
             elif isinstance(result, str):
                 story.append(Paragraph(f"• {result}", styles['normal']))
 
@@ -3882,16 +3905,32 @@ def _build_tool_results_section(story: list, styles: dict, report: dict, tier: s
     if certora and tier in ["enterprise", "diamond"]:
         story.append(Paragraph("Certora Formal Verification", styles['heading2']))
         verified_count = sum(1 for r in certora if isinstance(r, dict) and r.get("status") == "verified")
-        violated_count = sum(1 for r in certora if isinstance(r, dict) and r.get("status") == "violated")
+        violated_count = sum(1 for r in certora if isinstance(r, dict) and r.get("status") in ["violated", "issues_found"])
+        error_count = sum(1 for r in certora if isinstance(r, dict) and r.get("status") in ["error", "incomplete", "timeout"])
+
         story.append(Paragraph(f"<b>Summary:</b> {verified_count} rules verified, {violated_count} violations found", styles['normal']))
 
         for result in certora[:10]:  # Limit to first 10
             if isinstance(result, dict):
-                rule = result.get("rule", "Unknown rule")
+                rule = result.get("rule", "Verification Check")
                 status = result.get("status", "unknown")
                 description = result.get("description", result.get("reason", ""))
-                status_icon = "✓" if status == "verified" else "✗" if status == "violated" else "○"
-                story.append(Paragraph(f"• {status_icon} <b>{rule}</b>: {description[:100]}", styles['normal']))
+
+                # Better status icons
+                if status == "verified":
+                    status_icon = "✓"
+                elif status in ["violated", "issues_found"]:
+                    status_icon = "✗"
+                elif status in ["error", "incomplete"]:
+                    status_icon = "⚠"
+                elif status == "timeout":
+                    status_icon = "⏱"
+                elif status == "skipped":
+                    status_icon = "○"
+                else:
+                    status_icon = "•"
+
+                story.append(Paragraph(f"• {status_icon} <b>{rule}</b>: {description[:150]}", styles['normal']))
 
     story.append(Spacer(1, 10))
 
@@ -6412,15 +6451,27 @@ For Enterprise tier, also include: "proof_of_concept", "references"
             # Normalize predictions - handle attack_predictions or missing fields
             # normalize_audit_response creates: title, attack_vector, severity, probability
             # Frontend expects: scenario, impact
+            # PDF expects: title, probability, attack_vector, financial_impact, etc.
             if "attack_predictions" in report and "predictions" not in report:
                 report["predictions"] = report["attack_predictions"]
             if "predictions" not in report:
                 report["predictions"] = []
             normalized_predictions = []
-            for p in report.get("predictions", []):
+            for idx, p in enumerate(report.get("predictions", []), 1):
                 normalized_predictions.append({
-                    "scenario": p.get("title") or p.get("attack_vector") or p.get("scenario") or p.get("attack") or p.get("name") or "Unknown scenario",
-                    "impact": p.get("severity") or p.get("probability") or p.get("financial_impact") or p.get("impact") or p.get("likelihood") or "Unknown impact"
+                    # Frontend compatibility
+                    "scenario": p.get("title") or p.get("attack_vector") or p.get("scenario") or p.get("attack") or p.get("name") or f"Attack Scenario {idx}",
+                    "impact": p.get("financial_impact") or p.get("impact") or p.get("severity") or "Significant financial risk",
+                    # PDF compatibility - preserve all fields
+                    "title": p.get("title") or p.get("scenario") or p.get("name") or f"Attack Scenario {idx}",
+                    "severity": p.get("severity") or "High",
+                    "probability": p.get("probability") or p.get("likelihood") or "Medium",
+                    "attack_vector": p.get("attack_vector") or p.get("description") or "Attack vector analysis pending",
+                    "financial_impact": p.get("financial_impact") or p.get("impact") or "Impact assessment pending",
+                    "preconditions": p.get("preconditions") or p.get("prerequisites") or "Standard deployment conditions",
+                    "time_to_exploit": p.get("time_to_exploit") or "Variable",
+                    "mitigation": p.get("mitigation") or p.get("remediation") or "See recommendations",
+                    "real_world_example": p.get("real_world_example") or p.get("example") or None
                 })
             report["predictions"] = normalized_predictions
         
