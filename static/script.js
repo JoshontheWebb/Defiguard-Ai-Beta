@@ -2785,8 +2785,13 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             statusText = 'Formal Verification Complete';
           }
 
-          // Find job URL if available
-          const jobUrl = certoraResults.find(r => r.job_url)?.job_url;
+          // Find job URL if available - only use prover.certora.com URLs
+          let jobUrl = certoraResults.find(r => r.job_url)?.job_url;
+          // Validate the job URL is from prover.certora.com (not docs or other subdomains)
+          if (jobUrl && !jobUrl.includes('prover.certora.com')) {
+            console.warn('[Certora] Invalid job URL detected (not prover.certora.com):', jobUrl);
+            jobUrl = null;
+          }
 
           let html = `
             <div class="certora-results-card">
