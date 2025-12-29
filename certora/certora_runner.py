@@ -244,8 +244,9 @@ class CertoraRunner:
         """Create Certora configuration file content."""
 
         # JSON format conf file for Certora Prover
+        # Use path:contract format to handle UUID filenames with hyphens
         conf = {
-            "files": [contract_path],
+            "files": [f"{contract_path}:{contract_name}"],
             "verify": f"{contract_name}:{spec_path}",
             "msg": f"DeFiGuard AI: {contract_name}",
             "wait_for_results": "all",  # Wait for verification to complete
