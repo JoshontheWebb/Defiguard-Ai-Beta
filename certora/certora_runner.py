@@ -127,6 +127,11 @@ class CertoraRunner:
             logger.info(f"CertoraRunner: certoraRun returned {result.returncode}")
             logger.debug(f"CertoraRunner: stdout length: {len(result.stdout)}")
 
+            # Log output for debugging verification issues
+            if result.returncode != 0:
+                logger.warning(f"CertoraRunner: Non-zero exit ({result.returncode})")
+                logger.warning(f"CertoraRunner: stdout preview: {result.stdout[:1000]}")
+
             if result.stderr:
                 logger.warning(f"CertoraRunner: stderr: {result.stderr[:500]}")
 
@@ -269,16 +274,26 @@ class CertoraRunner:
             "raw_output": stdout[:2000] if stdout else None
         }
 
-        # Extract job URL from multiple possible patterns
+        # Extract job URL - only from prover.certora.com (NOT docs.certora.com)
         url_patterns = [
+            # Primary job URL format
             r"https://prover\.certora\.com/output/[a-zA-Z0-9/_-]+",
-            r"https://[a-z]+\.certora\.com/[a-zA-Z0-9/_-]+",
-            r"Job URL:\s*(https://[^\s]+)",
+            # Alternative prover URL formats
+            r"https://prover\.certora\.com/job/[a-zA-Z0-9/_-]+",
+            # Job URL from labeled output
+            r"Job URL:\s*(https://prover\.certora\.com[^\s]+)",
+            # Report URL format
+            r"Report:\s*(https://prover\.certora\.com[^\s]+)",
         ]
         for pattern in url_patterns:
             url_match = re.search(pattern, stdout)
             if url_match:
-                result["job_url"] = url_match.group(0) if "://" in url_match.group(0) else url_match.group(1)
+                # Extract just the URL part
+                matched = url_match.group(0)
+                if "://" not in matched and len(url_match.groups()) > 0:
+                    matched = url_match.group(1)
+                result["job_url"] = matched
+                logger.info(f"CertoraRunner: Found job URL: {matched}")
                 break
 
         # Multiple patterns to catch Certora's various output formats
@@ -415,6 +430,20 @@ class CertoraRunner:
             "spec error",
             "syntax error",
             "type error",
+            "could not compile",
+            "failed to compile",
+            "internal error",
+            "cli error",
+            "connection error",
+            "authentication failed",
+            "invalid api key",
+            "certorakey",
+            "permission denied",
+            "no such file",
+            "file not found",
+            "import error",
+            "pragma",
+            "unsupported",
         ]
 
         # Check for errors first
@@ -463,10 +492,13 @@ class CertoraRunner:
         if return_code != 0:
             result["success"] = False
             result["status"] = "incomplete"
+
+            # Try to extract a meaningful error from the output
+            error_desc = self._extract_meaningful_error(stdout, stderr, return_code)
             result["violations"].append({
                 "rule": "Verification Process",
                 "status": "incomplete",
-                "description": "Verification did not complete successfully. Check contract complexity or specification validity."
+                "description": error_desc
             })
         else:
             # Return code 0 but no clear results - assume success
@@ -519,6 +551,47 @@ class CertoraRunner:
                 return f"Verification issue: {match.group(1)[:150]}"
 
         return "Formal verification found potential issues that require review"
+
+    def _extract_meaningful_error(self, stdout: str, stderr: str, return_code: int) -> str:
+        """Extract a meaningful error description from output."""
+        combined = stdout + "\n" + stderr
+
+        # Check for specific common issues
+        if "certorakey" in combined.lower() or "api key" in combined.lower():
+            return "Certora API key issue. The verification service could not authenticate."
+
+        if "could not compile" in combined.lower() or "compilation" in combined.lower():
+            # Try to find the specific compilation error
+            comp_match = re.search(r"(?:Error|error)[:\s]+([^\n]{10,100})", combined)
+            if comp_match:
+                return f"Contract compilation failed: {comp_match.group(1)}"
+            return "Contract compilation failed. Check Solidity syntax and imports."
+
+        if "spec" in combined.lower() and "error" in combined.lower():
+            spec_match = re.search(r"spec[^:]*:\s*([^\n]+)", combined, re.IGNORECASE)
+            if spec_match:
+                return f"Specification error: {spec_match.group(1)[:100]}"
+            return "CVL specification has errors. The auto-generated spec may need adjustment."
+
+        if "timeout" in combined.lower():
+            return "Verification timed out. The contract may be too complex for automated verification."
+
+        if "connection" in combined.lower() or "network" in combined.lower():
+            return "Network error connecting to Certora cloud. Please try again later."
+
+        if "unsupported" in combined.lower():
+            unsup_match = re.search(r"unsupported[:\s]+([^\n]+)", combined, re.IGNORECASE)
+            if unsup_match:
+                return f"Unsupported feature: {unsup_match.group(1)[:100]}"
+            return "Contract uses unsupported Solidity features for formal verification."
+
+        # Look for any error message
+        error_match = re.search(r"(?:Error|error|ERROR)[:\s]+([^\n]{10,150})", combined)
+        if error_match:
+            return f"Verification error: {error_match.group(1)}"
+
+        # Generic message with return code
+        return f"Verification did not complete (exit code {return_code}). Check contract complexity or try a simpler specification."
 
 
 # Convenience function
