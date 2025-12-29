@@ -110,11 +110,11 @@ class CertoraRunner:
             logger.debug(f"CertoraRunner: Contract: {contract_path}")
             logger.debug(f"CertoraRunner: Spec: {spec_path}")
 
-            # Run certoraRun
+            # Run certoraRun with --conf flag for config file
             result = subprocess.run(
                 [
                     "certoraRun",
-                    conf_path,
+                    "--conf", conf_path,  # Config file requires --conf flag
                     "--wait",  # Wait for results
                     "--msg", f"DeFiGuard AI verification: {contract_name}"
                 ],
