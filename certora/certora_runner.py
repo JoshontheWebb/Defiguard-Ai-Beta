@@ -110,14 +110,10 @@ class CertoraRunner:
             logger.debug(f"CertoraRunner: Contract: {contract_path}")
             logger.debug(f"CertoraRunner: Spec: {spec_path}")
 
-            # Run certoraRun with --conf flag for config file
+            # Run certoraRun with config file as positional argument
+            # Certora CLI expects: certoraRun <config.conf>
             result = subprocess.run(
-                [
-                    "certoraRun",
-                    "--conf", conf_path,  # Config file requires --conf flag
-                    "--wait",  # Wait for results
-                    "--msg", f"DeFiGuard AI verification: {contract_name}"
-                ],
+                ["certoraRun", conf_path],
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
@@ -247,11 +243,12 @@ class CertoraRunner:
     ) -> str:
         """Create Certora configuration file content."""
 
-        # JSON5 format conf file
+        # JSON format conf file for Certora Prover
         conf = {
             "files": [contract_path],
             "verify": f"{contract_name}:{spec_path}",
             "msg": f"DeFiGuard AI: {contract_name}",
+            "wait_for_results": "all",  # Wait for verification to complete
             "rule_sanity": "basic",  # Check for tautologies
             "optimistic_loop": True,  # Assume loops terminate
             "loop_iter": 3,  # Unroll loops 3 times
