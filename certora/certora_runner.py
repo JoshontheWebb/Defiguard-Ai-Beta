@@ -157,7 +157,11 @@ class CertoraRunner:
                 "error": "Certora CLI not installed (certoraRun not found)",
                 "rules_verified": 0,
                 "rules_violated": 0,
-                "violations": []
+                "violations": [{
+                    "rule": "Certora Setup",
+                    "status": "error",
+                    "description": "Certora CLI (certoraRun) is not installed. Please install it with: pip install certora-cli"
+                }]
             }
 
         except Exception as e:
@@ -168,7 +172,11 @@ class CertoraRunner:
                 "error": str(e),
                 "rules_verified": 0,
                 "rules_violated": 0,
-                "violations": []
+                "violations": [{
+                    "rule": "Verification Error",
+                    "status": "error",
+                    "description": f"Unexpected error during verification: {str(e)}"
+                }]
             }
 
         finally:
@@ -247,7 +255,7 @@ class CertoraRunner:
             "rule_sanity": "basic",  # Check for tautologies
             "optimistic_loop": True,  # Assume loops terminate
             "loop_iter": 3,  # Unroll loops 3 times
-            "process": "emv",  # EVM mode
+            "process": "evm",  # EVM mode
             "solc": "solc",  # Use system solc
             "server": "production"  # Use production server
         }
