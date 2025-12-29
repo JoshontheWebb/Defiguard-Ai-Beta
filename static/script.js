@@ -2982,6 +2982,20 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
               </div>`;
             }
 
+            // Add Mythril summary if available
+            if (report.mythril_results && report.mythril_results.length > 0) {
+              const mythrilCount = report.mythril_results.length;
+              const mythrilHasIssues = report.mythril_results.some(r =>
+                r.vulnerability && !r.vulnerability.toLowerCase().includes('no issues')
+              );
+              const mythrilStatus = mythrilHasIssues ? '⚠️ Issues Found' : '✅ No Issues';
+
+              toolsHtml += `<div class="mobile-mythril-summary" style="margin-top: 8px; padding: 8px; background: rgba(var(--accent-blue-rgb), 0.1); border-radius: 8px; font-size: 0.85em;">
+                <strong>🧠 Mythril:</strong> ${mythrilStatus}
+                ${mythrilHasIssues ? `<br>${mythrilCount} potential issue${mythrilCount > 1 ? 's' : ''} found` : ''}
+              </div>`;
+            }
+
             // Add fuzzing summary if available
             if (report.fuzzing_results && report.fuzzing_results.length > 0) {
               const fuzzResult = report.fuzzing_results[0];
@@ -3276,7 +3290,12 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           const url = URL.createObjectURL(blob);
           const a = document.createElement("a");
           a.href = url;
-          a.download = pdfUrl.split('/').pop() || `DeFiGuard_Report_${Date.now()}.pdf`;
+          // Tier-aware fallback filename (server provides actual name)
+          const userTier = document.getElementById('sidebar-tier-name')?.textContent?.toLowerCase() || 'free';
+          const fallbackName = userTier === 'enterprise' || userTier === 'diamond'
+            ? `Security_Audit_Report_${Date.now()}.pdf`  // White-label: no DeFiGuard branding
+            : `DeFiGuard_Report_${Date.now()}.pdf`;
+          a.download = pdfUrl.split('/').pop() || fallbackName;
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
@@ -3343,7 +3362,12 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           const url = URL.createObjectURL(blob);
           const a = document.createElement("a");
           a.href = url;
-          a.download = pdfUrl.split('/').pop() || `DeFiGuard_Report_${Date.now()}.pdf`;
+          // Tier-aware fallback filename (server provides actual name)
+          const userTier = document.getElementById('sidebar-tier-name')?.textContent?.toLowerCase() || 'free';
+          const fallbackName = userTier === 'enterprise' || userTier === 'diamond'
+            ? `Security_Audit_Report_${Date.now()}.pdf`  // White-label: no DeFiGuard branding
+            : `DeFiGuard_Report_${Date.now()}.pdf`;
+          a.download = pdfUrl.split('/').pop() || fallbackName;
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
