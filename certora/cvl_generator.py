@@ -58,13 +58,18 @@ class SolidityVariable:
     is_mapping: bool = False
     mapping_key_type: str = ""
     mapping_value_type: str = ""
+    is_nested_mapping: bool = False
+    mapping_key_type2: str = ""  # Second key for nested mappings
 
     def to_cvl_getter(self) -> Optional[str]:
         """Convert public variable to CVL getter declaration."""
         if self.visibility != "public":
             return None
 
-        if self.is_mapping:
+        if self.is_nested_mapping:
+            # Nested mapping: mapping(A => mapping(B => C)) -> function name(A, B) returns (C) envfree
+            return f"function {self.name}({self.mapping_key_type}, {self.mapping_key_type2}) external returns ({self.mapping_value_type}) envfree;"
+        elif self.is_mapping:
             return f"function {self.name}({self.mapping_key_type}) external returns ({self.mapping_value_type}) envfree;"
         else:
             return f"function {self.name}() external returns ({self.var_type}) envfree;"
@@ -267,29 +272,45 @@ class SolidityParser:
         # Pattern for state variable declarations
         # Matches: type visibility name; or mapping(...) visibility name;
 
-        # Simple variables: uint256 public totalSupply;
-        simple_pattern = r"(\w+(?:\[\])?)\s+(public)\s+(\w+)\s*;"
+        # Track names to avoid duplicates (nested mapping regex might overlap with simple)
+        extracted_names = set()
 
-        for match in re.finditer(simple_pattern, self.code):
-            var_type = self._normalize_type(match.group(1))
-            visibility = match.group(2)
-            name = match.group(3)
+        # Nested mappings FIRST: mapping(address => mapping(address => uint256)) public allowance;
+        # This must come before simple mappings to avoid partial matches
+        nested_mapping_pattern = r"mapping\s*\(\s*(\w+)\s*=>\s*mapping\s*\(\s*(\w+)\s*=>\s*(\w+(?:\[\])?)\s*\)\s*\)\s+(public)\s+(\w+)\s*;"
 
+        for match in re.finditer(nested_mapping_pattern, self.code):
+            key_type1 = self._normalize_type(match.group(1))
+            key_type2 = self._normalize_type(match.group(2))
+            value_type = self._normalize_type(match.group(3))
+            visibility = match.group(4)
+            name = match.group(5)
+
+            extracted_names.add(name)
             self.variables.append(SolidityVariable(
                 name=name,
-                var_type=var_type,
-                visibility=visibility
+                var_type=f"mapping({key_type1} => mapping({key_type2} => {value_type}))",
+                visibility=visibility,
+                is_mapping=True,
+                is_nested_mapping=True,
+                mapping_key_type=key_type1,
+                mapping_key_type2=key_type2,
+                mapping_value_type=value_type
             ))
 
-        # Mappings: mapping(address => uint256) public balances;
+        # Simple mappings: mapping(address => uint256) public balances;
         mapping_pattern = r"mapping\s*\(\s*(\w+)\s*=>\s*(\w+(?:\[\])?)\s*\)\s+(public)\s+(\w+)\s*;"
 
         for match in re.finditer(mapping_pattern, self.code):
+            name = match.group(4)
+            if name in extracted_names:
+                continue  # Skip if already extracted as nested mapping
+
             key_type = self._normalize_type(match.group(1))
             value_type = self._normalize_type(match.group(2))
             visibility = match.group(3)
-            name = match.group(4)
 
+            extracted_names.add(name)
             self.variables.append(SolidityVariable(
                 name=name,
                 var_type=f"mapping({key_type} => {value_type})",
@@ -297,6 +318,24 @@ class SolidityParser:
                 is_mapping=True,
                 mapping_key_type=key_type,
                 mapping_value_type=value_type
+            ))
+
+        # Simple variables: uint256 public totalSupply;
+        simple_pattern = r"(\w+(?:\[\])?)\s+(public)\s+(\w+)\s*;"
+
+        for match in re.finditer(simple_pattern, self.code):
+            name = match.group(3)
+            if name in extracted_names:
+                continue  # Skip if already extracted as mapping
+
+            var_type = self._normalize_type(match.group(1))
+            visibility = match.group(2)
+
+            extracted_names.add(name)
+            self.variables.append(SolidityVariable(
+                name=name,
+                var_type=var_type,
+                visibility=visibility
             ))
 
         logger.info(f"SolidityParser: Extracted {len(self.variables)} public state variables")
