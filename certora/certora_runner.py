@@ -244,6 +244,19 @@ class CertoraRunner:
 
         # JSON format conf file for Certora Prover
         # Use path:contract format to handle UUID filenames with hyphens
+        # Dynamically compute allowed paths from actual file locations
+        contract_dir = str(Path(contract_path).parent)
+        spec_dir = str(Path(spec_path).parent)
+
+        # Build list of allowed paths - includes actual file locations plus common temp dirs
+        allowed_paths = list(set([
+            contract_dir,
+            spec_dir,
+            "/opt/render/project/data",
+            "/tmp",
+            "."  # Current directory
+        ]))
+
         conf = {
             "files": [f"{contract_path}:{contract_name}"],
             "verify": f"{contract_name}:{spec_path}",
@@ -254,6 +267,7 @@ class CertoraRunner:
             "loop_iter": 3,  # Unroll loops 3 times
             "process": "evm",  # EVM mode
             "solc": "solc",  # Use system solc
+            "solc_allow_path": allowed_paths,  # Dynamic paths based on actual file locations
             "server": "production"  # Use production server
         }
 
