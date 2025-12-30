@@ -249,7 +249,8 @@ class CertoraRunner:
 
         # JSON format conf file for Certora Prover
         # Use path:contract format to handle UUID filenames with hyphens
-        # Use absolute paths - Certora will handle file access automatically
+        # solc_allow_paths tells solc where it can read files from
+        contract_dir = str(Path(contract_path).parent)
 
         conf = {
             "files": [f"{contract_path}:{contract_name}"],
@@ -261,6 +262,7 @@ class CertoraRunner:
             "loop_iter": 3,  # Unroll loops 3 times
             "process": "evm",  # EVM mode
             "solc": "solc",  # Use system solc
+            "solc_allow_paths": [contract_dir],  # Allow solc to read from contract directory
             "server": "production"  # Use production server
         }
 
