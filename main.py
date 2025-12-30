@@ -2478,6 +2478,30 @@ PHASE 2: DEFI-SPECIFIC ATTACK VECTORS
 14. MEV extraction opportunities
 15. Composability risks (protocol integration failures)
 
+PHASE 2.5: FORMAL VERIFICATION INTEGRATION (if available)
+═══════════════════════════════════════════════════════════════════
+Use the FORMAL VERIFICATION section above to enhance your analysis:
+
+1. VERIFIED PROPERTIES: These have mathematical proofs of correctness.
+   - You can have HIGH CONFIDENCE in these areas
+   - Still check for edge cases not covered by the verification
+
+2. VIOLATED PROPERTIES: These are PROVEN BUGS - treat as CRITICAL.
+   - Formal verification found actual issues
+   - Report these as HIGH or CRITICAL severity
+   - These are not false positives - they are mathematically proven
+
+3. UNVERIFIED PROPERTIES: These could NOT be proven safe.
+   - The verification engine timed out, had errors, or is pending
+   - YOU MUST give these areas EXTRA manual scrutiny
+   - Assume these may contain vulnerabilities until proven otherwise
+   - Check for: reentrancy, overflow, access control, state corruption
+
+4. NO VERIFICATION: If formal verification was not run:
+   - Proceed with standard thorough analysis
+   - Consider recommending formal verification for critical contracts
+═══════════════════════════════════════════════════════════════════
+
 PHASE 3: REGULATORY COMPLIANCE ANALYSIS
 ═══════════════════════════════════════════════════════════════════
 EU MiCA COMPLIANCE (Markets in Crypto-Assets Regulation):
@@ -5590,6 +5614,89 @@ def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str,
         logger.error(f"Certora: Verification failed with error: {e}")
         return [{"status": "error", "reason": str(e)}]
 
+
+def format_certora_for_ai(certora_results: list) -> str:
+    """
+    Format Certora results with context that helps the AI understand
+    what was verified, what failed, and what needs extra scrutiny.
+
+    This is critical because:
+    - Verified properties = mathematically proven safe (high confidence)
+    - Violated properties = issues found by formal verification (CRITICAL)
+    - Timeout/pending = couldn't verify (NEEDS MANUAL REVIEW)
+    - Errors = verification failed (treat as unverified)
+    """
+    if not certora_results:
+        return "FORMAL VERIFICATION: Not available for this tier."
+
+    verified = []
+    violated = []
+    unverified = []  # timeouts, errors, pending, skipped
+
+    for r in certora_results:
+        if not isinstance(r, dict):
+            continue
+
+        status = r.get("status", "unknown")
+        rule = r.get("rule", "Unknown property")
+        desc = r.get("description", r.get("reason", ""))
+
+        if status == "verified":
+            verified.append(f"  ✓ {rule}: {desc}")
+        elif status in ["violated", "issues_found"]:
+            violated.append(f"  ✗ {rule}: {desc}")
+        else:
+            # timeout, pending, error, skipped, incomplete
+            unverified.append(f"  ? {rule} ({status}): {desc}")
+
+    # Build comprehensive context for AI
+    lines = ["═══════════════════════════════════════════════════════════════════"]
+    lines.append("FORMAL VERIFICATION ANALYSIS (Certora Prover)")
+    lines.append("═══════════════════════════════════════════════════════════════════")
+
+    if verified:
+        lines.append("")
+        lines.append(f"MATHEMATICALLY PROVEN SAFE ({len(verified)} properties):")
+        lines.append("These properties have been formally verified and are guaranteed to hold:")
+        lines.extend(verified)
+
+    if violated:
+        lines.append("")
+        lines.append(f"⚠️ VIOLATIONS DETECTED ({len(violated)} issues) - CRITICAL:")
+        lines.append("Formal verification found these properties are VIOLATED:")
+        lines.extend(violated)
+        lines.append("")
+        lines.append("ACTION: These are mathematically proven bugs. Address immediately.")
+
+    if unverified:
+        lines.append("")
+        lines.append(f"⚠️ UNVERIFIED PROPERTIES ({len(unverified)} properties) - NEEDS MANUAL REVIEW:")
+        lines.append("These could not be formally verified (too complex, timeout, or pending):")
+        lines.extend(unverified)
+        lines.append("")
+        lines.append("ACTION: Since formal verification could not prove safety, you MUST")
+        lines.append("        analyze these areas manually with extra scrutiny. Assume")
+        lines.append("        they may contain vulnerabilities until proven otherwise.")
+
+    # Summary for AI decision making
+    lines.append("")
+    lines.append("═══════════════════════════════════════════════════════════════════")
+    lines.append("AI GUIDANCE:")
+    if violated:
+        lines.append("- CRITICAL: Formal verification found actual bugs. These MUST be")
+        lines.append("  reported as HIGH/CRITICAL severity vulnerabilities.")
+    if unverified:
+        lines.append("- WARNING: Unverified properties indicate areas that couldn't be")
+        lines.append("  mathematically proven safe. Give these EXTRA scrutiny in your")
+        lines.append("  manual analysis. Consider them potential attack surfaces.")
+    if verified and not violated and not unverified:
+        lines.append("- All analyzed properties were verified. This is strong evidence")
+        lines.append("  of correctness, but continue with standard vulnerability analysis.")
+    lines.append("═══════════════════════════════════════════════════════════════════")
+
+    return "\n".join(lines)
+
+
 def analyze_slither(temp_path: str) -> list[dict[str, Any]]:
     """Run Slither via Docker image (solc pre-installed)."""
     if not os.path.exists(temp_path):
@@ -6351,10 +6458,14 @@ async def audit_contract(
             if not os.getenv("ANTHROPIC_API_KEY") and not os.getenv("GROK_API_KEY"):
                 raise Exception("No AI API keys configured (ANTHROPIC_API_KEY or GROK_API_KEY)")
             
+            # Format Certora results with AI context (not just raw JSON)
+            # This helps the AI understand what was verified vs what needs scrutiny
+            formatted_certora = format_certora_for_ai(certora_results) if certora_results else "N/A (Enterprise tier only)"
+
             prompt = PROMPT_TEMPLATE.format(
                 context=context,
                 fuzzing_results=json.dumps(fuzzing_results),
-                certora_results=json.dumps(certora_results) if certora_results else "N/A (Enterprise tier only)",
+                certora_results=formatted_certora,
                 code=code_str,
                 details=details,
                 tier=tier_for_flags,
