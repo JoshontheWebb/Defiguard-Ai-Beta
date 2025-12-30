@@ -265,7 +265,7 @@ class CertoraRunner:
             "loop_iter": 3,  # Unroll loops 3 times
             "process": "evm",  # EVM mode
             "solc": "solc",  # Use system solc
-            "solc_args": [f"--allow-paths={allow_paths}"],  # Pass allow-paths directly to solc
+            "solc_args": f"--allow-paths {allow_paths}",  # String, not array
             "server": "production"  # Use production server
         }
 
