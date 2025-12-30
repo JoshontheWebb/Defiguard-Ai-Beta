@@ -534,14 +534,30 @@ class CertoraRunner:
         )
 
     def _write_temp_file(self, content: str, suffix: str) -> str:
-        """Write content to a temporary file and return the path."""
+        """Write content to a temporary file and return the path.
+
+        Uses proper file descriptor handling to prevent resource leaks.
+        """
         fd, path = tempfile.mkstemp(suffix=suffix)
+        fd_closed = False
         try:
+            # os.fdopen takes ownership of the file descriptor
             with os.fdopen(fd, 'w') as f:
+                fd_closed = True  # Context manager now owns fd
                 f.write(content)
             return path
         except Exception:
-            os.close(fd)
+            # Only close fd if os.fdopen failed (before it took ownership)
+            if not fd_closed:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass  # Already closed or invalid
+            # Clean up the temp file on error
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
             raise
 
     def _cleanup_temp_file(self, path: Optional[str]):

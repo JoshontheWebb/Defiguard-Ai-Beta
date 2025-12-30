@@ -73,7 +73,7 @@ from authlib.integrations.starlette_client import OAuth
 from starlette.middleware.sessions import SessionMiddleware
 from urllib.parse import quote_plus, urlencode
 from fastapi.middleware.cors import CORSMiddleware
-from web3 import Web3
+# Note: Web3 already imported at line 19 for early client initialization
 import stripe
 import re  # For username sanitization
 import smtplib
@@ -112,7 +112,7 @@ from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.orm import sessionmaker, Session, Mapped, mapped_column
 from slither.slither import Slither
 from slither.exceptions import SlitherError
-from openai import OpenAI  # Sync
+# Note: OpenAI already imported at line 17 for early client initialization
 from tenacity import retry, stop_after_attempt, wait_fixed
 import uvicorn
 from pydantic import BaseModel, Field, field_validator
@@ -411,8 +411,8 @@ except Exception:
         def send_task(self, *args: Any, **kwargs: Any) -> None:
             raise RuntimeError("Celery is not installed in this environment")
 import redis.asyncio as aioredis
-import requests  # For cloud fallback
-import asyncio
+# Note: requests already imported at line 121
+# Note: asyncio already imported at line 123
 from jose import jwt, JWTError
 
 # === JINJA2 TEMPLATE SETUP (required for /ui and /auth) ===
@@ -468,6 +468,46 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["Authorization", "Content-Type", "X-CSRFToken", "Accept"],
 )
+
+# === SECURITY HEADERS MIDDLEWARE ===
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers including CSP to all responses."""
+
+    # Content Security Policy - restricts resource loading sources
+    CSP_POLICY = "; ".join([
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://www.googletagmanager.com https://js.stripe.com",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com",
+        "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com data:",
+        "img-src 'self' data: https: blob:",
+        "connect-src 'self' wss: ws: https://api.stripe.com https://*.infura.io https://*.walletconnect.com https://*.auth0.com",
+        "frame-src 'self' https://js.stripe.com https://verify.walletconnect.com",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self' https://*.auth0.com https://checkout.stripe.com",
+        "upgrade-insecure-requests"
+    ])
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+
+        # Add security headers to all responses
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+
+        # Add CSP header for HTML responses
+        content_type = response.headers.get("content-type", "")
+        if "text/html" in content_type:
+            response.headers["Content-Security-Policy"] = self.CSP_POLICY
+
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Global clients — already initialized at top of file
 # client and w3 are set above, no need to reset them here
@@ -736,8 +776,7 @@ class User(Base):
     # NFT minting (for future)
     wallet_address: Mapped[Optional[str]] = mapped_column(String, nullable=True, unique=True)
    
-from sqlalchemy import ForeignKey
-from sqlalchemy.orm import relationship
+# Note: ForeignKey and relationship already imported from sqlalchemy at lines 110-111
 
 class APIKey(Base):
     """Multi-key API key management for Pro/Enterprise users"""
@@ -4809,8 +4848,22 @@ from fastapi.responses import FileResponse
 
 @app.get("/static/{file_path:path}")
 async def serve_static(file_path: str):
+    """Serve static files with path traversal protection."""
     logger.info(f"Serving static file: /static/{file_path}")
-    file_full_path = os.path.join("static", file_path)
+
+    # Security: Reject path traversal attempts
+    if ".." in file_path or file_path.startswith("/") or file_path.startswith("\\"):
+        logger.warning(f"Path traversal attempt blocked: {file_path}")
+        raise HTTPException(status_code=403, detail="Invalid file path")
+
+    # Security: Validate path is within static directory using absolute path comparison
+    static_dir = os.path.abspath("static")
+    file_full_path = os.path.abspath(os.path.join("static", file_path))
+
+    if not file_full_path.startswith(static_dir + os.sep):
+        logger.warning(f"Path escape attempt blocked: {file_path} -> {file_full_path}")
+        raise HTTPException(status_code=403, detail="Access denied")
+
     if not os.path.isfile(file_full_path):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(file_full_path)
@@ -6082,7 +6135,8 @@ async def get_certora_job_status(
     if job.status == "completed" and job.results_json:
         try:
             result["results"] = json.loads(job.results_json)
-        except:
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.warning(f"Failed to parse results_json for job {job.id}: {e}")
             result["results"] = []
 
     return result
@@ -8311,8 +8365,8 @@ For Enterprise tier, also include: "proof_of_concept", "references"
                 # Just log the error and continue
                 try:
                     db.rollback()
-                except:
-                    pass
+                except Exception as rollback_error:
+                    logger.debug(f"Rollback failed (expected if no transaction): {rollback_error}")
         else:
             logger.debug("[GAMIFICATION] Guest user - stats not tracked")
         

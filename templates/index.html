@@ -1102,10 +1102,21 @@
     </script>
     <script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script>
     <script>
-        // Cache-bust CSS and JS
-        const timestamp = new Date().getTime();
-        document.write(`<link rel="stylesheet" href="/static/styles.css?v=${timestamp}">`);
-        document.write(`<script src="/static/script.js?v=${timestamp}"><\/script>`);
+        // Cache-bust CSS and JS using safe DOM manipulation (no document.write)
+        (function() {
+            const timestamp = new Date().getTime();
+
+            // Add CSS link dynamically
+            const cssLink = document.createElement('link');
+            cssLink.rel = 'stylesheet';
+            cssLink.href = '/static/styles.css?v=' + timestamp;
+            document.head.appendChild(cssLink);
+
+            // Add script dynamically
+            const scriptTag = document.createElement('script');
+            scriptTag.src = '/static/script.js?v=' + timestamp;
+            document.head.appendChild(scriptTag);
+        })();
     </script>
     <!-- Queue Monitor Modal Script -->
     <script>

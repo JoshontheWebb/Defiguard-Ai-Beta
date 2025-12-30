@@ -10,6 +10,104 @@ const log = (label, ...args) => {
 const debugLog = (...args) => { if (DEBUG_MODE) console.log(...args); };
 
 // ---------------------------------------------------------------------
+// RESOURCE CLEANUP MANAGER - Prevents memory leaks from intervals/WebSockets
+// ---------------------------------------------------------------------
+const ResourceManager = {
+    intervals: new Set(),
+    websockets: new Set(),
+
+    // Track an interval for cleanup
+    addInterval(intervalId) {
+        this.intervals.add(intervalId);
+        return intervalId;
+    },
+
+    // Remove a tracked interval
+    removeInterval(intervalId) {
+        if (intervalId) {
+            clearInterval(intervalId);
+            this.intervals.delete(intervalId);
+        }
+    },
+
+    // Track a WebSocket for cleanup
+    addWebSocket(ws) {
+        this.websockets.add(ws);
+        return ws;
+    },
+
+    // Remove a tracked WebSocket
+    removeWebSocket(ws) {
+        if (ws) {
+            try {
+                if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+                    ws.close();
+                }
+            } catch (e) {
+                debugLog('[ResourceManager] Error closing WebSocket:', e);
+            }
+            this.websockets.delete(ws);
+        }
+    },
+
+    // Clean up all tracked resources
+    cleanup() {
+        debugLog('[ResourceManager] Cleaning up resources...');
+
+        // Clear all intervals
+        this.intervals.forEach(intervalId => {
+            clearInterval(intervalId);
+        });
+        this.intervals.clear();
+
+        // Close all WebSockets
+        this.websockets.forEach(ws => {
+            try {
+                if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+                    ws.close();
+                }
+            } catch (e) {
+                debugLog('[ResourceManager] Error closing WebSocket:', e);
+            }
+        });
+        this.websockets.clear();
+
+        // Also clean up any global intervals
+        if (window.authTierInterval) {
+            clearInterval(window.authTierInterval);
+            window.authTierInterval = null;
+        }
+        if (window.authCheckInterval) {
+            clearInterval(window.authCheckInterval);
+            window.authCheckInterval = null;
+        }
+
+        debugLog('[ResourceManager] Cleanup complete');
+    }
+};
+
+// Clean up resources when page is being unloaded
+window.addEventListener('beforeunload', () => {
+    ResourceManager.cleanup();
+});
+
+// Also handle visibility changes (mobile tab switching)
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+        // Page is hidden - clean up WebSockets to prevent stale connections
+        ResourceManager.websockets.forEach(ws => {
+            try {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.close();
+                }
+            } catch (e) {
+                // Ignore errors during visibility change
+            }
+        });
+    }
+});
+
+// ---------------------------------------------------------------------
 // AUDIT KEY HELPERS - For persistent audit access
 // ---------------------------------------------------------------------
 
@@ -380,20 +478,23 @@ const CertoraNotificationChecker = {
     },
 
     start(intervalMs = 60000) {
+        // Stop any existing interval first
+        this.stop();
+
         // Check immediately on start
         this.checkNotifications();
 
-        // Then check periodically
-        this.checkInterval = setInterval(() => {
+        // Then check periodically - track with ResourceManager
+        this.checkInterval = ResourceManager.addInterval(setInterval(() => {
             this.checkNotifications();
-        }, intervalMs);
+        }, intervalMs));
 
         debugLog('[CERTORA_NOTIFY] Notification checker started');
     },
 
     stop() {
         if (this.checkInterval) {
-            clearInterval(this.checkInterval);
+            ResourceManager.removeInterval(this.checkInterval);
             this.checkInterval = null;
         }
     }
@@ -556,19 +657,23 @@ class AuditQueueTracker {
     
     connectWebSocket() {
         if (!this.jobId) return;
-        
+
+        // Clean up existing connection first
+        this.disconnectWebSocket();
+
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${wsProtocol}//${window.location.host}/ws/job/${this.jobId}`;
-        
+
         try {
             this.ws = new WebSocket(wsUrl);
-            
+            ResourceManager.addWebSocket(this.ws);
+
             this.ws.onopen = () => {
                 log('QUEUE_WS', 'Connected to job status WebSocket');
                 // Stop polling since WebSocket is working
                 this.stopPolling();
             };
-            
+
             this.ws.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
@@ -577,35 +682,47 @@ class AuditQueueTracker {
                     log('QUEUE_WS', 'Failed to parse message:', e);
                 }
             };
-            
+
             this.ws.onerror = (error) => {
                 log('QUEUE_WS', 'WebSocket error, falling back to polling');
                 this.startPolling();
             };
-            
+
             this.ws.onclose = () => {
                 log('QUEUE_WS', 'WebSocket closed');
+                ResourceManager.removeWebSocket(this.ws);
             };
-            
-            // Keep-alive ping every 25 seconds
-            this.pingInterval = setInterval(() => {
+
+            // Keep-alive ping every 25 seconds - track with ResourceManager
+            this.pingInterval = ResourceManager.addInterval(setInterval(() => {
                 if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                     this.ws.send('ping');
                 }
-            }, 25000);
-            
+            }, 25000));
+
         } catch (e) {
             log('QUEUE_WS', 'Failed to connect WebSocket:', e);
             this.startPolling();
         }
     }
-    
+
+    disconnectWebSocket() {
+        if (this.pingInterval) {
+            ResourceManager.removeInterval(this.pingInterval);
+            this.pingInterval = null;
+        }
+        if (this.ws) {
+            ResourceManager.removeWebSocket(this.ws);
+            this.ws = null;
+        }
+    }
+
     startPolling() {
         if (this.pollInterval) return; // Already polling
-        
-        this.pollInterval = setInterval(async () => {
+
+        this.pollInterval = ResourceManager.addInterval(setInterval(async () => {
             if (!this.jobId) return;
-            
+
             try {
                 const response = await fetch(`/audit/status/${this.jobId}`);
                 if (response.ok) {
@@ -615,12 +732,12 @@ class AuditQueueTracker {
             } catch (e) {
                 log('QUEUE_POLL', 'Polling error:', e);
             }
-        }, 3000); // Poll every 3 seconds
+        }, 3000)); // Poll every 3 seconds
     }
-    
+
     stopPolling() {
         if (this.pollInterval) {
-            clearInterval(this.pollInterval);
+            ResourceManager.removeInterval(this.pollInterval);
             this.pollInterval = null;
         }
     }
@@ -763,17 +880,7 @@ class AuditQueueTracker {
     
     disconnect() {
         this.stopPolling();
-        
-        if (this.pingInterval) {
-            clearInterval(this.pingInterval);
-            this.pingInterval = null;
-        }
-        
-        if (this.ws) {
-            this.ws.close();
-            this.ws = null;
-        }
-        
+        this.disconnectWebSocket();
         this.jobId = null;
     }
 }
@@ -1752,18 +1859,22 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       };
 
-      // WebSocket audit log (single instance)
+      // WebSocket audit log (single instance) - tracked by ResourceManager for cleanup
       const wsUsername = (await fetchUsername())?.username || "guest";
-      const ws = new WebSocket(`${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws-audit-log?username=${encodeURIComponent(wsUsername)}`);
-      ws.onopen = () => logMessage("Connected to audit log");
-      ws.onmessage = (e) => {
+      const auditLogWs = new WebSocket(`${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws-audit-log?username=${encodeURIComponent(wsUsername)}`);
+      ResourceManager.addWebSocket(auditLogWs);
+      auditLogWs.onopen = () => logMessage("Connected to audit log");
+      auditLogWs.onmessage = (e) => {
         try {
           const data = JSON.parse(e.data);
           if (data.type === "audit_log") logMessage(data.message);
         } catch (_) {}
       };
-      ws.onerror = () => logMessage("WebSocket error");
-      ws.onclose = () => logMessage("Disconnected from audit log");
+      auditLogWs.onerror = () => logMessage("WebSocket error");
+      auditLogWs.onclose = () => {
+        logMessage("Disconnected from audit log");
+        ResourceManager.removeWebSocket(auditLogWs);
+      };
 
       // Hamburger Menu
       if (hamburger && sidebar && mainContent) {
