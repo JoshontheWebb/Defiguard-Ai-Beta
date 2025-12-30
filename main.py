@@ -5038,13 +5038,14 @@ class TierUpgradeRequest(BaseModel):
     has_diamond: bool = False
 
 @app.get("/tier")
-async def get_tier(request: Request, username: str = Query(None), db: Session = Depends(get_db)) -> dict[str, Any]:
+async def get_tier(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Get user tier information. Uses authenticated session only - no query param bypass."""
     session_username = request.session.get("username")
-    logger.debug(f"Tier request: Query username={username}, Session username={session_username}, session: {request.session}")
-    
-    effective_username = username or session_username
-    if not effective_username:
-        logger.debug("No username provided for /tier; returning free tier defaults")
+    logger.debug(f"Tier request: Session username={session_username}")
+
+    # Security: Only use authenticated session username, never trust query params
+    if not session_username:
+        logger.debug("No session username for /tier; returning free tier defaults")
         return {
             "tier": "free",
             "size_limit": "250KB",
@@ -5055,10 +5056,10 @@ async def get_tier(request: Request, username: str = Query(None), db: Session = 
             "has_diamond": False,
             "username": None
         }
-    
-    user = db.query(User).filter(User.username == effective_username).first()
+
+    user = db.query(User).filter(User.username == session_username).first()
     if not user:
-        logger.error(f"Tier fetch failed: User {effective_username} not found")
+        logger.warning(f"Tier fetch: User {session_username} not found in database")
         raise HTTPException(status_code=404, detail="User not found")
     
     user_tier = user.tier
@@ -5597,7 +5598,10 @@ async def process_pending_audit(db: Session, pending_id: str):
         file_size = os.path.getsize(temp_path)
         with open(temp_path, "rb") as f:
             file = UploadFile(filename="temp.sol", file=f, size=file_size)
-            raw_result: dict[str, Any] | None = await audit_contract(file, "", pending_audit.username, db, None)
+            raw_result: dict[str, Any] | None = await audit_contract(
+                file=file, contract_address="", db=db, request=None,
+                _from_queue=True, _queue_username=pending_audit.username
+            )
         
         os.unlink(temp_path)
         
@@ -5654,87 +5658,89 @@ from io import BytesIO
 async def upload_temp(
     request: Request,
     file: UploadFile = File(...),
-    username: str = Query(None),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    """Upload temp file. Security: Uses authenticated session only."""
     if request is None:
         raise HTTPException(status_code=400, detail="Request object is required")
-    
+
     await verify_csrf_token(request)
-    
+
+    # Security: Only use authenticated session username
     session_username = request.session.get("username")
-    logger.debug(f"Upload-temp request: Query username={username}, Session username={session_username}, session: {request.session}")
-    
-    effective_username = username or session_username
-    if not effective_username:
-        logger.error("No username provided for /upload-temp; redirecting to login")
+    logger.debug(f"Upload-temp request: Session username={session_username}")
+
+    if not session_username:
+        logger.error("No session username for /upload-temp; authentication required")
         raise HTTPException(status_code=401, detail="Please login to continue")
-    
-    user = db.query(User).filter(User.username == effective_username).first()
+
+    user = db.query(User).filter(User.username == session_username).first()
     if not user or not user.has_diamond:
         raise HTTPException(status_code=403, detail="Temporary file upload requires Diamond add-on")
-    
+
     temp_id = str(uuid.uuid4())
     temp_dir = os.path.join(DATA_DIR, "temp_files")
     os.makedirs(temp_dir, exist_ok=True)
     temp_path = os.path.join(temp_dir, f"{temp_id}.sol")
-    
+
     try:
         code_bytes = await file.read()
         file_size = len(code_bytes)
-        
+
         with open(temp_path, "wb") as f:
             f.write(code_bytes)
     except PermissionError as e:
-        logger.error(f"Failed to write temp file: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to save temporary file due to permissions")
+        logger.error(f"Failed to write temp file: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save temporary file")
     except Exception as e:
-        logger.error(f"Upload temp file failed for {effective_username}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to upload temporary file: {str(e)}")
-    
-    logger.info(f"Temporary file uploaded for {effective_username}: {temp_id}, size: {file_size / 1024 / 1024:.2f}MB")
+        logger.error(f"Upload temp file failed for {session_username}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload temporary file")
+
+    logger.info(f"Temporary file uploaded for {session_username}: {temp_id}, size: {file_size / 1024 / 1024:.2f}MB")
     return {"temp_id": temp_id, "file_size": file_size}
 
 @app.post("/diamond-audit")
 async def diamond_audit(
     request: Request,
     file: UploadFile = File(...),
-    username: str = Query(None),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    """Diamond audit endpoint. Security: Uses authenticated session only."""
     await verify_csrf_token(request)
-    
+
+    # Security: Only use authenticated session username, never trust query params
     session_username = request.session.get("username") if request is not None else None
-    logger.debug(f"Diamond-audit request: Query username={username}, Session username={session_username}, session: {getattr(request, 'session', None)}")
-    
-    effective_username = username or session_username
-    if not effective_username:
-        logger.error("No username provided for /diamond-audit; redirecting to login")
+    logger.debug(f"Diamond-audit request: Session username={session_username}")
+
+    if not session_username:
+        logger.error("No session username for /diamond-audit; authentication required")
         raise HTTPException(status_code=401, detail="Please login to continue")
-    
-    user = db.query(User).filter(User.username == effective_username).first()
+
+    user = db.query(User).filter(User.username == session_username).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
     try:
         code_bytes = await file.read()
         file_size = len(code_bytes)
-        
+
         if file_size == 0:
-            logger.error(f"Empty file uploaded for {effective_username}")
+            logger.error(f"Empty file uploaded for {session_username}")
             raise HTTPException(status_code=400, detail="Empty file uploaded")
-        
+
         if file_size > 50 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="File size exceeds 50MB limit")
-        
+
         overage_cost = usage_tracker.calculate_diamond_overage(file_size)
-        logger.info(f"Preparing Diamond audit for {effective_username} with overage ${overage_cost / 100:.2f} for file size {file_size / 1024 / 1024:.2f}MB")
-        
+        logger.info(f"Preparing Diamond audit for {session_username} with overage ${overage_cost / 100:.2f} for file size {file_size / 1024 / 1024:.2f}MB")
+
         if user.has_diamond:
             # Process audit directly
             new_file = UploadFile(filename=file.filename, file=BytesIO(code_bytes), size=file_size)
-            result = cast(dict[str, Any], await audit_contract(new_file, "", effective_username, db, request) or {})
-            
+            result = cast(dict[str, Any], await audit_contract(
+                file=new_file, contract_address="", db=db, request=request
+            ) or {})
+
             # Report overage post-audit
             overage_mb = (file_size - 1024 * 1024) / (1024 * 1024)
             if overage_mb > 0 and user.stripe_subscription_id and user.stripe_subscription_item_id:
@@ -5745,10 +5751,10 @@ async def diamond_audit(
                         timestamp=int(time.time()),
                         action="increment"
                     )
-                    logger.info(f"Reported {overage_mb:.2f}MB overage for {effective_username} to Stripe post-audit")
+                    logger.info(f"Reported {overage_mb:.2f}MB overage for {session_username} to Stripe post-audit")
                 except Exception as e:
-                    logger.error(f"Failed to report overage for {effective_username}: {str(e)}")
-            
+                    logger.error(f"Failed to report overage for {session_username}: {e}")
+
             return result
         else:
             # Persist to PendingAudit
@@ -5756,49 +5762,51 @@ async def diamond_audit(
             temp_dir = os.path.join(DATA_DIR, "temp_files")
             os.makedirs(temp_dir, exist_ok=True)
             temp_path = os.path.join(temp_dir, f"{pending_id}.sol")
-            
+
             with open(temp_path, "wb") as f:
                 f.write(code_bytes)
-            
-            pending_audit = PendingAudit(id=pending_id, username=effective_username, temp_path=temp_path)
+
+            pending_audit = PendingAudit(id=pending_id, username=session_username, temp_path=temp_path)
             db.add(pending_audit)
             db.commit()
-            
+
             if user.tier == "pro":
                 line_items = [{"price": STRIPE_PRICE_DIAMOND, "quantity": 1}]
             else:
                 line_items = [{"price": STRIPE_PRICE_PRO, "quantity": 1}, {"price": STRIPE_PRICE_DIAMOND, "quantity": 1}]
-            
+
             if not STRIPE_API_KEY:
-                logger.error(f"Stripe checkout creation failed for {effective_username} Diamond add-on: STRIPE_API_KEY not set")
+                logger.error(f"Stripe checkout creation failed for {session_username} Diamond add-on: STRIPE_API_KEY not set")
                 os.unlink(temp_path)
                 db.delete(pending_audit)
                 db.commit()
-                raise HTTPException(status_code=503, detail="Payment processing unavailable: Please set STRIPE_API_KEY in environment variables.")
-            
+                raise HTTPException(status_code=503, detail="Payment processing unavailable")
+
             if request is not None:
                 base_url = f"{request.url.scheme}://{request.url.netloc}"
             else:
                 base_url = APP_BASE_URL
-            
+
             success_url = f"{base_url}/ui?upgrade=success&audit=complete&pending_id={urllib.parse.quote(pending_id)}"
             cancel_url = f"{base_url}/ui"
-            
+
             session = stripe.checkout.Session.create(
                 payment_method_types=["card"],
                 line_items=line_items,
                 mode="subscription",
                 success_url=success_url,
                 cancel_url=cancel_url,
-                metadata={"pending_id": pending_id, "username": effective_username, "audit_type": "diamond_overage"}
+                metadata={"pending_id": pending_id, "username": session_username, "audit_type": "diamond_overage"}
             )
-            
-            logger.info(f"Redirecting {effective_username} to Stripe checkout for Diamond add-on")
+
+            logger.info(f"Redirecting {session_username} to Stripe checkout for Diamond add-on")
             return {"session_url": session.url}
-    
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Diamond audit error for {effective_username}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        logger.error(f"Diamond audit error for {session_username}: {e}")
+        raise HTTPException(status_code=500, detail="An error occurred processing your request")
 
 @app.get("/pending-status/{pending_id}")
 async def pending_status(pending_id: str, db: Session = Depends(get_db)):
@@ -5817,46 +5825,56 @@ async def complete_diamond_audit(
     db: Session = Depends(get_db),
     session_id: str = Query(...),
     temp_id: str = Query(...),
-    username: str = Query(None),
 ):
+    """Complete diamond audit after Stripe payment. Security: Uses session + Stripe metadata verification."""
     session_username = request.session.get("username") if request is not None else None
-    logger.debug(f"Complete-diamond-audit request: Query username={username}, Session username={session_username}, session_id={session_id}, temp_id={temp_id}, session: {getattr(request, 'session', None)}")
-    
-    effective_username = username or session_username
-    if not effective_username:
-        logger.error("No username provided for /complete-diamond-audit; redirecting to login")
+    logger.debug(f"Complete-diamond-audit: Session username={session_username}, session_id={session_id}, temp_id={temp_id}")
+
+    if not session_username:
+        logger.error("No session username for /complete-diamond-audit; authentication required")
         return RedirectResponse(url="/auth?redirect_reason=no_username")
-    
-    user = db.query(User).filter(User.username == effective_username).first()
+
+    user = db.query(User).filter(User.username == session_username).first()
     if not user:
-        logger.error(f"User {effective_username} not found for /complete-diamond-audit")
+        logger.error(f"User {session_username} not found for /complete-diamond-audit")
         return RedirectResponse(url="/auth?redirect_reason=user_not_found")
-    
+
     if not STRIPE_API_KEY:
-        logger.error(f"Complete diamond audit failed for {effective_username}: STRIPE_API_KEY not set")
+        logger.error(f"Complete diamond audit failed for {session_username}: STRIPE_API_KEY not set")
         return RedirectResponse(url="/ui?upgrade=error&message=Payment%20processing%20unavailable")
-    
+
     try:
         session = stripe.checkout.Session.retrieve(session_id)
+
+        # Security: Verify the Stripe session belongs to this user
+        stripe_username = session.metadata.get("username") if session.metadata else None
+        if stripe_username and stripe_username != session_username:
+            logger.warning(f"Stripe session username mismatch: session={session_username}, stripe={stripe_username}")
+            return RedirectResponse(url="/ui?upgrade=error&message=Session%20mismatch")
+
         if session.payment_status == "paid":
             temp_path = os.path.join(DATA_DIR, "temp_files", f"{temp_id}.sol")
             if not os.path.exists(temp_path):
                 raise HTTPException(status_code=404, detail="Temporary file not found")
-            
+
             file_size = os.path.getsize(temp_path)
             with open(temp_path, "rb") as f:
                 file = UploadFile(filename="temp.sol", file=f, size=file_size)
-                _result: dict[str, Any] | None = await audit_contract(file, None, effective_username, db, request)
-            
+                _result: dict[str, Any] | None = await audit_contract(
+                    file=file, contract_address=None, db=db, request=request
+                )
+
             os.unlink(temp_path)
-            logger.info(f"Diamond audit completed for {effective_username} after payment, session: {request.session}")
+            logger.info(f"Diamond audit completed for {session_username} after payment")
             return RedirectResponse(url="/ui?upgrade=success")
         else:
-            logger.error(f"Payment not completed for {effective_username}, session_id={session_id}, payment_status={session.payment_status}")
+            logger.error(f"Payment not completed for {session_username}, session_id={session_id}")
             return RedirectResponse(url="/ui?upgrade=failed")
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Complete diamond audit failed for {effective_username}: {str(e)}")
-        return RedirectResponse(url=f"/ui?upgrade=error&message={str(e)}")
+        logger.error(f"Complete diamond audit failed for {session_username}: {e}")
+        return RedirectResponse(url="/ui?upgrade=error&message=Processing%20error")
 
 @app.get("/api/audit")
 async def api_audit(username: str, api_key: str, db: Session = Depends(get_db)):
@@ -5872,15 +5890,21 @@ async def api_audit(username: str, api_key: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 @app.post("/mint-nft")
-async def mint_nft(request: Request, username: str = Query(...), db: Session = Depends(get_db)):
+async def mint_nft(request: Request, db: Session = Depends(get_db)):
+    """Mint NFT for enterprise users. Security: Uses authenticated session only."""
     await verify_csrf_token(request)
-    
-    user = db.query(User).filter(User.username == username).first()
+
+    # Security: Only use authenticated session username
+    session_username = request.session.get("username")
+    if not session_username:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    user = db.query(User).filter(User.username == session_username).first()
     if not user or user.tier != "enterprise":
         raise HTTPException(status_code=403, detail="NFT mint requires Enterprise tier")
-    
+
     token_id = secrets.token_hex(8)
-    logger.info(f"Minted NFT for {username}: token_id={token_id}")
+    logger.info(f"Minted NFT for {session_username}: token_id={token_id}")
     return {"token_id": token_id}
 
 # Removed: /oauth-google stub endpoint (was using placeholder client ID)
@@ -5901,25 +5925,24 @@ async def upgrade_page():
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 @app.get("/facets/{contract_address}")
-async def get_facets(contract_address: str, request: Request, username: str = Query(None), api_key: str = Header(None, alias="X-API-Key"), db: Session = Depends(get_db)) -> dict[str, Any]:
+async def get_facets(contract_address: str, request: Request, api_key: str = Header(None, alias="X-API-Key"), db: Session = Depends(get_db)) -> dict[str, Any]:
     """
     Get diamond proxy facets. Supports both session auth (web UI) and API key auth.
+    Security: No username query param - uses session or API key only.
     """
     try:
-        logger.debug(f"Received /facets request for {contract_address} by {username or 'anonymous'}, session: {request.session}")
-
         if w3 is None or not w3.is_address(contract_address):
             logger.error(f"Invalid Ethereum address or Web3 not initialized: {contract_address}")
             raise HTTPException(status_code=400, detail="Invalid Ethereum address or Web3 not initialized")
 
-        # Try session auth first, then API key
+        # Security: Only use authenticated session or API key - no query param bypass
         session_username = request.session.get("username")
-        effective_username = username or session_username
         user = None
 
-        # Check session auth
-        if effective_username:
-            user = db.query(User).filter(User.username == effective_username).first()
+        # Try session auth first
+        if session_username:
+            user = db.query(User).filter(User.username == session_username).first()
+            logger.debug(f"Facets request for {contract_address} by session user {session_username}")
 
         # If no session user, try API key auth
         if not user and api_key:
@@ -5929,6 +5952,7 @@ async def get_facets(contract_address: str, request: Request, username: str = Qu
                 if user:
                     api_key_obj.last_used_at = datetime.now()
                     db.commit()
+                    logger.debug(f"Facets request for {contract_address} by API key user {user.username}")
 
         if not user:
             raise HTTPException(status_code=401, detail="Authentication required. Please sign in or provide API key.")
@@ -5939,10 +5963,10 @@ async def get_facets(contract_address: str, request: Request, username: str = Qu
         if current_tier not in ["pro", "enterprise", "diamond"] and not has_diamond:
             logger.warning(f"Facet preview denied for {user.username} (tier: {current_tier}, has_diamond: {has_diamond})")
             raise HTTPException(status_code=403, detail="Facet preview requires Pro/Enterprise tier. Upgrade at /ui.")
-        
+
         if not os.getenv("INFURA_PROJECT_ID"):
-            logger.error(f"Facet fetch failed for {effective_username}: INFURA_PROJECT_ID not set")
-            raise HTTPException(status_code=503, detail="On-chain analysis unavailable: Please set INFURA_PROJECT_ID in environment variables.")
+            logger.error(f"Facet fetch failed for {user.username}: INFURA_PROJECT_ID not set")
+            raise HTTPException(status_code=503, detail="On-chain analysis unavailable")
         
         diamond_abi: list[dict[str, Any]] = [
             {
@@ -6738,10 +6762,10 @@ async def process_audit_queue():
                         result = await audit_contract(
                             file=file_obj,
                             contract_address=job.contract_address,
-                            username=job.username,
                             db=queue_db,
                             request=None,
                             _from_queue=True,
+                            _queue_username=job.username,
                             _job_id=job.job_id  # Pass job_id for phase updates
                         )
 
@@ -6900,7 +6924,6 @@ async def submit_audit_to_queue(
     request: Request,
     file: UploadFile = File(...),
     contract_address: str = Query(None),
-    username: str = Query(None),
     notify_email: str = Query(None),
     generate_key: bool = Query(True),
     db: Session = Depends(get_db)
@@ -6911,6 +6934,9 @@ async def submit_audit_to_queue(
     The audit_key can be used to retrieve results later without being logged in.
     This allows users to start an audit, leave the page, and return later.
 
+    Security: Uses authenticated session only - no username query param bypass.
+    Unauthenticated users can still submit as "guest".
+
     Parameters:
         file: The Solidity contract file
         contract_address: Optional on-chain address for verification
@@ -6919,11 +6945,13 @@ async def submit_audit_to_queue(
     """
     await verify_csrf_token(request)
 
+    # Security: Only use authenticated session username, never trust query params
     session_username = request.session.get("username")
     userinfo = request.session.get("userinfo")
     session_email = userinfo.get("email") if userinfo else None
 
-    effective_username = username or session_username or session_email or "guest"
+    # Use session auth or fall back to guest (no query param override)
+    effective_username = session_username or session_email or "guest"
 
     # Get user and tier
     user = None
@@ -7297,15 +7325,20 @@ async def websocket_job_status(websocket: WebSocket, job_id: str):
 async def audit_contract(
     file: UploadFile = File(...),
     contract_address: str = Query(None),
-    username: str = Query(None),
     db: Session = Depends(get_db),
     request: Request = None,
-    _from_queue: bool = False
+    _from_queue: bool = False,
+    _queue_username: str = None,  # Internal param for queue processor only
+    _job_id: str = None  # Internal param for job tracking
 ):
+    """
+    Main audit endpoint. Security: Uses authenticated session only.
+    Queue processor passes username via _queue_username internal param.
+    """
     # Skip CSRF for queue-originated requests (no request object)
     if not _from_queue:
         await verify_csrf_token(request)
-    
+
     # Handle request=None for queue-originated requests
     if request is not None:
         session_username = request.session.get("username")
@@ -7315,11 +7348,15 @@ async def audit_contract(
         session_username = None
         userinfo = None
         session_email = None
-    
-    logger.debug(f"Audit request: Query username={username}, Session username={session_username}, Session email={session_email}, from_queue={_from_queue}")
-    
-    # Resolve effective username
-    effective_username = username or session_username or session_email or "guest"
+
+    # Security: Only use session auth or internal queue username (no query param)
+    # _queue_username is only set by internal queue processor
+    if _from_queue and _queue_username:
+        effective_username = _queue_username
+    else:
+        effective_username = session_username or session_email or "guest"
+
+    logger.debug(f"Audit request: Session username={session_username}, effective={effective_username}, from_queue={_from_queue}")
     user = None
     
     if effective_username != "guest":
@@ -8492,10 +8529,10 @@ async def process_one_queued_job():
             result = await audit_contract(
                 file=file_obj,
                 contract_address=job.contract_address,
-                username=job.username,
                 db=queue_db,
                 request=None,
-                _from_queue=True
+                _from_queue=True,
+                _queue_username=job.username
             )
         finally:
             queue_db.close()
