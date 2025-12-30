@@ -249,7 +249,10 @@ class CertoraRunner:
 
         # JSON format conf file for Certora Prover
         # Use path:contract format to handle UUID filenames with hyphens
-        # solc_allow_paths tells solc where it can read files from
+        #
+        # Per Certora docs: solc_allow_path (singular) expects a STRING, not array
+        # It passes the value to solc's --allow-paths option
+        # See: https://docs.certora.com/en/latest/docs/prover/cli/options.html
         contract_dir = str(Path(contract_path).parent)
 
         conf = {
@@ -259,10 +262,10 @@ class CertoraRunner:
             "wait_for_results": "all",  # Wait for verification to complete
             "rule_sanity": "basic",  # Check for tautologies
             "optimistic_loop": True,  # Assume loops terminate
-            "loop_iter": 3,  # Unroll loops 3 times
+            "loop_iter": "3",  # String per docs: "numbers are also encoded as strings"
             "process": "evm",  # EVM mode
             "solc": "solc",  # Use system solc
-            "solc_allow_paths": [contract_dir],  # Allow solc to read from contract directory
+            "solc_allow_path": contract_dir,  # STRING: single path to contract directory
             "server": "production"  # Use production server
         }
 
