@@ -233,8 +233,10 @@ class CertoraRunner:
         try:
             with open(contract_path, 'r') as f:
                 content = f.read()
-            pattern = r"contract\s+(\w+)"
-            match = re.search(pattern, content)
+            # Match contract declaration at start of line (not in comments)
+            # Pattern: optional whitespace, optional modifiers, then "contract Name"
+            pattern = r"^\s*(?:abstract\s+)?contract\s+(\w+)"
+            match = re.search(pattern, content, re.MULTILINE)
             return match.group(1) if match else Path(contract_path).stem
         except Exception:
             return Path(contract_path).stem

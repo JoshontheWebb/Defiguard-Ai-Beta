@@ -102,7 +102,9 @@ class SolidityParser:
 
     def _extract_contract_name(self):
         """Extract the main contract name."""
-        match = re.search(r"contract\s+(\w+)", self.code)
+        # Match contract declaration at start of line (not in comments)
+        # Pattern: optional whitespace, optional modifiers, then "contract Name"
+        match = re.search(r"^\s*(?:abstract\s+)?contract\s+(\w+)", self.code, re.MULTILINE)
         self.contract_name = match.group(1) if match else "Contract"
 
     def _normalize_type(self, sol_type: str) -> str:
