@@ -927,6 +927,45 @@ def is_email_configured() -> bool:
     return bool(config["user"] and config["password"])
 
 
+# Email validation pattern (RFC 5322 simplified)
+EMAIL_PATTERN = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+
+# Ethereum address validation pattern
+ETH_ADDRESS_PATTERN = re.compile(r'^0x[a-fA-F0-9]{40}$')
+
+
+def validate_email(email: str) -> bool:
+    """Validate email format."""
+    if not email or not isinstance(email, str):
+        return False
+    if len(email) > 254:  # RFC 5321 limit
+        return False
+    return bool(EMAIL_PATTERN.match(email))
+
+
+def validate_eth_address(address: str) -> bool:
+    """Validate Ethereum address format."""
+    if not address or not isinstance(address, str):
+        return False
+    return bool(ETH_ADDRESS_PATTERN.match(address))
+
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename to prevent path traversal and special characters."""
+    if not filename or not isinstance(filename, str):
+        return "contract.sol"
+    # Remove path components
+    filename = os.path.basename(filename)
+    # Remove special characters except . - _
+    filename = re.sub(r'[^\w\s\-.]', '', filename)
+    # Remove leading/trailing whitespace and dots
+    filename = filename.strip().strip('.')
+    # Limit length
+    if len(filename) > 240:
+        filename = filename[:240]
+    return filename or "contract.sol"
+
+
 def send_audit_completion_email(
     to_email: str,
     audit_key: str,
@@ -946,13 +985,28 @@ def send_audit_completion_email(
         logger.warning("Email not configured - skipping audit notification")
         return False
 
+    # Validate email format
+    if not validate_email(to_email):
+        logger.error(f"Invalid email format: {to_email[:50]}...")
+        return False
+
+    # Validate audit key format
+    if not audit_key or not audit_key.startswith("dga_"):
+        logger.error("Invalid audit key format")
+        return False
+
     config = get_smtp_config()
     base_url = os.getenv("BASE_URL", "https://defiguard.onrender.com")
 
     try:
+        # HTML escape user-controlled content to prevent injection
+        import html
+        safe_contract_name = html.escape(contract_name or "contract.sol")
+        safe_audit_key = html.escape(audit_key)
+
         # Create message
         msg = MIMEMultipart("alternative")
-        msg["Subject"] = f"🔒 DeFiGuard Audit Complete: {contract_name}"
+        msg["Subject"] = f"🔒 DeFiGuard Audit Complete: {safe_contract_name}"
         msg["From"] = f"{config['from_name']} <{config['from_email']}>"
         msg["To"] = to_email
 
@@ -983,28 +1037,28 @@ def send_audit_completion_email(
             risk_label = "Unknown"
             risk_score = 0
 
-        # Plain text version
+        # Plain text version (no HTML escaping needed)
         text_content = f"""
 DeFiGuard Smart Contract Audit Complete
 ========================================
 
 {status_text}
 
-Contract: {contract_name}
+Contract: {safe_contract_name}
 Security Score: {risk_score:.0f}/100 ({risk_label})
 Issues Found: {issues_count} total ({critical_count} critical, {high_count} high)
 
 View your full audit results:
-{base_url}/audit/retrieve/{audit_key}
+{base_url}/audit/retrieve/{safe_audit_key}
 
-Your Audit Key: {audit_key}
+Your Audit Key: {safe_audit_key}
 (Save this key to access your results anytime)
 
 ---
 DeFiGuard AI - Advanced Smart Contract Security
 """
 
-        # HTML version
+        # HTML version (using escaped values)
         html_content = f"""
 <!DOCTYPE html>
 <html>
@@ -1028,7 +1082,7 @@ DeFiGuard AI - Advanced Smart Contract Security
             <!-- Contract Info -->
             <div style="background-color: #252542; border-radius: 8px; padding: 20px; margin-bottom: 20px;">
                 <p style="margin: 0 0 10px; color: #a0a0a0; font-size: 14px;">Contract</p>
-                <p style="margin: 0; font-size: 18px; font-weight: bold; color: #fff;">{contract_name}</p>
+                <p style="margin: 0; font-size: 18px; font-weight: bold; color: #fff;">{safe_contract_name}</p>
             </div>
 
             <!-- Security Score -->
@@ -1055,14 +1109,14 @@ DeFiGuard AI - Advanced Smart Contract Security
             </div>
 
             <!-- CTA Button -->
-            <a href="{base_url}/audit/retrieve/{audit_key}" style="display: block; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; text-decoration: none; padding: 15px 30px; border-radius: 8px; font-weight: bold; text-align: center; margin-bottom: 20px;">
+            <a href="{base_url}/audit/retrieve/{safe_audit_key}" style="display: block; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; text-decoration: none; padding: 15px 30px; border-radius: 8px; font-weight: bold; text-align: center; margin-bottom: 20px;">
                 View Full Audit Report
             </a>
 
             <!-- Audit Key -->
             <div style="background-color: #252542; border-radius: 8px; padding: 15px; text-align: center;">
                 <p style="margin: 0 0 5px; color: #a0a0a0; font-size: 12px;">Your Audit Key (save this)</p>
-                <code style="color: #8b5cf6; font-size: 14px; word-break: break-all;">{audit_key}</code>
+                <code style="color: #8b5cf6; font-size: 14px; word-break: break-all;">{safe_audit_key}</code>
             </div>
         </div>
 
@@ -6697,35 +6751,44 @@ async def process_audit_queue():
                     logger.exception(f"[QUEUE_PROCESSOR] Audit failed for job {job.job_id[:8]}...")
                     await audit_queue.fail(job.job_id, error_msg)
 
-                    # Update AuditResult with failure
+                    # Update AuditResult with failure (use separate session with proper cleanup)
+                    fail_db = None
                     try:
                         fail_db = SessionLocal()
-                        audit_result = fail_db.query(AuditResult).filter(
+                        audit_result_fail = fail_db.query(AuditResult).filter(
                             AuditResult.job_id == job.job_id
                         ).first()
-                        if audit_result:
-                            audit_result.status = "failed"
-                            audit_result.error_message = error_msg
-                            audit_result.completed_at = datetime.now()
+                        if audit_result_fail:
+                            audit_result_fail.status = "failed"
+                            audit_result_fail.error_message = error_msg[:2000] if error_msg else "Unknown error"  # Limit error message length
+                            audit_result_fail.completed_at = datetime.now()
                             fail_db.commit()
 
-                            # Send failure notification email
-                            if audit_result.notification_email and not audit_result.email_sent:
-                                await send_audit_email_async(
-                                    to_email=audit_result.notification_email,
-                                    audit_key=audit_result.audit_key,
-                                    contract_name=audit_result.contract_name,
-                                    risk_score=0,
-                                    issues_count=0,
-                                    critical_count=0,
-                                    high_count=0,
-                                    status="failed"
-                                )
-                                audit_result.email_sent = True
-                                fail_db.commit()
-                        fail_db.close()
+                            # Send failure notification email (separate try block)
+                            if audit_result_fail.notification_email and not audit_result_fail.email_sent:
+                                try:
+                                    email_sent = await send_audit_email_async(
+                                        to_email=audit_result_fail.notification_email,
+                                        audit_key=audit_result_fail.audit_key,
+                                        contract_name=audit_result_fail.contract_name,
+                                        risk_score=0,
+                                        issues_count=0,
+                                        critical_count=0,
+                                        high_count=0,
+                                        status="failed"
+                                    )
+                                    if email_sent:
+                                        audit_result_fail.email_sent = True
+                                        fail_db.commit()
+                                except Exception as email_err:
+                                    logger.error(f"[QUEUE_PROCESSOR] Failed to send failure email: {email_err}")
                     except Exception as db_err:
                         logger.error(f"[QUEUE_PROCESSOR] Failed to update AuditResult: {db_err}")
+                        if fail_db:
+                            fail_db.rollback()
+                    finally:
+                        if fail_db:
+                            fail_db.close()
 
                     await notify_job_subscribers(job.job_id, {
                         "status": "failed",
@@ -6837,37 +6900,71 @@ async def submit_audit_to_queue(
             detail=f"File size ({file_size / 1024:.1f}KB) exceeds {tier} tier limit ({size_limit / 1024:.1f}KB). Upgrade to continue."
         )
 
-    # Generate unique audit key
-    audit_key = generate_audit_key() if generate_key else None
+    # Validate contract_address if provided
+    if contract_address:
+        if not validate_eth_address(contract_address):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid Ethereum address format. Must be 0x followed by 40 hex characters."
+            )
+
+    # Validate notify_email if provided
+    if notify_email and not validate_email(notify_email):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid email format for notification address."
+        )
+
+    # Sanitize filename to prevent path traversal and special characters
+    safe_filename = sanitize_filename(file.filename)
 
     # Compute contract hash
     contract_hash = compute_contract_hash(code_bytes.decode('utf-8', errors='replace'))
 
-    # Submit to queue
+    # Submit to queue first
     job = await audit_queue.submit(
         username=effective_username,
         file_content=code_bytes,
-        filename=file.filename or "contract.sol",
+        filename=safe_filename,
         tier=tier,
         contract_address=contract_address
     )
 
-    # Create AuditResult record for persistent storage
-    if audit_key:
-        audit_result = AuditResult(
-            user_id=user.id if user else None,
-            audit_key=audit_key,
-            contract_name=file.filename or "contract.sol",
-            contract_hash=contract_hash,
-            contract_address=contract_address,
-            status="queued",
-            user_tier=tier,
-            notification_email=user_email if tier in ["pro", "enterprise"] else None,
-            job_id=job.job_id
-        )
-        db.add(audit_result)
-        db.commit()
-        logger.info(f"[AUDIT_KEY] Created audit key {audit_key[:20]}... for job {job.job_id[:8]}...")
+    # Generate unique audit key with retry logic for race condition safety
+    audit_key = None
+    if generate_key:
+        from sqlalchemy.exc import IntegrityError
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                audit_key = generate_audit_key()
+                audit_result = AuditResult(
+                    user_id=user.id if user else None,
+                    audit_key=audit_key,
+                    contract_name=safe_filename,
+                    contract_hash=contract_hash,
+                    contract_address=contract_address,
+                    status="queued",
+                    user_tier=tier,
+                    notification_email=user_email if tier in ["pro", "enterprise"] else None,
+                    job_id=job.job_id
+                )
+                db.add(audit_result)
+                db.commit()
+                logger.info(f"[AUDIT_KEY] Created audit key {audit_key[:20]}... for job {job.job_id[:8]}...")
+                break
+            except IntegrityError:
+                db.rollback()
+                audit_key = None
+                logger.warning(f"[AUDIT_KEY] Key collision on attempt {attempt + 1}, retrying...")
+                if attempt == max_retries - 1:
+                    logger.error("[AUDIT_KEY] Failed to generate unique key after max retries")
+                    # Continue without audit key - job is already in queue
+            except Exception as e:
+                db.rollback()
+                logger.error(f"[AUDIT_KEY] Failed to save audit result: {e}")
+                audit_key = None
+                break  # Don't retry on other errors
 
     # Get initial status
     status = await audit_queue.get_status(job.job_id)
@@ -7052,9 +7149,13 @@ async def resend_audit_email(
     Requires the audit key and a valid email address.
     Only works for completed audits.
     """
-    # Validate audit key
-    if not audit_key.startswith("dga_"):
+    # Validate audit key format and length
+    if not audit_key or not audit_key.startswith("dga_") or len(audit_key) > 64:
         raise HTTPException(status_code=400, detail="Invalid audit key format")
+
+    # Validate email format
+    if not validate_email(email):
+        raise HTTPException(status_code=400, detail="Invalid email format")
 
     audit_result = db.query(AuditResult).filter(
         AuditResult.audit_key == audit_key
@@ -7079,6 +7180,7 @@ async def resend_audit_email(
     )
 
     if success:
+        logger.info(f"[AUDIT_EMAIL] Resent completion email to {email} for audit {audit_key[:20]}...")
         return {"success": True, "message": f"Email sent to {email}"}
     else:
         raise HTTPException(status_code=500, detail="Failed to send email. Check email configuration.")

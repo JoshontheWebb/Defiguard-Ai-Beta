@@ -146,17 +146,48 @@ window.showAuditKeyRetrievalModal = function() {
         const savedKeys = JSON.parse(localStorage.getItem('auditKeys') || '[]');
         if (savedKeys.length > 0) {
             const recentContainer = document.getElementById('recent-audit-keys');
-            recentContainer.innerHTML = `
-                <h4 style="color: var(--text-secondary); margin-bottom: var(--space-2);">Recent Audits</h4>
-                <div class="recent-keys-list">
-                    ${savedKeys.map(({ key, timestamp }) => `
-                        <button class="recent-key-btn" onclick="document.getElementById('retrieve-audit-key').value='${key}'; window.retrieveAuditByKey('${key}'); document.getElementById('audit-key-modal').style.display='none';">
-                            <code>${key.substring(0, 20)}...</code>
-                            <span class="recent-key-time">${new Date(timestamp).toLocaleDateString()}</span>
-                        </button>
-                    `).join('')}
-                </div>
-            `;
+
+            // Create elements safely using DOM methods to prevent XSS
+            const heading = document.createElement('h4');
+            heading.style.cssText = 'color: var(--text-secondary); margin-bottom: var(--space-2);';
+            heading.textContent = 'Recent Audits';
+
+            const listContainer = document.createElement('div');
+            listContainer.className = 'recent-keys-list';
+
+            savedKeys.forEach(({ key, timestamp }) => {
+                // Validate audit key format before displaying
+                if (typeof key !== 'string' || !key.startsWith('dga_')) {
+                    return; // Skip invalid keys
+                }
+
+                const btn = document.createElement('button');
+                btn.className = 'recent-key-btn';
+                btn.dataset.auditKey = key; // Store key in data attribute (safe)
+
+                const codeEl = document.createElement('code');
+                codeEl.textContent = key.substring(0, 20) + '...'; // Safe text content
+
+                const timeEl = document.createElement('span');
+                timeEl.className = 'recent-key-time';
+                timeEl.textContent = new Date(timestamp).toLocaleDateString();
+
+                btn.appendChild(codeEl);
+                btn.appendChild(timeEl);
+
+                // Safe event listener - no inline JavaScript
+                btn.addEventListener('click', () => {
+                    const auditKey = btn.dataset.auditKey;
+                    document.getElementById('retrieve-audit-key').value = auditKey;
+                    window.retrieveAuditByKey(auditKey);
+                    document.getElementById('audit-key-modal').style.display = 'none';
+                });
+
+                listContainer.appendChild(btn);
+            });
+
+            recentContainer.appendChild(heading);
+            recentContainer.appendChild(listContainer);
         }
     } catch (e) {
         console.warn('Could not load recent audit keys:', e);
@@ -429,34 +460,80 @@ class AuditQueueTracker {
     }
 
     showAuditKey(auditKey) {
+        // Validate audit key format for security
+        if (typeof auditKey !== 'string' || !auditKey.startsWith('dga_') || auditKey.length > 64) {
+            console.error('Invalid audit key format');
+            return;
+        }
+
         // Create and show the audit key notification
         const existingNotif = document.getElementById('audit-key-notification');
         if (existingNotif) existingNotif.remove();
 
+        // Build notification using safe DOM methods (no innerHTML with user data)
         const notification = document.createElement('div');
         notification.id = 'audit-key-notification';
         notification.className = 'audit-key-notification';
-        notification.innerHTML = `
-            <div class="audit-key-card">
-                <div class="audit-key-header">
-                    <span class="audit-key-icon">🔑</span>
-                    <h4>Your Audit Access Key</h4>
-                    <button class="audit-key-close" onclick="this.closest('.audit-key-notification').remove()">×</button>
-                </div>
-                <div class="audit-key-body">
-                    <p class="audit-key-info">Save this key to access your results anytime, even after leaving this page:</p>
-                    <div class="audit-key-value">
-                        <code id="audit-key-display">${auditKey}</code>
-                        <button class="audit-key-copy" onclick="window.copyAuditKey('${auditKey}')" title="Copy to clipboard">
-                            📋
-                        </button>
-                    </div>
-                    <p class="audit-key-hint">
-                        📧 Pro/Enterprise users will also receive an email when the audit completes.
-                    </p>
-                </div>
-            </div>
-        `;
+
+        const card = document.createElement('div');
+        card.className = 'audit-key-card';
+
+        // Header
+        const header = document.createElement('div');
+        header.className = 'audit-key-header';
+
+        const icon = document.createElement('span');
+        icon.className = 'audit-key-icon';
+        icon.textContent = '🔑';
+
+        const title = document.createElement('h4');
+        title.textContent = 'Your Audit Access Key';
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'audit-key-close';
+        closeBtn.textContent = '×';
+        closeBtn.addEventListener('click', () => notification.remove());
+
+        header.appendChild(icon);
+        header.appendChild(title);
+        header.appendChild(closeBtn);
+
+        // Body
+        const body = document.createElement('div');
+        body.className = 'audit-key-body';
+
+        const info = document.createElement('p');
+        info.className = 'audit-key-info';
+        info.textContent = 'Save this key to access your results anytime, even after leaving this page:';
+
+        const keyValue = document.createElement('div');
+        keyValue.className = 'audit-key-value';
+
+        const keyDisplay = document.createElement('code');
+        keyDisplay.id = 'audit-key-display';
+        keyDisplay.textContent = auditKey; // Safe: textContent escapes HTML
+
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'audit-key-copy';
+        copyBtn.title = 'Copy to clipboard';
+        copyBtn.textContent = '📋';
+        copyBtn.dataset.auditKey = auditKey; // Store in data attribute
+        copyBtn.addEventListener('click', () => window.copyAuditKey(copyBtn.dataset.auditKey));
+
+        keyValue.appendChild(keyDisplay);
+        keyValue.appendChild(copyBtn);
+
+        const hint = document.createElement('p');
+        hint.className = 'audit-key-hint';
+        hint.textContent = '📧 Pro/Enterprise users will also receive an email when the audit completes.';
+
+        body.appendChild(info);
+        body.appendChild(keyValue);
+        body.appendChild(hint);
+
+        card.appendChild(header);
+        card.appendChild(body);
+        notification.appendChild(card);
 
         // Insert after the audit form
         const auditForm = document.getElementById('audit-form');
@@ -466,7 +543,7 @@ class AuditQueueTracker {
             document.body.appendChild(notification);
         }
 
-        // Store in localStorage for persistence
+        // Store in localStorage for persistence (only if valid format)
         try {
             const savedKeys = JSON.parse(localStorage.getItem('auditKeys') || '[]');
             savedKeys.unshift({ key: auditKey, timestamp: Date.now() });
