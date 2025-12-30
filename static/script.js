@@ -2232,15 +2232,18 @@ document.addEventListener("DOMContentLoaded", () => {
           const type = issue.type || "Unknown Issue";
           const description = issue.description || "No description available";
           const fix = issue.fix || "No fix recommendation available";
-          
+          const isProven = issue.proven === true;
+          const source = issue.source || "";
+
           const hasProFeatures = issue.line_number || issue.function_name || issue.vulnerable_code;
-          
+
           return `
-            <tr class="issue-row ${hasProFeatures ? 'expandable' : ''}" data-issue-id="${index}">
+            <tr class="issue-row ${hasProFeatures ? 'expandable' : ''} ${isProven ? 'proven-issue' : ''}" data-issue-id="${index}">
               <td class="severity-cell">
                 <span class="severity-badge ${severity}">${severityDisplay}</span>
+                ${isProven ? '<span class="proven-badge" title="Mathematically proven by Certora formal verification">PROVEN</span>' : ''}
               </td>
-              <td><strong>${type}</strong></td>
+              <td><strong>${type}</strong>${source ? `<br><small class="issue-source">${escapeHtml(source)}</small>` : ''}</td>
               <td>${description}</td>
               <td class="fix-cell">${fix}</td>
                   ${hasProFeatures ? `
@@ -2888,12 +2891,31 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             // Get description, falling back to reason
             const description = result.description || result.reason || 'No additional details available';
 
+            // For violations, show severity and actionable fix
+            const isViolation = result.status === 'violated' || result.status === 'issues_found';
+            const severity = result.severity || 'HIGH';
+            const category = result.category || 'Formal Verification';
+            const fix = result.fix || '';
+            const isProven = result.proven === true;
+
             html += `
               <div class="certora-rule ${ruleClass}">
                 <span class="rule-icon">${ruleIcon}</span>
                 <div class="rule-info">
-                  <span class="rule-name">${escapeHtml(result.rule || 'Verification Check')}</span>
+                  <div class="rule-header">
+                    <span class="rule-name">${escapeHtml(result.rule || 'Verification Check')}</span>
+                    ${isViolation ? `
+                      <span class="severity-badge ${severity.toLowerCase()}">${severity}</span>
+                      ${isProven ? '<span class="proven-badge" title="Mathematically proven by formal verification">PROVEN</span>' : ''}
+                    ` : ''}
+                  </div>
+                  ${isViolation && category ? `<span class="rule-category">${escapeHtml(category)}</span>` : ''}
                   <span class="rule-description">${escapeHtml(description)}</span>
+                  ${isViolation && fix ? `
+                    <div class="rule-fix">
+                      <strong>🔧 Recommended Fix:</strong> ${escapeHtml(fix)}
+                    </div>
+                  ` : ''}
                 </div>
               </div>
             `;

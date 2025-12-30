@@ -2478,6 +2478,30 @@ PHASE 2: DEFI-SPECIFIC ATTACK VECTORS
 14. MEV extraction opportunities
 15. Composability risks (protocol integration failures)
 
+PHASE 2.5: FORMAL VERIFICATION INTEGRATION (if available)
+═══════════════════════════════════════════════════════════════════
+Use the FORMAL VERIFICATION section above to enhance your analysis:
+
+1. VERIFIED PROPERTIES: These have mathematical proofs of correctness.
+   - You can have HIGH CONFIDENCE in these areas
+   - Still check for edge cases not covered by the verification
+
+2. VIOLATED PROPERTIES: These are PROVEN BUGS - treat as CRITICAL.
+   - Formal verification found actual issues
+   - Report these as HIGH or CRITICAL severity
+   - These are not false positives - they are mathematically proven
+
+3. UNVERIFIED PROPERTIES: These could NOT be proven safe.
+   - The verification engine timed out, had errors, or is pending
+   - YOU MUST give these areas EXTRA manual scrutiny
+   - Assume these may contain vulnerabilities until proven otherwise
+   - Check for: reentrancy, overflow, access control, state corruption
+
+4. NO VERIFICATION: If formal verification was not run:
+   - Proceed with standard thorough analysis
+   - Consider recommending formal verification for critical contracts
+═══════════════════════════════════════════════════════════════════
+
 PHASE 3: REGULATORY COMPLIANCE ANALYSIS
 ═══════════════════════════════════════════════════════════════════
 EU MiCA COMPLIANCE (Markets in Crypto-Assets Regulation):
@@ -5536,6 +5560,82 @@ def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str,
             "rule_not_vacuous": "Verification rules are meaningful (not trivially satisfied)"
         }
 
+        # Map rule names to actionable fixes when VIOLATED
+        # These are mathematically proven bugs - provide specific remediation
+        rule_fixes = {
+            "sanitycheck": {
+                "severity": "HIGH",
+                "fix": "Review function visibility and ensure all public/external functions can be called without reverting unexpectedly. Check for missing initializers or invalid state.",
+                "category": "Contract Initialization"
+            },
+            "viewfunctionsarereadonly": {
+                "severity": "CRITICAL",
+                "fix": "CRITICAL: View/pure function is modifying state! Remove state-changing operations from view/pure functions or change the function visibility. This violates Solidity semantics.",
+                "category": "State Mutation Bug"
+            },
+            "revertpreservesstate": {
+                "severity": "HIGH",
+                "fix": "Reverted transactions are not preserving original state. Check for state changes before require/revert statements. Apply Checks-Effects-Interactions pattern.",
+                "category": "State Consistency"
+            },
+            "nounexpectedstatechanges": {
+                "severity": "HIGH",
+                "fix": "Unexpected state changes detected. Audit all state-modifying operations and ensure they follow expected patterns. Check for reentrancy or storage collisions.",
+                "category": "State Integrity"
+            },
+            "transferintegrity": {
+                "severity": "CRITICAL",
+                "fix": "CRITICAL: Transfer amounts are incorrect! Audit transfer logic - tokens may be created, destroyed, or misdirected. Verify: sender balance decreases exactly by amount sent, receiver increases exactly by amount received.",
+                "category": "Token Safety"
+            },
+            "balancenotexceedsupply": {
+                "severity": "CRITICAL",
+                "fix": "CRITICAL: Individual balance can exceed total supply! This is a token minting/accounting bug. Review mint(), burn(), and transfer() functions for overflow or incorrect arithmetic.",
+                "category": "Token Accounting"
+            },
+            "supplychangetracking": {
+                "severity": "HIGH",
+                "fix": "Total supply is changing outside of mint/burn operations. Audit all functions that modify totalSupply and ensure it's only changed through authorized mint/burn paths.",
+                "category": "Token Supply"
+            },
+            "envfreefuncsstaticcheck": {
+                "severity": "MEDIUM",
+                "fix": "Environment-free function has unexpected dependencies. Review the function to ensure it doesn't rely on msg.sender, block.timestamp, or other environmental variables if marked as envfree.",
+                "category": "Function Purity"
+            },
+            "rule_not_vacuous": {
+                "severity": "LOW",
+                "fix": "The verification rule may be trivially satisfied (always true). Review the specification to ensure it actually tests meaningful properties.",
+                "category": "Specification Quality"
+            },
+            # Common CVL rule patterns
+            "reentrancy": {
+                "severity": "CRITICAL",
+                "fix": "CRITICAL: Reentrancy vulnerability detected! Apply nonReentrant modifier, use Checks-Effects-Interactions pattern, or implement a reentrancy guard.",
+                "category": "Reentrancy"
+            },
+            "overflow": {
+                "severity": "CRITICAL",
+                "fix": "CRITICAL: Arithmetic overflow/underflow possible! Use Solidity 0.8+ checked arithmetic or OpenZeppelin SafeMath for older versions.",
+                "category": "Arithmetic"
+            },
+            "accesscontrol": {
+                "severity": "HIGH",
+                "fix": "Access control can be bypassed. Review onlyOwner, onlyAdmin, and role-based modifiers. Ensure authorization checks cannot be circumvented.",
+                "category": "Access Control"
+            },
+            "ownable": {
+                "severity": "HIGH",
+                "fix": "Ownership-related property violated. Review transferOwnership(), renounceOwnership(), and ensure owner checks are properly enforced.",
+                "category": "Ownership"
+            },
+            "pausable": {
+                "severity": "MEDIUM",
+                "fix": "Pausable mechanism can be bypassed. Ensure whenNotPaused modifier is applied to all sensitive functions and pause state is properly checked.",
+                "category": "Emergency Controls"
+            }
+        }
+
         # Add verified rules with meaningful descriptions
         for rule in results.get("verified_rules", []):
             rule_name = rule.get("rule", "Property Check")
@@ -5547,13 +5647,34 @@ def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str,
                 "description": description
             })
 
-        # Add violations with context
+        # Add violations with actionable fixes
         for violation in results.get("violations", []):
             rule_name = violation.get("rule", "Property Check")
+            rule_key = rule_name.lower().replace(" ", "").replace("_", "")
+
+            # Look up fix info, with fallback for unknown rules
+            fix_info = None
+            for key, info in rule_fixes.items():
+                if key in rule_key or rule_key in key:
+                    fix_info = info
+                    break
+
+            if not fix_info:
+                # Default for unknown violations
+                fix_info = {
+                    "severity": "HIGH",
+                    "fix": f"Formal verification proved '{rule_name}' is violated. Review the related code section, audit state changes, and ensure the expected property holds.",
+                    "category": "Formal Verification"
+                }
+
             formatted_results.append({
                 "rule": rule_name,
                 "status": violation.get("status", "violated"),
-                "description": violation.get("description", f"Verification of '{rule_name}' found potential issues")
+                "severity": fix_info["severity"],
+                "category": fix_info["category"],
+                "description": violation.get("description", f"Verification of '{rule_name}' found potential issues"),
+                "fix": fix_info["fix"],
+                "proven": True  # Mark as mathematically proven (not just suspected)
             })
 
         # Add summary if no specific results
@@ -5589,6 +5710,89 @@ def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str,
     except Exception as e:
         logger.error(f"Certora: Verification failed with error: {e}")
         return [{"status": "error", "reason": str(e)}]
+
+
+def format_certora_for_ai(certora_results: list) -> str:
+    """
+    Format Certora results with context that helps the AI understand
+    what was verified, what failed, and what needs extra scrutiny.
+
+    This is critical because:
+    - Verified properties = mathematically proven safe (high confidence)
+    - Violated properties = issues found by formal verification (CRITICAL)
+    - Timeout/pending = couldn't verify (NEEDS MANUAL REVIEW)
+    - Errors = verification failed (treat as unverified)
+    """
+    if not certora_results:
+        return "FORMAL VERIFICATION: Not available for this tier."
+
+    verified = []
+    violated = []
+    unverified = []  # timeouts, errors, pending, skipped
+
+    for r in certora_results:
+        if not isinstance(r, dict):
+            continue
+
+        status = r.get("status", "unknown")
+        rule = r.get("rule", "Unknown property")
+        desc = r.get("description", r.get("reason", ""))
+
+        if status == "verified":
+            verified.append(f"  ✓ {rule}: {desc}")
+        elif status in ["violated", "issues_found"]:
+            violated.append(f"  ✗ {rule}: {desc}")
+        else:
+            # timeout, pending, error, skipped, incomplete
+            unverified.append(f"  ? {rule} ({status}): {desc}")
+
+    # Build comprehensive context for AI
+    lines = ["═══════════════════════════════════════════════════════════════════"]
+    lines.append("FORMAL VERIFICATION ANALYSIS (Certora Prover)")
+    lines.append("═══════════════════════════════════════════════════════════════════")
+
+    if verified:
+        lines.append("")
+        lines.append(f"MATHEMATICALLY PROVEN SAFE ({len(verified)} properties):")
+        lines.append("These properties have been formally verified and are guaranteed to hold:")
+        lines.extend(verified)
+
+    if violated:
+        lines.append("")
+        lines.append(f"⚠️ VIOLATIONS DETECTED ({len(violated)} issues) - CRITICAL:")
+        lines.append("Formal verification found these properties are VIOLATED:")
+        lines.extend(violated)
+        lines.append("")
+        lines.append("ACTION: These are mathematically proven bugs. Address immediately.")
+
+    if unverified:
+        lines.append("")
+        lines.append(f"⚠️ UNVERIFIED PROPERTIES ({len(unverified)} properties) - NEEDS MANUAL REVIEW:")
+        lines.append("These could not be formally verified (too complex, timeout, or pending):")
+        lines.extend(unverified)
+        lines.append("")
+        lines.append("ACTION: Since formal verification could not prove safety, you MUST")
+        lines.append("        analyze these areas manually with extra scrutiny. Assume")
+        lines.append("        they may contain vulnerabilities until proven otherwise.")
+
+    # Summary for AI decision making
+    lines.append("")
+    lines.append("═══════════════════════════════════════════════════════════════════")
+    lines.append("AI GUIDANCE:")
+    if violated:
+        lines.append("- CRITICAL: Formal verification found actual bugs. These MUST be")
+        lines.append("  reported as HIGH/CRITICAL severity vulnerabilities.")
+    if unverified:
+        lines.append("- WARNING: Unverified properties indicate areas that couldn't be")
+        lines.append("  mathematically proven safe. Give these EXTRA scrutiny in your")
+        lines.append("  manual analysis. Consider them potential attack surfaces.")
+    if verified and not violated and not unverified:
+        lines.append("- All analyzed properties were verified. This is strong evidence")
+        lines.append("  of correctness, but continue with standard vulnerability analysis.")
+    lines.append("═══════════════════════════════════════════════════════════════════")
+
+    return "\n".join(lines)
+
 
 def analyze_slither(temp_path: str) -> list[dict[str, Any]]:
     """Run Slither via Docker image (solc pre-installed)."""
@@ -6351,10 +6555,14 @@ async def audit_contract(
             if not os.getenv("ANTHROPIC_API_KEY") and not os.getenv("GROK_API_KEY"):
                 raise Exception("No AI API keys configured (ANTHROPIC_API_KEY or GROK_API_KEY)")
             
+            # Format Certora results with AI context (not just raw JSON)
+            # This helps the AI understand what was verified vs what needs scrutiny
+            formatted_certora = format_certora_for_ai(certora_results) if certora_results else "N/A (Enterprise tier only)"
+
             prompt = PROMPT_TEMPLATE.format(
                 context=context,
                 fuzzing_results=json.dumps(fuzzing_results),
-                certora_results=json.dumps(certora_results) if certora_results else "N/A (Enterprise tier only)",
+                certora_results=formatted_certora,
                 code=code_str,
                 details=details,
                 tier=tier_for_flags,
@@ -6518,7 +6726,35 @@ For Enterprise tier, also include: "proof_of_concept", "references"
                 # Use pre-computed certora_results from Phase 4
                 audit_json["certora_results"] = certora_results
                 audit_json["formal_verification"] = certora_results
-            
+
+                # INTEGRATE CERTORA VIOLATIONS INTO MAIN ISSUES LIST
+                # This ensures formally proven bugs appear in the main vulnerability table
+                if certora_results:
+                    existing_issues = audit_json.get("issues", [])
+                    for cv_result in certora_results:
+                        if cv_result.get("status") in ["violated", "issues_found"]:
+                            # Convert Certora violation to standard issue format
+                            formal_issue = {
+                                "type": f"[PROVEN] {cv_result.get('rule', 'Formal Verification Issue')}",
+                                "severity": cv_result.get("severity", "HIGH"),
+                                "description": cv_result.get("description", "Formal verification detected a violation"),
+                                "fix": cv_result.get("fix", "Review the code section related to this property"),
+                                "category": cv_result.get("category", "Formal Verification"),
+                                "source": "Certora Prover",
+                                "proven": True,  # Flag as mathematically proven
+                                "confidence": "Mathematically Proven"  # Not just high confidence
+                            }
+                            existing_issues.append(formal_issue)
+
+                    audit_json["issues"] = existing_issues
+
+                    # Update severity counts to include Certora violations
+                    issues = audit_json.get("issues", [])
+                    audit_json["critical_count"] = sum(1 for i in issues if i.get("severity", "").upper() == "CRITICAL")
+                    audit_json["high_count"] = sum(1 for i in issues if i.get("severity", "").upper() == "HIGH")
+                    audit_json["medium_count"] = sum(1 for i in issues if i.get("severity", "").upper() == "MEDIUM")
+                    audit_json["low_count"] = sum(1 for i in issues if i.get("severity", "").upper() == "LOW")
+
             report = audit_json
             
             # Normalize predictions - handle attack_predictions or missing fields
