@@ -804,6 +804,10 @@ class CertoraJob(Base):
     # For user notifications
     user_notified: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Track if job was created with full Slither context
+    # Jobs from Settings don't have Slither context, jobs from full audit do
+    has_slither_context: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # Relationship
     user = relationship("User")
 
@@ -5850,13 +5854,15 @@ async def start_certora_verification(
         job_id = job_url.split("/")[-1] if "/" in job_url else job_url
 
         # Save to database
+        # Note: has_slither_context=False because Settings flow doesn't run Slither
         new_job = CertoraJob(
             user_id=user.id,
             contract_hash=contract_hash,
             contract_name=contract_name,
             job_id=job_id,
             job_url=job_url,
-            status="pending"
+            status="pending",
+            has_slither_context=False  # Settings flow doesn't have Slither findings
         )
         db.add(new_job)
         db.commit()
@@ -6027,18 +6033,21 @@ async def dismiss_certora_notifications(
     return {"success": True, "dismissed": updated}
 
 
-def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str, Any]]:
+def run_certora(temp_path: str, slither_findings: list = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Run Certora formal verification via cloud API.
 
     Generates CVL specifications using AI and submits to Certora Prover.
-    Returns verification results or empty list on error (non-blocking).
+    Returns tuple of (formatted_results, raw_results) where raw_results contains job_url.
+
+    Returns:
+        tuple: (formatted_results for display, raw_results for job caching)
     """
     try:
         # Check if Certora is configured
         if not os.getenv("CERTORAKEY"):
             logger.info("Certora: CERTORAKEY not configured, skipping formal verification")
-            return [{"status": "skipped", "reason": "API key not configured"}]
+            return [{"status": "skipped", "reason": "API key not configured"}], {}
 
         # Import certora module (lazy import to avoid startup cost)
         from certora import CVLGenerator, CertoraRunner
@@ -6055,7 +6064,7 @@ def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str,
 
         if not cvl_specs:
             logger.warning("Certora: Could not generate CVL specifications")
-            return [{"status": "skipped", "reason": "Could not generate specifications"}]
+            return [{"status": "skipped", "reason": "Could not generate specifications"}], {}
 
         logger.info(f"Certora: Generated {len(cvl_specs)} chars of CVL specs")
 
@@ -6084,8 +6093,8 @@ def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str,
                 "status": "pending",
                 "description": "Verification job submitted to Certora cloud. Comprehensive analysis is in progress - results will be included in future audits of this contract."
             })
-            # Still return success since job was submitted
-            return formatted_results
+            # Still return success since job was submitted, include raw results for caching
+            return formatted_results, results
 
         # Map rule names to user-friendly descriptions
         rule_descriptions = {
@@ -6245,11 +6254,11 @@ def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str,
                     "description": f"Formal verification completed with status: {status}"
                 })
 
-        return formatted_results
+        return formatted_results, results
 
     except Exception as e:
         logger.error(f"Certora: Verification failed with error: {e}")
-        return [{"status": "error", "reason": str(e)}]
+        return [{"status": "error", "reason": str(e)}], {}
 
 
 def format_certora_for_ai(certora_results: list) -> str:
@@ -6995,7 +7004,21 @@ async def audit_contract(
                 # Check for cached completed result first
                 cached_job = get_cached_certora_result(db, user.id, contract_hash) if user else None
 
+                # Determine if we should use cache or run fresh
+                # If cache exists but was created WITHOUT Slither context, and we now have Slither findings,
+                # prefer running fresh with full context for better spec generation
+                use_cache = False
                 if cached_job and cached_job.results_json:
+                    has_slither = getattr(cached_job, 'has_slither_context', False)
+                    if has_slither or not slither_findings:
+                        # Cache was made with Slither context OR we don't have new Slither findings
+                        use_cache = True
+                    else:
+                        # Cache lacks Slither context but we have findings now - run fresh
+                        logger.info(f"Certora: Cached job lacks Slither context, running fresh with findings")
+                        await broadcast_audit_log(effective_username, "Running enhanced Certora verification with static analysis context...")
+
+                if use_cache and cached_job and cached_job.results_json:
                     # Use cached results!
                     await broadcast_audit_log(effective_username, "Using cached Certora verification results...")
                     certora_cache_used = True
@@ -7053,10 +7076,33 @@ async def audit_contract(
                     else:
                         # No cache, no pending - run fresh verification
                         await broadcast_audit_log(effective_username, "Starting fresh Certora verification...")
-                        certora_results = await asyncio.to_thread(run_certora, temp_path, slither_findings)
+                        certora_results, raw_results = await asyncio.to_thread(run_certora, temp_path, slither_findings)
 
                         # Save job to database if we got a job URL
-                        # (This happens inside run_certora, but we could also track here)
+                        job_url = raw_results.get("job_url") if raw_results else None
+                        if job_url and user:
+                            try:
+                                # Extract job_id from URL
+                                job_id_match = job_url.split("/")[-1] if job_url else None
+                                new_job = CertoraJob(
+                                    user_id=user.id,
+                                    contract_hash=contract_hash,
+                                    job_id=job_id_match,
+                                    job_url=job_url,
+                                    status="running" if raw_results.get("status") == "pending" else "completed",
+                                    rules_verified=raw_results.get("rules_verified", 0),
+                                    rules_violated=raw_results.get("rules_violated", 0),
+                                    results_json=json.dumps(raw_results) if raw_results.get("status") != "pending" else None,
+                                    has_slither_context=bool(slither_findings)  # Mark if created with Slither context
+                                )
+                                if raw_results.get("status") != "pending":
+                                    new_job.completed_at = datetime.now()
+                                db.add(new_job)
+                                db.commit()
+                                logger.info(f"Certora: Saved job {job_id_match} with slither_context={bool(slither_findings)}")
+                            except Exception as save_err:
+                                logger.error(f"Certora: Failed to save job to database: {save_err}")
+                                db.rollback()
 
             except Exception as e:
                 logger.error(f"Certora failed: {e}")

@@ -310,7 +310,7 @@ class CertoraRunner:
         Fetch results from a Certora job URL.
 
         Args:
-            job_url: URL of the Certora job
+            job_url: URL of the Certora job (e.g., https://prover.certora.com/output/9579011/abc123)
 
         Returns:
             Results dictionary with status
@@ -319,50 +319,146 @@ class CertoraRunner:
             import urllib.request
             import urllib.error
 
-            # Convert output URL to API URL if needed
-            # e.g., .../output/jobId -> .../api/job/jobId/results
-            api_url = job_url
-            if "/output/" in job_url:
-                # Try fetching the HTML page and parsing status
-                # Or use the JSON API endpoint
-                json_url = job_url.replace("/output/", "/api/job/") + "/results"
-                api_url = json_url
+            # Certora's output structure has several JSON files we can check:
+            # 1. jobStatus.json - contains job status and basic info
+            # 2. output.json - contains detailed results
+            # 3. The main HTML page can be parsed for status
 
-            # Try to fetch results
-            req = urllib.request.Request(api_url, headers={"Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=30) as response:
-                data = json.loads(response.read().decode())
+            # List of potential JSON endpoints to try
+            json_endpoints = [
+                f"{job_url}/jobStatus.json",
+                f"{job_url}/output.json",
+                f"{job_url}/results.json",
+                f"{job_url}/verificationProgress.json",
+            ]
 
-                # Parse the Certora API response
-                if isinstance(data, dict):
-                    status = data.get("status", "").lower()
+            for json_url in json_endpoints:
+                try:
+                    logger.debug(f"CertoraRunner: Trying endpoint: {json_url}")
+                    req = urllib.request.Request(json_url, headers={
+                        "Accept": "application/json",
+                        "User-Agent": "DeFiGuard-AI/1.0"
+                    })
+                    with urllib.request.urlopen(req, timeout=30) as response:
+                        data = json.loads(response.read().decode())
+                        logger.info(f"CertoraRunner: Got response from {json_url}")
 
-                    if status in ["complete", "finished", "done"]:
-                        return self._parse_api_results(data)
-                    elif status in ["running", "pending", "queued"]:
+                        # Parse the response based on structure
+                        if isinstance(data, dict):
+                            # Check various status field names Certora uses
+                            status = (
+                                data.get("jobStatus", "") or
+                                data.get("status", "") or
+                                data.get("verificationStatus", "") or
+                                ""
+                            ).lower()
+
+                            logger.info(f"CertoraRunner: Job status from API: {status}")
+
+                            # Map Certora status values to our status
+                            if status in ["succeeded", "success", "complete", "finished", "done", "verified"]:
+                                return self._parse_api_results(data)
+                            elif status in ["running", "pending", "queued", "inprogress", "in_progress", "in progress"]:
+                                return {"status": "running"}
+                            elif status in ["failed", "error", "violated"]:
+                                return self._parse_api_results(data)
+                            elif "rules" in data or "results" in data or "output" in data:
+                                # Has results data - try to parse it
+                                return self._parse_api_results(data)
+
+                except urllib.error.HTTPError as e:
+                    logger.debug(f"CertoraRunner: {json_url} returned {e.code}")
+                    continue
+                except Exception as e:
+                    logger.debug(f"CertoraRunner: Error fetching {json_url}: {e}")
+                    continue
+
+            # If no JSON endpoints worked, try parsing the HTML page
+            try:
+                logger.debug(f"CertoraRunner: Trying HTML page: {job_url}")
+                req = urllib.request.Request(job_url, headers={
+                    "Accept": "text/html",
+                    "User-Agent": "DeFiGuard-AI/1.0"
+                })
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    html = response.read().decode()
+
+                    # Look for status indicators in the HTML
+                    html_lower = html.lower()
+
+                    # Check for completion indicators
+                    if "verification succeeded" in html_lower or "all rules verified" in html_lower:
+                        logger.info("CertoraRunner: HTML indicates verification succeeded")
+                        return self._parse_html_results(html)
+                    elif "verification failed" in html_lower or "violated" in html_lower:
+                        logger.info("CertoraRunner: HTML indicates violations found")
+                        return self._parse_html_results(html)
+                    elif "running" in html_lower or "in progress" in html_lower or "pending" in html_lower:
+                        logger.info("CertoraRunner: HTML indicates job still running")
                         return {"status": "running"}
-                    elif status in ["error", "failed"]:
+                    elif "error" in html_lower and "compilation" in html_lower:
+                        logger.info("CertoraRunner: HTML indicates compilation error")
                         return {
                             "success": False,
                             "status": "error",
-                            "error": data.get("message", "Verification failed"),
+                            "error": "Compilation error",
                             "rules_verified": 0,
                             "rules_violated": 0,
                             "violations": []
                         }
 
-                return {"status": "running"}  # Default to running if unclear
+                    # If we got the page but can't determine status, assume still running
+                    logger.info("CertoraRunner: Got HTML but couldn't determine status, assuming running")
+                    return {"status": "running"}
 
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                # Job not ready yet
-                return {"status": "running"}
-            logger.warning(f"CertoraRunner: HTTP error fetching results: {e}")
+            except Exception as e:
+                logger.warning(f"CertoraRunner: Error fetching HTML page: {e}")
+
+            # Default to running if we couldn't determine status
             return {"status": "running"}
 
         except Exception as e:
-            logger.warning(f"CertoraRunner: Error fetching results: {e}")
+            logger.warning(f"CertoraRunner: Error in _fetch_job_results: {e}")
             return {"status": "running"}
+
+    def _parse_html_results(self, html: str) -> dict[str, Any]:
+        """Parse results from Certora HTML output page."""
+        result = {
+            "success": True,
+            "status": "verified",
+            "rules_verified": 0,
+            "rules_violated": 0,
+            "rules_timeout": 0,
+            "verified_rules": [],
+            "violations": []
+        }
+
+        # Count verified rules (look for checkmarks or "verified" indicators)
+        verified_count = len(re.findall(r'(?:✓|✔|VERIFIED|verified|Verified)', html))
+        violated_count = len(re.findall(r'(?:✗|✘|VIOLATED|violated|Violated|FAILED|failed)', html))
+        timeout_count = len(re.findall(r'(?:TIMEOUT|timeout|Timeout)', html))
+
+        result["rules_verified"] = verified_count
+        result["rules_violated"] = violated_count
+        result["rules_timeout"] = timeout_count
+
+        if violated_count > 0:
+            result["success"] = False
+            result["status"] = "issues_found"
+            result["violations"].append({
+                "rule": "Multiple Rules",
+                "status": "violated",
+                "description": f"{violated_count} rule(s) violated - check Certora dashboard for details"
+            })
+
+        if verified_count > 0:
+            result["verified_rules"].append({
+                "rule": "Multiple Rules",
+                "status": "verified",
+                "description": f"{verified_count} rule(s) verified successfully"
+            })
+
+        return result
 
     def _parse_api_results(self, data: dict) -> dict[str, Any]:
         """Parse results from Certora API response."""
