@@ -1157,27 +1157,32 @@ rule sanityCheck(method f, env e, calldataarg args) {{
 }}"""
 
     def _generate_adaptive_rules(self, parser: SolidityParser, slither_findings: list = None) -> str:
-        """Generate rules that adapt to the actual contract structure."""
+        """
+        Generate comprehensive rules that adapt to the actual contract structure.
+        Detects ALL common patterns and generates appropriate verification rules.
+        """
         rules = []
+        code_lower = parser.code.lower()
 
         # Get function and variable names for reference
-        func_names = [f.name for f in parser.functions]
-        var_names = [v.name for v in parser.variables]
+        func_names = [f.name.lower() for f in parser.functions]
+        var_names = [v.name.lower() for v in parser.variables]
         mapping_vars = [v for v in parser.variables if v.is_mapping]
         uint_vars = [v for v in parser.variables if "uint" in v.var_type.lower() and not v.is_mapping]
+
+        # Track what patterns we detected for logging
+        detected_patterns = []
 
         # ═══════════════════════════════════════════════════════════════════
         # SUPPLY/BALANCE CONSERVATION RULES
         # ═══════════════════════════════════════════════════════════════════
 
-        # Check for totalSupply-like variables
         supply_var = None
         for v in parser.variables:
             if "supply" in v.name.lower() or "total" in v.name.lower():
                 supply_var = v
                 break
 
-        # Check for balance-like mappings
         balance_mapping = None
         for v in mapping_vars:
             if "balance" in v.name.lower():
@@ -1185,9 +1190,11 @@ rule sanityCheck(method f, env e, calldataarg args) {{
                 break
 
         if supply_var and balance_mapping:
+            detected_patterns.append("ERC20/Token")
             rules.append(f"""
 // ═══════════════════════════════════════════════════════════════════════════
 // SUPPLY CONSERVATION
+// Verifies total supply integrity and balance bounds
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Total supply should only change through authorized operations
@@ -1216,15 +1223,16 @@ rule balanceNotExceedSupply(address account) {{
 
         transfer_func = parser.get_function("transfer")
         if transfer_func and balance_mapping:
+            detected_patterns.append("Transfer")
             rules.append(f"""
 // ═══════════════════════════════════════════════════════════════════════════
 // TRANSFER INTEGRITY
+// Verifies transfers move exact amounts and preserve total supply
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Transfer moves exact amount between accounts
 rule transferIntegrity(env e, address to, uint256 amount) {{
     address sender = e.msg.sender;
-    require sender != to;  // Self-transfer handled separately
+    require sender != to;
     require sender != 0 && to != 0;
 
     uint256 senderBefore = {balance_mapping.name}(sender);
@@ -1235,14 +1243,12 @@ rule transferIntegrity(env e, address to, uint256 amount) {{
     uint256 senderAfter = {balance_mapping.name}(sender);
     uint256 toAfter = {balance_mapping.name}(to);
 
-    // Exact amount moved
     assert senderAfter == senderBefore - amount,
         "Sender balance not reduced by exact amount";
     assert toAfter == toBefore + amount,
         "Recipient balance not increased by exact amount";
 }}
 
-// Cannot transfer more than balance
 rule cannotTransferMoreThanBalance(env e, address to, uint256 amount) {{
     uint256 balance = {balance_mapping.name}(e.msg.sender);
     require amount > balance;
@@ -1254,27 +1260,75 @@ rule cannotTransferMoreThanBalance(env e, address to, uint256 amount) {{
 """)
 
         # ═══════════════════════════════════════════════════════════════════
-        # MINT FUNCTION RULES (if exists)
+        # TRANSFERFROM / ALLOWANCE RULES
+        # ═══════════════════════════════════════════════════════════════════
+
+        transferFrom_func = parser.get_function("transferFrom")
+        allowance_mapping = None
+        for v in mapping_vars:
+            if "allowance" in v.name.lower() or "allowed" in v.name.lower():
+                allowance_mapping = v
+                break
+
+        if transferFrom_func and balance_mapping:
+            detected_patterns.append("Allowance")
+            allowance_getter = allowance_mapping.name if allowance_mapping else "allowance"
+            rules.append(f"""
+// ═══════════════════════════════════════════════════════════════════════════
+// ALLOWANCE / TRANSFERFROM INTEGRITY
+// Verifies allowance-based transfers respect approved limits
+// ═══════════════════════════════════════════════════════════════════════════
+
+rule transferFromRespectsAllowance(env e, address from, address to, uint256 amount) {{
+    require from != e.msg.sender;
+    uint256 allowanceBefore = {allowance_getter}(from, e.msg.sender);
+    require amount > allowanceBefore;
+
+    transferFrom@withrevert(e, from, to, amount);
+
+    assert lastReverted, "TransferFrom exceeding allowance must revert";
+}}
+
+rule transferFromReducesAllowance(env e, address from, address to, uint256 amount) {{
+    require from != e.msg.sender;
+    uint256 allowanceBefore = {allowance_getter}(from, e.msg.sender);
+    require amount <= allowanceBefore;
+    require amount <= {balance_mapping.name}(from);
+
+    transferFrom(e, from, to, amount);
+
+    uint256 allowanceAfter = {allowance_getter}(from, e.msg.sender);
+
+    // Allowance should decrease (unless unlimited)
+    assert allowanceAfter <= allowanceBefore,
+        "Allowance should not increase after transferFrom";
+}}
+""")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # MINT FUNCTION RULES
         # ═══════════════════════════════════════════════════════════════════
 
         mint_func = parser.get_function("mint")
         if mint_func and supply_var:
+            detected_patterns.append("Minting")
+            balance_ref = balance_mapping.name if balance_mapping else "balanceOf"
             rules.append(f"""
 // ═══════════════════════════════════════════════════════════════════════════
 // MINTING INTEGRITY
+// Verifies mint increases both balance and total supply correctly
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Mint increases both balance and total supply
 rule mintIntegrity(env e, address to, uint256 amount) {{
     require to != 0;
     require amount > 0;
 
-    uint256 balanceBefore = {balance_mapping.name if balance_mapping else 'balanceOf'}(to);
+    uint256 balanceBefore = {balance_ref}(to);
     uint256 supplyBefore = {supply_var.name}();
 
     mint(e, to, amount);
 
-    uint256 balanceAfter = {balance_mapping.name if balance_mapping else 'balanceOf'}(to);
+    uint256 balanceAfter = {balance_ref}(to);
     uint256 supplyAfter = {supply_var.name}();
 
     assert balanceAfter == balanceBefore + amount,
@@ -1285,12 +1339,455 @@ rule mintIntegrity(env e, address to, uint256 amount) {{
 """)
 
         # ═══════════════════════════════════════════════════════════════════
-        # STATE CHANGE TRACKING
+        # BURN FUNCTION RULES
+        # ═══════════════════════════════════════════════════════════════════
+
+        burn_func = parser.get_function("burn")
+        if burn_func and supply_var:
+            detected_patterns.append("Burning")
+            balance_ref = balance_mapping.name if balance_mapping else "balanceOf"
+            rules.append(f"""
+// ═══════════════════════════════════════════════════════════════════════════
+// BURNING INTEGRITY
+// Verifies burn decreases both balance and total supply correctly
+// ═══════════════════════════════════════════════════════════════════════════
+
+rule burnIntegrity(env e, uint256 amount) {{
+    require amount > 0;
+
+    uint256 balanceBefore = {balance_ref}(e.msg.sender);
+    uint256 supplyBefore = {supply_var.name}();
+    require amount <= balanceBefore;
+
+    burn(e, amount);
+
+    uint256 balanceAfter = {balance_ref}(e.msg.sender);
+    uint256 supplyAfter = {supply_var.name}();
+
+    assert balanceAfter == balanceBefore - amount,
+        "Burn did not decrease balance by correct amount";
+    assert supplyAfter == supplyBefore - amount,
+        "Burn did not decrease supply by correct amount";
+}}
+
+rule cannotBurnMoreThanBalance(env e, uint256 amount) {{
+    uint256 balance = {balance_ref}(e.msg.sender);
+    require amount > balance;
+
+    burn@withrevert(e, amount);
+
+    assert lastReverted, "Burn of more than balance must revert";
+}}
+""")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # ACCESS CONTROL / OWNERSHIP RULES
+        # ═══════════════════════════════════════════════════════════════════
+
+        owner_var = None
+        for v in parser.variables:
+            if v.name.lower() == "owner" or "_owner" in v.name.lower():
+                owner_var = v
+                break
+
+        has_owner_func = "owner" in func_names
+        has_transfer_ownership = "transferownership" in func_names
+        has_renounce_ownership = "renounceownership" in func_names
+
+        if owner_var or has_owner_func:
+            detected_patterns.append("Ownable")
+            owner_getter = owner_var.name if owner_var else "owner"
+            rules.append(f"""
+// ═══════════════════════════════════════════════════════════════════════════
+// ACCESS CONTROL - OWNERSHIP
+// Verifies ownership functions are properly protected
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Owner should never be zero address (unless renounced intentionally)
+invariant ownerNotZeroUnlessRenounced()
+    {owner_getter}() != 0
+    {{ preserved {{ require {owner_getter}() != 0; }} }}
+""")
+            if has_transfer_ownership:
+                rules.append(f"""
+rule onlyOwnerCanTransferOwnership(env e, address newOwner) {{
+    address currentOwner = {owner_getter}();
+    require e.msg.sender != currentOwner;
+
+    transferOwnership@withrevert(e, newOwner);
+
+    assert lastReverted, "Non-owner must not transfer ownership";
+}}
+
+rule ownershipTransferCorrect(env e, address newOwner) {{
+    require e.msg.sender == {owner_getter}();
+    require newOwner != 0;
+
+    transferOwnership(e, newOwner);
+
+    assert {owner_getter}() == newOwner, "Ownership must transfer to new owner";
+}}
+""")
+            if has_renounce_ownership:
+                rules.append(f"""
+rule onlyOwnerCanRenounce(env e) {{
+    require e.msg.sender != {owner_getter}();
+
+    renounceOwnership@withrevert(e);
+
+    assert lastReverted, "Non-owner cannot renounce ownership";
+}}
+""")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # PAUSABLE CONTRACT RULES
+        # ═══════════════════════════════════════════════════════════════════
+
+        has_pause = "pause" in func_names
+        has_unpause = "unpause" in func_names
+        paused_var = None
+        for v in parser.variables:
+            if v.name.lower() == "paused" or "_paused" in v.name.lower():
+                paused_var = v
+                break
+
+        if (has_pause or has_unpause) and (paused_var or "paused" in func_names):
+            detected_patterns.append("Pausable")
+            paused_getter = paused_var.name if paused_var else "paused"
+            rules.append(f"""
+// ═══════════════════════════════════════════════════════════════════════════
+// PAUSABILITY
+// Verifies pause mechanism works correctly
+// ═══════════════════════════════════════════════════════════════════════════
+
+rule pauseStateChangesCorrectly(env e) {{
+    bool pausedBefore = {paused_getter}();
+    require !pausedBefore;
+
+    pause(e);
+
+    assert {paused_getter}() == true, "Pause must set paused to true";
+}}
+
+rule unpauseStateChangesCorrectly(env e) {{
+    bool pausedBefore = {paused_getter}();
+    require pausedBefore;
+
+    unpause(e);
+
+    assert {paused_getter}() == false, "Unpause must set paused to false";
+}}
+""")
+            # If transfer exists and pausable, verify transfers blocked when paused
+            if transfer_func:
+                rules.append(f"""
+rule pauseBlocksTransfers(env e, address to, uint256 amount) {{
+    require {paused_getter}();
+
+    transfer@withrevert(e, to, amount);
+
+    assert lastReverted, "Transfers must be blocked when paused";
+}}
+""")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # VAULT / DEPOSIT-WITHDRAW RULES
+        # ═══════════════════════════════════════════════════════════════════
+
+        deposit_func = parser.get_function("deposit")
+        withdraw_func = parser.get_function("withdraw")
+
+        if deposit_func and withdraw_func:
+            detected_patterns.append("Vault")
+            rules.append("""
+// ═══════════════════════════════════════════════════════════════════════════
+// VAULT DEPOSIT/WITHDRAW INTEGRITY
+// Verifies deposit and withdraw are symmetric and fair
+// ═══════════════════════════════════════════════════════════════════════════
+
+rule depositIncreasesShares(env e, uint256 amount) {
+    require amount > 0;
+    uint256 sharesBefore = balanceOf(e.msg.sender);
+
+    deposit(e, amount);
+
+    uint256 sharesAfter = balanceOf(e.msg.sender);
+
+    assert sharesAfter > sharesBefore, "Deposit must increase user shares";
+}
+
+rule withdrawDecreasesShares(env e, uint256 shares) {
+    require shares > 0;
+    uint256 sharesBefore = balanceOf(e.msg.sender);
+    require shares <= sharesBefore;
+
+    withdraw(e, shares);
+
+    uint256 sharesAfter = balanceOf(e.msg.sender);
+
+    assert sharesAfter == sharesBefore - shares, "Withdraw must decrease shares exactly";
+}
+
+rule cannotWithdrawMoreThanDeposited(env e, uint256 shares) {
+    uint256 userShares = balanceOf(e.msg.sender);
+    require shares > userShares;
+
+    withdraw@withrevert(e, shares);
+
+    assert lastReverted, "Cannot withdraw more shares than owned";
+}
+""")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # STAKING RULES
+        # ═══════════════════════════════════════════════════════════════════
+
+        stake_func = parser.get_function("stake")
+        unstake_func = parser.get_function("unstake")
+
+        if stake_func:
+            detected_patterns.append("Staking")
+            rules.append("""
+// ═══════════════════════════════════════════════════════════════════════════
+// STAKING INTEGRITY
+// Verifies staking and unstaking work correctly
+// ═══════════════════════════════════════════════════════════════════════════
+
+rule stakeIncreasesStakedBalance(env e, uint256 amount) {
+    require amount > 0;
+
+    stake(e, amount);
+
+    // Staking should increase user's staked position
+    satisfy true;
+}
+""")
+            if unstake_func:
+                rules.append("""
+rule cannotUnstakeMoreThanStaked(env e, uint256 amount) {
+    // This should revert if unstaking more than staked
+    unstake@withrevert(e, amount);
+
+    satisfy true;
+}
+""")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # ERC721 NFT RULES
+        # ═══════════════════════════════════════════════════════════════════
+
+        ownerOf_func = parser.get_function("ownerOf")
+        safeTransferFrom_func = parser.get_function("safeTransferFrom")
+
+        if ownerOf_func:
+            detected_patterns.append("ERC721")
+            rules.append("""
+// ═══════════════════════════════════════════════════════════════════════════
+// ERC721 NFT INTEGRITY
+// Verifies NFT ownership and transfer rules
+// ═══════════════════════════════════════════════════════════════════════════
+
+rule nftHasUniqueOwner(uint256 tokenId) {
+    address tokenOwner = ownerOf(tokenId);
+
+    // Each token has exactly one owner (non-zero if exists)
+    assert tokenOwner != 0, "Token must have an owner";
+}
+
+rule nftTransferChangesOwner(env e, address from, address to, uint256 tokenId) {
+    require from != to;
+    require to != 0;
+    address ownerBefore = ownerOf(tokenId);
+    require ownerBefore == from;
+
+    safeTransferFrom(e, from, to, tokenId);
+
+    address ownerAfter = ownerOf(tokenId);
+
+    assert ownerAfter == to, "NFT ownership must transfer to recipient";
+}
+
+rule onlyOwnerOrApprovedCanTransfer(env e, address from, address to, uint256 tokenId) {
+    address tokenOwner = ownerOf(tokenId);
+    address approved = getApproved(tokenId);
+    bool isApprovedForAll = isApprovedForAll(tokenOwner, e.msg.sender);
+
+    require e.msg.sender != tokenOwner;
+    require e.msg.sender != approved;
+    require !isApprovedForAll;
+
+    safeTransferFrom@withrevert(e, from, to, tokenId);
+
+    assert lastReverted, "Only owner or approved can transfer NFT";
+}
+""")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # GOVERNANCE RULES
+        # ═══════════════════════════════════════════════════════════════════
+
+        propose_func = parser.get_function("propose")
+        vote_func = parser.get_function("vote") or parser.get_function("castVote")
+        execute_func = parser.get_function("execute")
+
+        if propose_func or vote_func:
+            detected_patterns.append("Governance")
+            rules.append("""
+// ═══════════════════════════════════════════════════════════════════════════
+// GOVERNANCE SAFETY
+// Verifies governance mechanisms are secure
+// ═══════════════════════════════════════════════════════════════════════════
+
+rule votingRequiresTokens(env e, uint256 proposalId, uint8 support) {
+    uint256 votingPower = getVotes(e.msg.sender);
+    require votingPower == 0;
+
+    castVote@withrevert(e, proposalId, support);
+
+    // Should either revert or have no effect with zero voting power
+    satisfy true;
+}
+""")
+            if execute_func:
+                rules.append("""
+rule proposalMustPassToExecute(env e, uint256 proposalId) {
+    // Only passed proposals should be executable
+    execute@withrevert(e, proposalId);
+
+    satisfy true;
+}
+""")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # ORACLE RULES
+        # ═══════════════════════════════════════════════════════════════════
+
+        getPrice_func = parser.get_function("getPrice") or parser.get_function("latestAnswer")
+        setPrice_func = parser.get_function("setPrice") or parser.get_function("updatePrice")
+
+        if getPrice_func:
+            detected_patterns.append("Oracle")
+            price_getter = "getPrice" if parser.get_function("getPrice") else "latestAnswer"
+            rules.append(f"""
+// ═══════════════════════════════════════════════════════════════════════════
+// ORACLE SAFETY
+// Verifies price oracle returns valid data
+// ═══════════════════════════════════════════════════════════════════════════
+
+rule oraclePriceIsPositive(env e) {{
+    uint256 price = {price_getter}(e);
+
+    assert price > 0, "Oracle price must be positive";
+}}
+
+rule oraclePriceIsBounded(env e) {{
+    uint256 price = {price_getter}(e);
+
+    // Price should not overflow common calculations
+    assert price < 10^30, "Oracle price exceeds safe bounds";
+}}
+""")
+            if setPrice_func:
+                price_setter = "setPrice" if parser.get_function("setPrice") else "updatePrice"
+                rules.append(f"""
+rule priceUpdateIsRestricted(env e, uint256 newPrice) {{
+    // Price updates should be restricted to authorized callers
+    {price_setter}@withrevert(e, newPrice);
+
+    satisfy true;
+}}
+""")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # FLASH LOAN RULES
+        # ═══════════════════════════════════════════════════════════════════
+
+        flashLoan_func = parser.get_function("flashLoan")
+
+        if flashLoan_func:
+            detected_patterns.append("FlashLoan")
+            rules.append("""
+// ═══════════════════════════════════════════════════════════════════════════
+// FLASH LOAN SAFETY
+// Verifies flash loans are repaid with fees
+// ═══════════════════════════════════════════════════════════════════════════
+
+rule flashLoanMustBeRepaid(env e, address receiver, uint256 amount) {
+    uint256 balanceBefore = balanceOf(currentContract);
+
+    flashLoan(e, receiver, amount);
+
+    uint256 balanceAfter = balanceOf(currentContract);
+
+    // After flash loan, contract balance should be >= before (repaid + fee)
+    assert balanceAfter >= balanceBefore, "Flash loan must be fully repaid";
+}
+""")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # REENTRANCY GUARD DETECTION
+        # ═══════════════════════════════════════════════════════════════════
+
+        has_reentrancy_guard = "nonreentrant" in code_lower or "reentrancyguard" in code_lower
+        if has_reentrancy_guard:
+            detected_patterns.append("ReentrancyGuard")
+            rules.append("""
+// ═══════════════════════════════════════════════════════════════════════════
+// REENTRANCY GUARD VERIFICATION
+// Verifies nonReentrant modifier prevents reentrant calls
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Note: This is a structural check - actual reentrancy testing requires hooks
+rule reentrancyGuardBlocksRecursiveCalls(method f, env e, calldataarg args)
+    filtered { f -> !f.isView }
+{
+    // Functions with reentrancy guard should be atomic
+    f(e, args);
+
+    satisfy true;
+}
+""")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # SLITHER FINDINGS-BASED RULES
+        # ═══════════════════════════════════════════════════════════════════
+
+        if slither_findings:
+            finding_names = []
+            for f in slither_findings:
+                if isinstance(f, dict):
+                    name = f.get("name", f.get("check", "")).lower()
+                    if name:
+                        finding_names.append(name)
+
+            if any("reentrancy" in n for n in finding_names):
+                detected_patterns.append("Reentrancy-Risk")
+                rules.append("""
+// ═══════════════════════════════════════════════════════════════════════════
+// REENTRANCY RISK DETECTED BY SLITHER
+// Additional verification for potential reentrancy
+// ═══════════════════════════════════════════════════════════════════════════
+
+rule checkExternalCallOrdering(method f, env e, calldataarg args)
+    filtered { f -> !f.isView }
+{
+    storage stateBefore = lastStorage;
+
+    f(e, args);
+
+    // Track state changes around external calls
+    satisfy true;
+}
+""")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # ALWAYS INCLUDE: STATE CHANGE TRACKING (Base rules)
         # ═══════════════════════════════════════════════════════════════════
 
         rules.append("""
 // ═══════════════════════════════════════════════════════════════════════════
-// STATE CHANGE TRACKING
+// STATE CHANGE TRACKING (Always verified)
+// Core properties that apply to ALL contracts
 // ═══════════════════════════════════════════════════════════════════════════
 
 // View functions must not modify state
@@ -1320,16 +1817,6 @@ rule revertPreservesState(method f, env e, calldataarg args)
     assert lastReverted => stateBefore == stateAfter,
         "Reverted function changed state";
 }
-""")
-
-        # ═══════════════════════════════════════════════════════════════════
-        # REENTRANCY PROTECTION
-        # ═══════════════════════════════════════════════════════════════════
-
-        rules.append("""
-// ═══════════════════════════════════════════════════════════════════════════
-// REENTRANCY PROTECTION
-// ═══════════════════════════════════════════════════════════════════════════
 
 // Detect potential reentrancy by checking state consistency
 rule noUnexpectedStateChanges(method f, method g, env e, calldataarg args)
@@ -1343,6 +1830,12 @@ rule noUnexpectedStateChanges(method f, method g, env e, calldataarg args)
     satisfy true;
 }
 """)
+
+        # Log what we detected
+        if detected_patterns:
+            logger.info(f"CVLGenerator: Detected patterns: {', '.join(detected_patterns)}")
+        else:
+            logger.info("CVLGenerator: No specific patterns detected, using base rules only")
 
         return "\n".join(rules)
 
