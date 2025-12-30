@@ -497,6 +497,79 @@ async def startup_redis_pubsub():
     if await init_redis_pubsub():
         asyncio.create_task(redis_audit_subscriber())
         logger.info("[STARTUP] Redis audit subscriber started")
+
+
+# Background task to poll pending Certora jobs
+async def certora_job_poller():
+    """
+    Background task that periodically polls pending Certora jobs.
+    Updates job status in database when verification completes.
+    """
+    POLL_INTERVAL = 60  # Check every 60 seconds
+    logger.info("[CERTORA] Background job poller started")
+
+    while True:
+        try:
+            await asyncio.sleep(POLL_INTERVAL)
+
+            # Get all pending/running jobs
+            db = SessionLocal()
+            try:
+                pending_jobs = db.query(CertoraJob).filter(
+                    CertoraJob.status.in_(["pending", "running"])
+                ).all()
+
+                if not pending_jobs:
+                    continue
+
+                logger.info(f"[CERTORA] Polling {len(pending_jobs)} pending jobs...")
+
+                from certora import CertoraRunner
+                runner = CertoraRunner()
+
+                for job in pending_jobs:
+                    try:
+                        result = runner._fetch_job_results(job.job_url)
+                        status = result.get("status", "running")
+
+                        if status in ["verified", "issues_found"]:
+                            # Job completed!
+                            job.status = "completed"
+                            job.completed_at = datetime.now()
+                            job.rules_verified = result.get("rules_verified", 0)
+                            job.rules_violated = result.get("rules_violated", 0)
+                            job.results_json = json.dumps(result)
+                            db.commit()
+                            logger.info(f"[CERTORA] Job {job.job_id} completed: {job.rules_verified} verified, {job.rules_violated} violated")
+
+                        elif status == "error":
+                            job.status = "error"
+                            job.results_json = json.dumps(result)
+                            db.commit()
+                            logger.warning(f"[CERTORA] Job {job.job_id} failed: {result.get('error', 'Unknown error')}")
+
+                        else:
+                            # Still running - update status
+                            if job.status != "running":
+                                job.status = "running"
+                                db.commit()
+
+                    except Exception as e:
+                        logger.warning(f"[CERTORA] Error polling job {job.job_id}: {e}")
+
+            finally:
+                db.close()
+
+        except Exception as e:
+            logger.error(f"[CERTORA] Background poller error: {e}")
+
+
+@app.on_event("startup")
+async def startup_certora_poller():
+    """Start Certora job poller background task."""
+    if os.getenv("CERTORAKEY"):
+        asyncio.create_task(certora_job_poller())
+        logger.info("[STARTUP] Certora job poller started")
         
 @app.get("/debug-files")
 async def debug_files(admin_key: str = Query(None)):
@@ -687,6 +760,53 @@ class PendingAudit(Base):
     status: Mapped[str] = mapped_column(String, default="pending", index=True)
     results: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+
+
+class CertoraJob(Base):
+    """
+    Stores Certora verification jobs for caching and async polling.
+
+    This allows:
+    1. Users to run Certora separately from their main audit
+    2. Caching results so same contract doesn't need re-verification
+    3. Background polling to update job status
+    4. Users to see their Certora job history
+    """
+    __tablename__ = "certora_jobs"
+    __table_args__ = {'extend_existing': True}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+
+    # Contract identification - used for cache lookup
+    contract_hash: Mapped[str] = mapped_column(String(64), index=True)  # SHA256 of contract content
+    contract_name: Mapped[str] = mapped_column(String(255))  # Original filename
+
+    # Certora job details
+    job_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)  # Certora's job ID
+    job_url: Mapped[str] = mapped_column(String(512))  # Full URL to Certora dashboard
+
+    # Status tracking
+    status: Mapped[str] = mapped_column(String(50), default="pending", index=True)
+    # Status values: pending, running, completed, error, timeout
+
+    # Results (stored as JSON)
+    results_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    rules_verified: Mapped[int] = mapped_column(Integer, default=0)
+    rules_violated: Mapped[int] = mapped_column(Integer, default=0)
+    rules_timeout: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # For user notifications
+    user_notified: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Relationship
+    user = relationship("User")
+
 
 Base.metadata.create_all(bind=engine, checkfirst=True)
 
@@ -5487,6 +5607,364 @@ async def get_facets(contract_address: str, request: Request, username: str = Qu
 
 ## Section 4.6 Main Audit Endpoint
 
+# ============================================================================
+# CERTORA JOB MANAGEMENT API
+# ============================================================================
+# These endpoints allow users to:
+# 1. Start Certora verification separately from their main audit
+# 2. View their Certora job history
+# 3. Use cached Certora results in audits
+# 4. Delete cached results to force re-verification
+
+import hashlib
+
+def compute_contract_hash(content: str) -> str:
+    """Compute SHA256 hash of contract content for cache lookup."""
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
+def get_cached_certora_result(db: Session, user_id: int, contract_hash: str) -> Optional[CertoraJob]:
+    """
+    Look up cached Certora result for a user + contract combination.
+    Returns the most recent completed job, or None if not found.
+    """
+    job = db.query(CertoraJob).filter(
+        CertoraJob.user_id == user_id,
+        CertoraJob.contract_hash == contract_hash,
+        CertoraJob.status == "completed"
+    ).order_by(CertoraJob.completed_at.desc()).first()
+    return job
+
+
+def get_pending_certora_job(db: Session, user_id: int, contract_hash: str) -> Optional[CertoraJob]:
+    """
+    Check if there's a pending/running Certora job for this contract.
+    Prevents duplicate job submissions.
+    """
+    job = db.query(CertoraJob).filter(
+        CertoraJob.user_id == user_id,
+        CertoraJob.contract_hash == contract_hash,
+        CertoraJob.status.in_(["pending", "running"])
+    ).first()
+    return job
+
+
+@app.get("/api/certora/jobs")
+async def get_certora_jobs(
+    request: Request,
+    db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """
+    Get user's Certora job history.
+    Shows all verification jobs with their status.
+    """
+    user = await get_authenticated_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    jobs = db.query(CertoraJob).filter(
+        CertoraJob.user_id == user.id
+    ).order_by(CertoraJob.created_at.desc()).limit(20).all()
+
+    return {
+        "jobs": [
+            {
+                "id": job.id,
+                "job_id": job.job_id,
+                "job_url": job.job_url,
+                "contract_name": job.contract_name,
+                "contract_hash": job.contract_hash[:16] + "...",  # Truncated for display
+                "status": job.status,
+                "rules_verified": job.rules_verified,
+                "rules_violated": job.rules_violated,
+                "created_at": job.created_at.isoformat() if job.created_at else None,
+                "completed_at": job.completed_at.isoformat() if job.completed_at else None
+            }
+            for job in jobs
+        ]
+    }
+
+
+@app.get("/api/certora/job/{job_id}")
+async def get_certora_job_status(
+    job_id: str,
+    request: Request,
+    db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """
+    Get status of a specific Certora job.
+    Returns full results if completed.
+    """
+    user = await get_authenticated_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    job = db.query(CertoraJob).filter(
+        CertoraJob.job_id == job_id,
+        CertoraJob.user_id == user.id
+    ).first()
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    result = {
+        "id": job.id,
+        "job_id": job.job_id,
+        "job_url": job.job_url,
+        "contract_name": job.contract_name,
+        "status": job.status,
+        "rules_verified": job.rules_verified,
+        "rules_violated": job.rules_violated,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None
+    }
+
+    # Include full results if completed
+    if job.status == "completed" and job.results_json:
+        try:
+            result["results"] = json.loads(job.results_json)
+        except:
+            result["results"] = []
+
+    return result
+
+
+@app.delete("/api/certora/job/{job_id}")
+async def delete_certora_job(
+    job_id: str,
+    request: Request,
+    db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """
+    Delete a cached Certora job.
+    This forces a fresh verification on next audit.
+    """
+    user = await get_authenticated_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    job = db.query(CertoraJob).filter(
+        CertoraJob.job_id == job_id,
+        CertoraJob.user_id == user.id
+    ).first()
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    db.delete(job)
+    db.commit()
+
+    return {"success": True, "message": "Certora job deleted. Fresh verification will run on next audit."}
+
+
+@app.post("/api/certora/start")
+async def start_certora_verification(
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """
+    Start Certora verification separately from the main audit.
+
+    This allows users to:
+    1. Run Certora ahead of time
+    2. Get their job ID
+    3. Include completed results in future audits
+
+    The job runs in background and user can poll for status.
+    """
+    user = await get_authenticated_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Check tier - Certora is Enterprise only
+    if user.tier not in ["enterprise", "diamond"] and not user.has_diamond:
+        raise HTTPException(
+            status_code=403,
+            detail="Certora formal verification is available for Enterprise and Diamond tiers only"
+        )
+
+    # Check if CERTORAKEY is configured
+    if not os.getenv("CERTORAKEY"):
+        raise HTTPException(
+            status_code=503,
+            detail="Certora service not configured. Please contact support."
+        )
+
+    # Read contract content
+    content = await file.read()
+    contract_code = content.decode("utf-8")
+    contract_hash = compute_contract_hash(contract_code)
+    contract_name = file.filename or "Contract.sol"
+
+    # Check for existing pending job
+    pending_job = get_pending_certora_job(db, user.id, contract_hash)
+    if pending_job:
+        return {
+            "status": "already_running",
+            "job_id": pending_job.job_id,
+            "job_url": pending_job.job_url,
+            "message": "A verification job for this contract is already running."
+        }
+
+    # Check for existing completed job
+    cached_job = get_cached_certora_result(db, user.id, contract_hash)
+    if cached_job:
+        return {
+            "status": "cached",
+            "job_id": cached_job.job_id,
+            "job_url": cached_job.job_url,
+            "rules_verified": cached_job.rules_verified,
+            "rules_violated": cached_job.rules_violated,
+            "completed_at": cached_job.completed_at.isoformat() if cached_job.completed_at else None,
+            "message": "A completed verification exists for this contract. Delete it to run fresh verification."
+        }
+
+    # Save contract to temp file
+    temp_path = None
+    try:
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.sol', delete=False) as f:
+            f.write(contract_code)
+            temp_path = f.name
+
+        # Import and run Certora (non-blocking mode)
+        from certora import CVLGenerator, CertoraRunner
+
+        # Generate specs
+        generator = CVLGenerator()
+        cvl_specs = generator.generate_specs_sync(contract_code, None)
+
+        if not cvl_specs:
+            raise HTTPException(status_code=400, detail="Could not generate CVL specifications for this contract")
+
+        # Submit job (don't wait for results)
+        runner = CertoraRunner()
+        results = runner.run_verification_sync(temp_path, cvl_specs, wait_for_results=False)
+
+        job_url = results.get("job_url")
+        if not job_url:
+            raise HTTPException(status_code=500, detail="Failed to submit Certora job")
+
+        # Extract job ID from URL
+        job_id = job_url.split("/")[-1] if "/" in job_url else job_url
+
+        # Save to database
+        new_job = CertoraJob(
+            user_id=user.id,
+            contract_hash=contract_hash,
+            contract_name=contract_name,
+            job_id=job_id,
+            job_url=job_url,
+            status="pending"
+        )
+        db.add(new_job)
+        db.commit()
+
+        logger.info(f"Certora job started for {user.username}: {job_id}")
+
+        return {
+            "status": "started",
+            "job_id": job_id,
+            "job_url": job_url,
+            "message": "Certora verification started. Poll /api/certora/job/{job_id} for status, or wait a few minutes and run your audit."
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to start Certora job: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start verification: {str(e)}")
+
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+@app.post("/api/certora/poll/{job_id}")
+async def poll_certora_job(
+    job_id: str,
+    request: Request,
+    db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """
+    Poll for Certora job results.
+    This is called by the frontend or background task to update job status.
+    """
+    user = await get_authenticated_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    job = db.query(CertoraJob).filter(
+        CertoraJob.job_id == job_id,
+        CertoraJob.user_id == user.id
+    ).first()
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # If already completed, just return status
+    if job.status == "completed":
+        return {
+            "status": "completed",
+            "rules_verified": job.rules_verified,
+            "rules_violated": job.rules_violated
+        }
+
+    # Try to fetch results from Certora
+    try:
+        from certora import CertoraRunner
+        runner = CertoraRunner()
+        result = runner._fetch_job_results(job.job_url)
+
+        status = result.get("status", "running")
+
+        if status in ["verified", "issues_found"]:
+            # Job completed!
+            job.status = "completed"
+            job.completed_at = datetime.now()
+            job.rules_verified = result.get("rules_verified", 0)
+            job.rules_violated = result.get("rules_violated", 0)
+            job.results_json = json.dumps(result)
+            db.commit()
+
+            logger.info(f"Certora job {job_id} completed: {job.rules_verified} verified, {job.rules_violated} violated")
+
+            return {
+                "status": "completed",
+                "rules_verified": job.rules_verified,
+                "rules_violated": job.rules_violated,
+                "message": "Verification complete! Results will be used in your next audit."
+            }
+
+        elif status == "error":
+            job.status = "error"
+            job.results_json = json.dumps(result)
+            db.commit()
+
+            return {
+                "status": "error",
+                "message": result.get("error", "Verification failed")
+            }
+
+        else:
+            # Still running
+            job.status = "running"
+            db.commit()
+
+            return {
+                "status": "running",
+                "message": "Verification still in progress on Certora cloud..."
+            }
+
+    except Exception as e:
+        logger.error(f"Error polling Certora job {job_id}: {e}")
+        return {
+            "status": "running",
+            "message": "Could not check status. Job may still be running."
+        }
+
+
 def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str, Any]]:
     """
     Run Certora formal verification via cloud API.
@@ -6436,23 +6914,96 @@ async def audit_contract(
             await broadcast_audit_log(effective_username, f"Echidna completed with {len(fuzzing_results)} results")
 
         # Phase 4: Certora Formal Verification (Enterprise only)
+        # Uses caching system: check for existing results before running new verification
         certora_results = []
+        certora_cache_used = False
         if certora_enabled:
-            await broadcast_audit_log(effective_username, "Running formal verification...")
+            await broadcast_audit_log(effective_username, "Checking formal verification status...")
             if job_id:
                 await audit_queue.update_phase(job_id, "certora", 55)
                 await notify_job_subscribers(job_id, {"status": "processing", "phase": "certora", "progress": 55})
             await asyncio.sleep(0)  # Yield to event loop
 
             try:
-                certora_results = await asyncio.to_thread(run_certora, temp_path, slither_findings)
+                # Read contract content for hash
+                with open(temp_path, 'r') as f:
+                    contract_content = f.read()
+                contract_hash = compute_contract_hash(contract_content)
+
+                # Check for cached completed result first
+                cached_job = get_cached_certora_result(db, user.id, contract_hash) if user else None
+
+                if cached_job and cached_job.results_json:
+                    # Use cached results!
+                    await broadcast_audit_log(effective_username, "Using cached Certora verification results...")
+                    certora_cache_used = True
+                    try:
+                        raw_results = json.loads(cached_job.results_json)
+                        # Convert to expected format
+                        certora_results = []
+                        for rule in raw_results.get("verified_rules", []):
+                            certora_results.append(rule)
+                        for violation in raw_results.get("violations", []):
+                            certora_results.append(violation)
+                        if not certora_results:
+                            # Fallback to summary
+                            certora_results = [{
+                                "rule": "Cached Verification",
+                                "status": "verified" if cached_job.rules_violated == 0 else "issues_found",
+                                "description": f"Cached result: {cached_job.rules_verified} verified, {cached_job.rules_violated} violations"
+                            }]
+                        logger.info(f"Certora: Using cached results from job {cached_job.job_id}")
+                    except Exception as e:
+                        logger.error(f"Error parsing cached Certora results: {e}")
+                        certora_results = []
+
+                else:
+                    # Check for pending job
+                    pending_job = get_pending_certora_job(db, user.id, contract_hash) if user else None
+
+                    if pending_job:
+                        # Job is running - poll for results
+                        await broadcast_audit_log(effective_username, f"Checking pending Certora job {pending_job.job_id}...")
+                        from certora import CertoraRunner
+                        runner = CertoraRunner()
+                        poll_result = runner._fetch_job_results(pending_job.job_url)
+
+                        if poll_result.get("status") in ["verified", "issues_found"]:
+                            # Job completed! Update DB and use results
+                            pending_job.status = "completed"
+                            pending_job.completed_at = datetime.now()
+                            pending_job.rules_verified = poll_result.get("rules_verified", 0)
+                            pending_job.rules_violated = poll_result.get("rules_violated", 0)
+                            pending_job.results_json = json.dumps(poll_result)
+                            db.commit()
+
+                            certora_results = poll_result.get("verified_rules", []) + poll_result.get("violations", [])
+                            await broadcast_audit_log(effective_username, f"Certora job completed: {pending_job.rules_verified} verified")
+                        else:
+                            # Still running - show pending status
+                            certora_results = [{
+                                "rule": "Formal Verification",
+                                "status": "pending",
+                                "description": f"Verification job {pending_job.job_id} is still running on Certora cloud. Results will be available in your next audit."
+                            }]
+                            await broadcast_audit_log(effective_username, "Certora job still running...")
+
+                    else:
+                        # No cache, no pending - run fresh verification
+                        await broadcast_audit_log(effective_username, "Starting fresh Certora verification...")
+                        certora_results = await asyncio.to_thread(run_certora, temp_path, slither_findings)
+
+                        # Save job to database if we got a job URL
+                        # (This happens inside run_certora, but we could also track here)
+
             except Exception as e:
                 logger.error(f"Certora failed: {e}")
                 certora_results = [{"status": "error", "reason": str(e)}]
 
             await asyncio.sleep(0)  # Yield to event loop
             verified_count = sum(1 for r in certora_results if r.get("status") == "verified")
-            await broadcast_audit_log(effective_username, f"Formal verification: {verified_count} properties verified")
+            cache_msg = " (cached)" if certora_cache_used else ""
+            await broadcast_audit_log(effective_username, f"Formal verification{cache_msg}: {verified_count} properties verified")
 
         # Results already handled above in sequential execution
         
