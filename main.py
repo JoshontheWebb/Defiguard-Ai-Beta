@@ -5499,19 +5499,38 @@ def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str,
         runner = CertoraRunner()
         results = runner.run_verification_sync(temp_path, cvl_specs)
 
+        # Log job URL internally for debugging (not exposed to users)
+        job_url = results.get("job_url")
         logger.info(f"Certora: Verification complete - {results.get('rules_verified', 0)} verified, {results.get('rules_violated', 0)} violated")
+        if job_url:
+            logger.info(f"Certora: Internal job URL (admin only): {job_url}")
 
-        # Format results for report
+        # Format results for report - job_url is NOT exposed to end users
+        # Users see verification results but can't access Certora dashboard
         formatted_results = []
+
+        # Map rule names to user-friendly descriptions
+        rule_descriptions = {
+            "sanitycheck": "Contract functions are callable and specification is valid",
+            "viewfunctionsarereadonly": "View/pure functions do not modify contract state",
+            "revertpreservesstate": "Reverted transactions preserve original state",
+            "nounexpectedstatechanges": "State changes are consistent and predictable",
+            "transferintegrity": "Token transfers move exact amounts between accounts",
+            "balancenotexceedsupply": "Individual balances never exceed total supply",
+            "supplychangetracking": "Total supply changes only through authorized operations",
+            "envfreefuncsstaticcheck": "Environment-free functions have correct access patterns",
+            "rule_not_vacuous": "Verification rules are meaningful (not trivially satisfied)"
+        }
 
         # Add verified rules with meaningful descriptions
         for rule in results.get("verified_rules", []):
             rule_name = rule.get("rule", "Property Check")
+            rule_key = rule_name.lower().replace(" ", "").replace("_", "")
+            description = rule_descriptions.get(rule_key, rule.get("description", f"Property '{rule_name}' mathematically proven to hold"))
             formatted_results.append({
                 "rule": rule_name,
                 "status": "verified",
-                "description": rule.get("description", f"Property '{rule_name}' mathematically proven to hold"),
-                "job_url": results.get("job_url")
+                "description": description
             })
 
         # Add violations with context
@@ -5520,8 +5539,7 @@ def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str,
             formatted_results.append({
                 "rule": rule_name,
                 "status": violation.get("status", "violated"),
-                "description": violation.get("description", f"Verification of '{rule_name}' found potential issues"),
-                "job_url": results.get("job_url")
+                "description": violation.get("description", f"Verification of '{rule_name}' found potential issues")
             })
 
         # Add summary if no specific results
@@ -5531,27 +5549,20 @@ def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str,
                 formatted_results.append({
                     "rule": "Contract Verification",
                     "status": "verified",
-                    "description": "All formal verification checks passed successfully",
-                    "job_url": results.get("job_url")
+                    "description": "All formal verification checks passed successfully"
                 })
             elif status in ["error", "skipped"]:
                 formatted_results.append({
                     "rule": "Verification Status",
                     "status": status,
-                    "description": results.get("error", "Verification could not be completed"),
-                    "job_url": results.get("job_url")
+                    "description": results.get("error", "Verification could not be completed")
                 })
             else:
                 formatted_results.append({
                     "rule": "Contract Analysis",
                     "status": status,
-                    "description": f"Formal verification completed with status: {status}",
-                    "job_url": results.get("job_url")
+                    "description": f"Formal verification completed with status: {status}"
                 })
-
-        # Add job URL to first result if not already there
-        if results.get("job_url") and formatted_results:
-            formatted_results[0]["job_url"] = results.get("job_url")
 
         return formatted_results
 

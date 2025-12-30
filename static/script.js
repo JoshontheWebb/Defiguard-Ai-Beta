@@ -2785,13 +2785,29 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             statusText = 'Formal Verification Complete';
           }
 
-          // Find job URL if available - only use prover.certora.com URLs
-          let jobUrl = certoraResults.find(r => r.job_url)?.job_url;
-          // Validate the job URL is from prover.certora.com (not docs or other subdomains)
-          if (jobUrl && !jobUrl.includes('prover.certora.com')) {
-            console.warn('[Certora] Invalid job URL detected (not prover.certora.com):', jobUrl);
-            jobUrl = null;
-          }
+          // Categorize verification results for better display
+          const ruleCategories = {
+            stateIntegrity: certoraResults.filter(r => r.rule && (
+              r.rule.toLowerCase().includes('state') ||
+              r.rule.toLowerCase().includes('revert') ||
+              r.rule.toLowerCase().includes('view') ||
+              r.rule.toLowerCase().includes('readonly')
+            )).length,
+            transferSafety: certoraResults.filter(r => r.rule && (
+              r.rule.toLowerCase().includes('transfer') ||
+              r.rule.toLowerCase().includes('balance') ||
+              r.rule.toLowerCase().includes('supply')
+            )).length,
+            sanityChecks: certoraResults.filter(r => r.rule && (
+              r.rule.toLowerCase().includes('sanity') ||
+              r.rule.toLowerCase().includes('vacuous') ||
+              r.rule.toLowerCase().includes('envfree')
+            )).length
+          };
+
+          // Calculate what percentage of contract was formally verified
+          const totalRules = certoraResults.length;
+          const verificationCoverage = totalRules > 0 ? Math.round((verified / totalRules) * 100) : 0;
 
           let html = `
             <div class="certora-results-card">
@@ -2800,7 +2816,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
                   <span class="status-icon">${statusIcon}</span>
                   <span class="status-text">${statusText}</span>
                 </div>
-                ${jobUrl ? `<a href="${escapeHtml(jobUrl)}" target="_blank" class="certora-job-link">View Full Report →</a>` : ''}
+                <div class="certora-powered-by" style="font-size: 0.75em; opacity: 0.7;">Powered by Certora Prover</div>
               </div>
 
               <div class="certora-stats-grid">
