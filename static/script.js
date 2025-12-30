@@ -10,6 +10,196 @@ const log = (label, ...args) => {
 const debugLog = (...args) => { if (DEBUG_MODE) console.log(...args); };
 
 // ---------------------------------------------------------------------
+// TOAST NOTIFICATION SYSTEM - For background job notifications
+// ---------------------------------------------------------------------
+const ToastNotification = {
+    container: null,
+
+    init() {
+        if (this.container) return;
+
+        // Create toast container if it doesn't exist
+        this.container = document.createElement('div');
+        this.container.id = 'toast-container';
+        this.container.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 10000;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            max-width: 400px;
+        `;
+        document.body.appendChild(this.container);
+    },
+
+    show(message, type = 'info', duration = 8000) {
+        this.init();
+
+        const toast = document.createElement('div');
+        toast.className = `toast toast-${type}`;
+        toast.style.cssText = `
+            padding: 16px 20px;
+            border-radius: 8px;
+            color: white;
+            font-size: 14px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            animation: slideIn 0.3s ease-out;
+            cursor: pointer;
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            background: ${type === 'success' ? 'linear-gradient(135deg, #27ae60, #2ecc71)' :
+                         type === 'error' ? 'linear-gradient(135deg, #c0392b, #e74c3c)' :
+                         type === 'warning' ? 'linear-gradient(135deg, #d35400, #e67e22)' :
+                         'linear-gradient(135deg, #2980b9, #3498db)'};
+        `;
+
+        const icon = type === 'success' ? '✅' :
+                     type === 'error' ? '❌' :
+                     type === 'warning' ? '⚠️' : '🔒';
+
+        toast.innerHTML = `
+            <span style="font-size: 20px;">${icon}</span>
+            <div style="flex: 1;">
+                ${message}
+            </div>
+            <button style="background: none; border: none; color: white; cursor: pointer; font-size: 18px; padding: 0; opacity: 0.7;" onclick="this.parentElement.remove()">×</button>
+        `;
+
+        toast.addEventListener('click', (e) => {
+            if (e.target.tagName !== 'BUTTON') {
+                toast.remove();
+            }
+        });
+
+        this.container.appendChild(toast);
+
+        // Auto-remove after duration
+        if (duration > 0) {
+            setTimeout(() => toast.remove(), duration);
+        }
+
+        return toast;
+    },
+
+    success(message, duration) { return this.show(message, 'success', duration); },
+    error(message, duration) { return this.show(message, 'error', duration); },
+    warning(message, duration) { return this.show(message, 'warning', duration); },
+    info(message, duration) { return this.show(message, 'info', duration); }
+};
+
+// Add CSS animation for toasts
+const toastStyles = document.createElement('style');
+toastStyles.textContent = `
+    @keyframes slideIn {
+        from { transform: translateX(100%); opacity: 0; }
+        to { transform: translateX(0); opacity: 1; }
+    }
+`;
+document.head.appendChild(toastStyles);
+
+// ---------------------------------------------------------------------
+// CERTORA NOTIFICATION CHECKER - Polls for completed background jobs
+// ---------------------------------------------------------------------
+const CertoraNotificationChecker = {
+    checkInterval: null,
+    isChecking: false,
+
+    async checkNotifications() {
+        if (this.isChecking) return;
+        this.isChecking = true;
+
+        try {
+            const response = await fetch('/api/certora/notifications', {
+                credentials: 'include'
+            });
+
+            if (!response.ok) {
+                this.isChecking = false;
+                return;
+            }
+
+            const data = await response.json();
+            const { notifications } = data;
+
+            if (notifications && notifications.length > 0) {
+                // Show notifications for each completed job
+                for (const job of notifications) {
+                    const hasViolations = job.rules_violated > 0;
+                    const type = hasViolations ? 'warning' : 'success';
+                    const message = `
+                        <strong>Certora Verification Complete!</strong><br>
+                        <span style="opacity: 0.9;">${job.contract_name}</span><br>
+                        <span style="margin-top: 4px; display: inline-block;">
+                            ✓ ${job.rules_verified} verified
+                            ${hasViolations ? `| ⚠️ ${job.rules_violated} violations` : ''}
+                        </span>
+                    `;
+                    ToastNotification.show(message, type, 15000);
+                }
+
+                // Dismiss the notifications
+                const jobIds = notifications.map(n => n.job_id);
+                await this.dismissNotifications(jobIds);
+            }
+        } catch (error) {
+            debugLog('[CERTORA_NOTIFY] Error checking notifications:', error);
+        }
+
+        this.isChecking = false;
+    },
+
+    async dismissNotifications(jobIds) {
+        try {
+            // Get CSRF token
+            const csrfResponse = await fetch('/csrf-token', { credentials: 'include' });
+            const { csrf_token } = await csrfResponse.json();
+
+            await fetch('/api/certora/notifications/dismiss', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': csrf_token
+                },
+                credentials: 'include',
+                body: JSON.stringify({ job_ids: jobIds })
+            });
+        } catch (error) {
+            debugLog('[CERTORA_NOTIFY] Error dismissing notifications:', error);
+        }
+    },
+
+    start(intervalMs = 60000) {
+        // Check immediately on start
+        this.checkNotifications();
+
+        // Then check periodically
+        this.checkInterval = setInterval(() => {
+            this.checkNotifications();
+        }, intervalMs);
+
+        debugLog('[CERTORA_NOTIFY] Notification checker started');
+    },
+
+    stop() {
+        if (this.checkInterval) {
+            clearInterval(this.checkInterval);
+            this.checkInterval = null;
+        }
+    }
+};
+
+// Start notification checker when page loads (for Enterprise/Diamond users)
+document.addEventListener('DOMContentLoaded', () => {
+    // Start checking after a short delay to not impact initial page load
+    setTimeout(() => {
+        CertoraNotificationChecker.start(60000); // Check every 60 seconds
+    }, 5000);
+});
+
+// ---------------------------------------------------------------------
 // AUDIT QUEUE TRACKER - Real-time queue position and status updates
 // ---------------------------------------------------------------------
 class AuditQueueTracker {
@@ -1222,7 +1412,12 @@ document.addEventListener("DOMContentLoaded", () => {
       createKeyConfirm: "#create-key-confirm",
       createKeyCancel: "#create-key-cancel",
       modalUpgradeButton: "#modal-upgrade",
-      modalLogoutButton: "#modal-logout"
+      modalLogoutButton: "#modal-logout",
+      // Certora Jobs section
+      modalCertoraSection: "#modal-certora-section",
+      certoraJobsTableBody: "#certora-jobs-table-body",
+      certoraUploadBtn: "#certora-upload-btn",
+      certoraUploadInput: "#certora-upload-input"
     },
     async (els) => {
       const {
@@ -3510,7 +3705,8 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
         modalApiSection, apiKeyCountDisplay, apiKeysTableBody, createApiKeyButton,
         createKeyModal, createKeyModalBackdrop, createKeyModalClose,
         newKeyLabelInput, createKeyConfirm, createKeyCancel,
-        modalUpgradeButton, modalLogoutButton
+        modalUpgradeButton, modalLogoutButton,
+        modalCertoraSection, certoraJobsTableBody, certoraUploadBtn, certoraUploadInput
       } = els;
 
       // Function to populate modal with user data
@@ -3584,7 +3780,18 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
               modalApiSection.style.display = "none";
             }
           }
-          
+
+          // Certora Jobs section (Enterprise/Diamond only)
+          if (modalCertoraSection) {
+            const hasCertoraAccess = tier === "enterprise" || tierData.has_diamond;
+            if (hasCertoraAccess) {
+              modalCertoraSection.style.display = "block";
+              await loadCertoraJobs(); // Load Certora job history
+            } else {
+              modalCertoraSection.style.display = "none";
+            }
+          }
+
           debugLog("[DEBUG] Settings modal populated successfully");
         } catch (error) {
           console.error("[ERROR] Failed to populate settings modal:", error);
@@ -3711,6 +3918,254 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           }
         }
       };
+
+      // ============================================================================
+      // CERTORA JOBS MANAGEMENT (Enterprise/Diamond only)
+      // ============================================================================
+
+      // Load and display Certora verification jobs
+      const loadCertoraJobs = async () => {
+        try {
+          const response = await fetch("/api/certora/jobs", {
+            credentials: "include"
+          });
+
+          if (!response.ok) throw new Error("Failed to load Certora jobs");
+
+          const data = await response.json();
+          const { jobs } = data;
+
+          // Update table
+          if (certoraJobsTableBody) {
+            if (!jobs || jobs.length === 0) {
+              certoraJobsTableBody.innerHTML = `
+                <tr>
+                  <td colspan="5" style="padding: var(--space-6); text-align: center; color: var(--text-tertiary);">
+                    No verification jobs yet. Upload a contract to start!
+                  </td>
+                </tr>
+              `;
+            } else {
+              certoraJobsTableBody.innerHTML = jobs.map(job => {
+                // Status badge styling
+                const statusStyles = {
+                  'completed': 'background: rgba(39, 174, 96, 0.2); color: var(--green);',
+                  'running': 'background: rgba(155, 89, 182, 0.2); color: var(--accent-purple);',
+                  'pending': 'background: rgba(241, 196, 15, 0.2); color: #f1c40f;',
+                  'error': 'background: rgba(231, 76, 60, 0.2); color: var(--red);'
+                };
+                const statusStyle = statusStyles[job.status] || statusStyles['pending'];
+
+                // Results display
+                let resultsHtml = '—';
+                if (job.status === 'completed') {
+                  resultsHtml = `
+                    <span style="color: var(--green);">✓ ${job.rules_verified}</span> /
+                    <span style="color: var(--red);">✗ ${job.rules_violated}</span>
+                  `;
+                } else if (job.status === 'running' || job.status === 'pending') {
+                  resultsHtml = '<span style="color: var(--accent-purple);">⏳ Running...</span>';
+                }
+
+                // Truncate job ID for display
+                const shortJobId = job.job_id.length > 12
+                  ? job.job_id.substring(0, 8) + '...'
+                  : job.job_id;
+
+                return `
+                  <tr style="border-bottom: 1px solid var(--glass-border);">
+                    <td style="padding: var(--space-3); font-weight: 600; color: var(--text-primary); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                      ${job.contract_name}
+                    </td>
+                    <td style="padding: var(--space-3);">
+                      <span style="display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: var(--text-xs); text-transform: uppercase; ${statusStyle}">
+                        ${job.status}
+                      </span>
+                    </td>
+                    <td style="padding: var(--space-3); text-align: center; font-size: var(--text-sm);">
+                      ${resultsHtml}
+                    </td>
+                    <td style="padding: var(--space-3);">
+                      <a href="${job.job_url}" target="_blank" rel="noopener noreferrer"
+                         style="font-family: 'JetBrains Mono', monospace; font-size: var(--text-sm); color: var(--accent-teal); text-decoration: none;"
+                         title="View on Certora Dashboard: ${job.job_id}">
+                        ${shortJobId} ↗
+                      </a>
+                    </td>
+                    <td style="padding: var(--space-3); text-align: right;">
+                      <button class="copy-job-id-btn btn btn-sm" data-job-id="${job.job_id}" style="margin-right: var(--space-2);">
+                        📋
+                      </button>
+                      ${job.status === 'running' || job.status === 'pending'
+                        ? `<button class="poll-job-btn btn btn-sm" data-job-id="${job.job_id}" style="margin-right: var(--space-2);">🔄</button>`
+                        : ''}
+                      <button class="delete-job-btn btn btn-secondary btn-sm" data-job-id="${job.job_id}" data-contract="${job.contract_name}">
+                        🗑️
+                      </button>
+                    </td>
+                  </tr>
+                `;
+              }).join('');
+
+              // Copy Job ID button handlers
+              document.querySelectorAll('.copy-job-id-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                  const jobId = e.target.closest('button').dataset.jobId;
+                  try {
+                    await navigator.clipboard.writeText(jobId);
+                    e.target.closest('button').textContent = "✅";
+                    setTimeout(() => { e.target.closest('button').textContent = "📋"; }, 2000);
+                  } catch (err) {
+                    console.error("[ERROR] Failed to copy:", err);
+                  }
+                });
+              });
+
+              // Poll button handlers (for pending/running jobs)
+              document.querySelectorAll('.poll-job-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                  const jobId = e.target.closest('button').dataset.jobId;
+                  const button = e.target.closest('button');
+                  button.disabled = true;
+                  button.textContent = "⏳";
+
+                  try {
+                    await withCsrfToken(async (csrfToken) => {
+                      const response = await fetch(`/api/certora/poll/${jobId}`, {
+                        method: "POST",
+                        headers: { "X-CSRFToken": csrfToken },
+                        credentials: "include"
+                      });
+
+                      if (!response.ok) throw new Error("Failed to poll job");
+
+                      const data = await response.json();
+                      if (data.status === 'completed') {
+                        alert(`✅ Verification complete!\\n\\nVerified: ${data.rules_verified}\\nViolations: ${data.rules_violated}`);
+                      } else if (data.status === 'error') {
+                        alert(`❌ Verification failed: ${data.message}`);
+                      } else {
+                        alert(`⏳ ${data.message}`);
+                      }
+
+                      await loadCertoraJobs(); // Reload to update status
+                    });
+                  } catch (err) {
+                    console.error("[ERROR] Failed to poll:", err);
+                    button.disabled = false;
+                    button.textContent = "🔄";
+                  }
+                });
+              });
+
+              // Delete button handlers
+              document.querySelectorAll('.delete-job-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                  const jobId = e.target.closest('button').dataset.jobId;
+                  const contractName = e.target.closest('button').dataset.contract;
+
+                  if (!confirm(`Delete cached verification for "${contractName}"?\\n\\nThis will force a fresh verification on your next audit.`)) {
+                    return;
+                  }
+
+                  try {
+                    await withCsrfToken(async (csrfToken) => {
+                      const response = await fetch(`/api/certora/job/${jobId}`, {
+                        method: "DELETE",
+                        headers: { "X-CSRFToken": csrfToken },
+                        credentials: "include"
+                      });
+
+                      if (!response.ok) throw new Error("Failed to delete job");
+
+                      await loadCertoraJobs(); // Reload
+                    });
+                  } catch (err) {
+                    console.error("[ERROR] Failed to delete:", err);
+                    alert("Failed to delete Certora job");
+                  }
+                });
+              });
+            }
+          }
+
+          debugLog("[DEBUG] Certora jobs loaded successfully");
+        } catch (error) {
+          console.error("[ERROR] Failed to load Certora jobs:", error);
+          if (certoraJobsTableBody) {
+            certoraJobsTableBody.innerHTML = `
+              <tr>
+                <td colspan="5" style="padding: var(--space-6); text-align: center; color: var(--error);">
+                  Failed to load Certora jobs. Please try again.
+                </td>
+              </tr>
+            `;
+          }
+        }
+      };
+
+      // Certora Upload Button - trigger file input
+      certoraUploadBtn?.addEventListener("click", () => {
+        certoraUploadInput?.click();
+      });
+
+      // Handle Certora file upload
+      certoraUploadInput?.addEventListener("change", async (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        // Reset input so same file can be selected again
+        e.target.value = '';
+
+        if (!file.name.endsWith('.sol')) {
+          alert("Please upload a Solidity (.sol) file");
+          return;
+        }
+
+        try {
+          certoraUploadBtn.disabled = true;
+          certoraUploadBtn.textContent = "⏳ Starting verification...";
+
+          const formData = new FormData();
+          formData.append('file', file);
+
+          await withCsrfToken(async (csrfToken) => {
+            const response = await fetch("/api/certora/start", {
+              method: "POST",
+              headers: { "X-CSRFToken": csrfToken },
+              credentials: "include",
+              body: formData
+            });
+
+            if (!response.ok) {
+              const error = await response.json();
+              throw new Error(error.detail || "Failed to start verification");
+            }
+
+            const data = await response.json();
+
+            if (data.status === 'started') {
+              alert(`🔒 Verification Started!\\n\\nContract: ${file.name}\\nJob ID: ${data.job_id}\\n\\nVerification typically takes 2-5 minutes. Results will be cached and used in your next audit.\\n\\nYou can track progress at:\\n${data.job_url}`);
+            } else if (data.status === 'already_running') {
+              alert(`⏳ Verification Already Running\\n\\nJob ID: ${data.job_id}\\n\\n${data.message}`);
+            } else if (data.status === 'cached') {
+              alert(`✅ Verification Already Complete!\\n\\nVerified: ${data.rules_verified}\\nViolations: ${data.rules_violated}\\n\\nCompleted: ${data.completed_at}\\n\\n${data.message}`);
+            }
+
+            // Reload jobs list
+            await loadCertoraJobs();
+
+            certoraUploadBtn.disabled = false;
+            certoraUploadBtn.textContent = "🔒 Verify Contract Now";
+          });
+
+        } catch (error) {
+          console.error("[ERROR] Failed to start Certora verification:", error);
+          alert(`❌ Failed to start verification: ${error.message}`);
+          certoraUploadBtn.disabled = false;
+          certoraUploadBtn.textContent = "🔒 Verify Contract Now";
+        }
+      });
 
       // Open modal helper function
       const openSettingsModal = async () => {

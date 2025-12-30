@@ -987,6 +987,61 @@
                 </div>
             </div>
             
+            <!-- Certora Jobs Management (Enterprise/Diamond only) -->
+            <div class="settings-section" id="modal-certora-section" style="display: none;">
+                <h3>🔒 Certora Verification Jobs</h3>
+
+                <div class="certora-jobs-info" style="margin-bottom: var(--space-4); padding: var(--space-3); background: var(--glass-bg); border-radius: var(--radius-md); font-size: var(--text-sm); color: var(--text-tertiary);">
+                    <p style="margin: 0 0 8px 0;">
+                        <strong>Formal verification</strong> mathematically proves contract properties. Run Certora ahead of time so results are ready when you audit.
+                    </p>
+                    <p style="margin: 0; color: var(--accent-purple);">
+                        ⏱️ Verification typically takes 2-5 minutes. Results are cached and reused automatically.
+                    </p>
+                </div>
+
+                <!-- Certora Jobs Table -->
+                <div class="certora-jobs-table-container" style="margin-bottom: var(--space-6); max-height: 300px; overflow-y: auto;">
+                    <table class="certora-jobs-table" style="width: 100%; border-collapse: collapse;">
+                        <thead style="position: sticky; top: 0; background: var(--bg-primary);">
+                            <tr style="border-bottom: 1px solid var(--glass-border);">
+                                <th style="padding: var(--space-3); text-align: left; font-size: var(--text-sm); color: var(--text-tertiary);">Contract</th>
+                                <th style="padding: var(--space-3); text-align: left; font-size: var(--text-sm); color: var(--text-tertiary);">Status</th>
+                                <th style="padding: var(--space-3); text-align: center; font-size: var(--text-sm); color: var(--text-tertiary);">Results</th>
+                                <th style="padding: var(--space-3); text-align: left; font-size: var(--text-sm); color: var(--text-tertiary);">Job ID</th>
+                                <th style="padding: var(--space-3); text-align: right; font-size: var(--text-sm); color: var(--text-tertiary);">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="certora-jobs-table-body">
+                            <tr>
+                                <td colspan="5" style="padding: var(--space-6); text-align: center; color: var(--text-tertiary);">
+                                    Loading Certora jobs...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Start New Verification -->
+                <div class="certora-upload-section" style="border: 2px dashed var(--glass-border); border-radius: var(--radius-lg); padding: var(--space-6); text-align: center; background: var(--glass-bg); margin-bottom: var(--space-4);">
+                    <div style="margin-bottom: var(--space-3);">
+                        <span style="font-size: 2rem;">📤</span>
+                    </div>
+                    <p style="margin: 0 0 12px 0; color: var(--text-secondary);">
+                        Start verification ahead of your audit
+                    </p>
+                    <input type="file" id="certora-upload-input" accept=".sol" style="display: none;">
+                    <button id="certora-upload-btn" class="btn" style="min-width: 200px;">
+                        🔒 Verify Contract Now
+                    </button>
+                </div>
+
+                <small class="text-tertiary" style="display: block;">
+                    <strong>Pro tip:</strong> Changed your contract? Delete the cached job to force a fresh verification.
+                    Job IDs link to Certora's dashboard where you can see detailed rule outputs.
+                </small>
+            </div>
+
             <!-- Theme Selection -->
             <div class="settings-section">
                 <h3>🎨 Theme & Appearance</h3>
