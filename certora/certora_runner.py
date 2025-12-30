@@ -110,10 +110,29 @@ class CertoraRunner:
             logger.debug(f"CertoraRunner: Contract: {contract_path}")
             logger.debug(f"CertoraRunner: Spec: {spec_path}")
 
-            # Run certoraRun with config file as positional argument
-            # Certora CLI expects: certoraRun <config.conf>
+            # Build command with config file and solc_allow_path CLI arguments
+            # solc_allow_path must be passed as CLI args, not in config (config treats it as single path)
+            contract_dir = str(Path(contract_path).parent)
+            spec_dir = str(Path(spec_path).parent)
+
+            # Build unique set of allowed paths
+            allowed_paths = list(set([
+                contract_dir,
+                spec_dir,
+                "/opt/render/project/data",
+                "/tmp",
+                "."
+            ]))
+
+            # Build command: certoraRun config.conf --solc_allow_path path1 --solc_allow_path path2 ...
+            cmd = ["certoraRun", conf_path]
+            for path in allowed_paths:
+                cmd.extend(["--solc_allow_path", path])
+
+            logger.debug(f"CertoraRunner: Command: {' '.join(cmd)}")
+
             result = subprocess.run(
-                ["certoraRun", conf_path],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
@@ -244,18 +263,8 @@ class CertoraRunner:
 
         # JSON format conf file for Certora Prover
         # Use path:contract format to handle UUID filenames with hyphens
-        # Dynamically compute allowed paths from actual file locations
-        contract_dir = str(Path(contract_path).parent)
-        spec_dir = str(Path(spec_path).parent)
-
-        # Build comma-separated string of allowed paths (Certora expects string, not array)
-        allowed_paths = ",".join(set([
-            contract_dir,
-            spec_dir,
-            "/opt/render/project/data",
-            "/tmp",
-            "."
-        ]))
+        # NOTE: solc_allow_path is passed via CLI args, not in config
+        # (config file treats it as a single path, not multiple paths)
 
         conf = {
             "files": [f"{contract_path}:{contract_name}"],
@@ -267,7 +276,6 @@ class CertoraRunner:
             "loop_iter": 3,  # Unroll loops 3 times
             "process": "evm",  # EVM mode
             "solc": "solc",  # Use system solc
-            "solc_allow_path": allowed_paths,  # Comma-separated string of allowed paths
             "server": "production"  # Use production server
         }
 
