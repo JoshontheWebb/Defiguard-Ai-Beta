@@ -121,15 +121,14 @@ class CertoraRunner:
             )
 
             logger.info(f"CertoraRunner: certoraRun returned {result.returncode}")
-            logger.debug(f"CertoraRunner: stdout length: {len(result.stdout)}")
+            logger.info(f"CertoraRunner: stdout length: {len(result.stdout)}")
 
-            # Log output for debugging verification issues
+            # Log output for debugging verification issues - always log for visibility
             if result.returncode != 0:
                 logger.warning(f"CertoraRunner: Non-zero exit ({result.returncode})")
-                logger.warning(f"CertoraRunner: stdout preview: {result.stdout[:1000]}")
-
-            if result.stderr:
-                logger.warning(f"CertoraRunner: stderr: {result.stderr[:500]}")
+                logger.warning(f"CertoraRunner: stdout: {result.stdout[:2000]}")
+                if result.stderr:
+                    logger.warning(f"CertoraRunner: stderr: {result.stderr[:1000]}")
 
             # Parse output
             return self._parse_output(result.stdout, result.stderr, result.returncode)
