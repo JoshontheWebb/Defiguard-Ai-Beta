@@ -4124,6 +4124,81 @@ a:focus-visible {
 }
 
 /* ============================================================================
+   CERTORA JOBS MANAGEMENT - Settings Modal
+   ============================================================================ */
+
+.certora-jobs-table-container {
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+
+.certora-jobs-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.certora-jobs-table th,
+.certora-jobs-table td {
+    padding: var(--space-3);
+    text-align: left;
+    font-size: var(--text-sm);
+}
+
+.certora-jobs-table tbody tr:hover {
+    background: rgba(var(--accent-teal-rgb), 0.05);
+}
+
+.certora-jobs-info {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
+.certora-upload-section {
+    transition: all 0.2s ease;
+}
+
+.certora-upload-section:hover {
+    border-color: var(--accent-purple);
+    background: rgba(var(--accent-purple-rgb), 0.05);
+}
+
+/* Job status badges */
+.job-status-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    font-weight: 600;
+}
+
+.job-status-badge.completed {
+    background: rgba(39, 174, 96, 0.2);
+    color: var(--green);
+}
+
+.job-status-badge.running,
+.job-status-badge.pending {
+    background: rgba(155, 89, 182, 0.2);
+    color: var(--accent-purple);
+    animation: pulse 2s infinite;
+}
+
+.job-status-badge.error {
+    background: rgba(231, 76, 60, 0.2);
+    color: var(--red);
+}
+
+/* Button sizes for tables */
+.btn-sm {
+    padding: 4px 8px;
+    font-size: var(--text-xs);
+    min-width: auto;
+}
+
+/* ============================================================================
    AUDIT QUEUE STATUS UI - Phase 1 Scaling
    ============================================================================ */
 

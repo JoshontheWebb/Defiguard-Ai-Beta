@@ -5965,6 +5965,68 @@ async def poll_certora_job(
         }
 
 
+@app.get("/api/certora/notifications")
+async def get_certora_notifications(
+    request: Request,
+    db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """
+    Get completed Certora jobs that haven't been notified to the user yet.
+    This allows the frontend to show notifications for jobs that completed in background.
+    """
+    user = await get_authenticated_user(request, db)
+    if not user:
+        return {"notifications": []}
+
+    # Find completed jobs that haven't been notified
+    unnotified_jobs = db.query(CertoraJob).filter(
+        CertoraJob.user_id == user.id,
+        CertoraJob.status == "completed",
+        CertoraJob.user_notified == False
+    ).order_by(CertoraJob.completed_at.desc()).all()
+
+    return {
+        "notifications": [
+            {
+                "job_id": job.job_id,
+                "contract_name": job.contract_name,
+                "rules_verified": job.rules_verified,
+                "rules_violated": job.rules_violated,
+                "completed_at": job.completed_at.isoformat() if job.completed_at else None
+            }
+            for job in unnotified_jobs
+        ]
+    }
+
+
+@app.post("/api/certora/notifications/dismiss")
+async def dismiss_certora_notifications(
+    request: Request,
+    body: dict = Body(...),
+    db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """
+    Mark Certora job notifications as dismissed (user has seen them).
+    """
+    user = await get_authenticated_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    job_ids = body.get("job_ids", [])
+    if not job_ids:
+        return {"success": True, "dismissed": 0}
+
+    # Mark jobs as notified
+    updated = db.query(CertoraJob).filter(
+        CertoraJob.user_id == user.id,
+        CertoraJob.job_id.in_(job_ids)
+    ).update({CertoraJob.user_notified: True}, synchronize_session=False)
+
+    db.commit()
+
+    return {"success": True, "dismissed": updated}
+
+
 def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str, Any]]:
     """
     Run Certora formal verification via cloud API.
