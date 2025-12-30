@@ -10,6 +10,183 @@ const log = (label, ...args) => {
 const debugLog = (...args) => { if (DEBUG_MODE) console.log(...args); };
 
 // ---------------------------------------------------------------------
+// AUDIT KEY HELPERS - For persistent audit access
+// ---------------------------------------------------------------------
+
+// Copy audit key to clipboard
+window.copyAuditKey = async function(auditKey) {
+    try {
+        await navigator.clipboard.writeText(auditKey);
+        // Show success feedback
+        const copyBtn = document.querySelector('.audit-key-copy');
+        if (copyBtn) {
+            const originalText = copyBtn.textContent;
+            copyBtn.textContent = '✓';
+            copyBtn.style.color = 'var(--accent-teal)';
+            setTimeout(() => {
+                copyBtn.textContent = originalText;
+                copyBtn.style.color = '';
+            }, 2000);
+        }
+        ToastNotification.show('Audit key copied to clipboard!', 'success');
+    } catch (err) {
+        console.error('Failed to copy audit key:', err);
+        // Fallback for older browsers
+        const textArea = document.createElement('textarea');
+        textArea.value = auditKey;
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+        ToastNotification.show('Audit key copied!', 'success');
+    }
+};
+
+// Retrieve audit results by key
+window.retrieveAuditByKey = async function(auditKey) {
+    if (!auditKey || !auditKey.startsWith('dga_')) {
+        ToastNotification.show('Invalid audit key format. Keys start with "dga_"', 'error');
+        return null;
+    }
+
+    try {
+        const response = await fetch(`/audit/retrieve/${auditKey}`);
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.detail || 'Failed to retrieve audit');
+        }
+
+        const data = await response.json();
+        debugLog('[AUDIT_RETRIEVE]', data);
+
+        // Display results based on status
+        if (data.status === 'completed' && data.report) {
+            // Render the full report
+            window.renderAuditResults(data.report);
+            ToastNotification.show('Audit results loaded!', 'success');
+        } else if (data.status === 'processing') {
+            ToastNotification.show(`Audit in progress: ${data.current_phase || 'analyzing'}...`, 'info');
+        } else if (data.status === 'queued') {
+            ToastNotification.show(`Audit queued at position ${data.queue_position || '?'}`, 'info');
+        } else if (data.status === 'failed') {
+            ToastNotification.show(`Audit failed: ${data.error || 'Unknown error'}`, 'error');
+        }
+
+        return data;
+    } catch (err) {
+        console.error('[AUDIT_RETRIEVE] Error:', err);
+        ToastNotification.show(err.message, 'error');
+        return null;
+    }
+};
+
+// Render audit results in the UI
+window.renderAuditResults = function(report) {
+    // Find or create results container
+    let resultsSection = document.querySelector('.results-section');
+    if (!resultsSection) {
+        resultsSection = document.createElement('section');
+        resultsSection.className = 'results-section';
+        const auditSection = document.getElementById('audit');
+        if (auditSection) {
+            auditSection.insertAdjacentElement('afterend', resultsSection);
+        } else {
+            document.body.appendChild(resultsSection);
+        }
+    }
+
+    // Scroll to results
+    resultsSection.scrollIntoView({ behavior: 'smooth' });
+
+    // Dispatch event for existing result rendering logic
+    window.dispatchEvent(new CustomEvent('auditComplete', { detail: report }));
+};
+
+// Show the audit key retrieval modal
+window.showAuditKeyRetrievalModal = function() {
+    // Check if modal already exists
+    let modal = document.getElementById('audit-key-modal');
+    if (modal) {
+        modal.style.display = 'block';
+        return;
+    }
+
+    // Create modal
+    modal = document.createElement('div');
+    modal.id = 'audit-key-modal';
+    modal.className = 'modal-backdrop';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header">
+                <h3>🔑 Retrieve Audit Results</h3>
+                <button class="modal-close" onclick="document.getElementById('audit-key-modal').style.display='none'">×</button>
+            </div>
+            <div class="modal-body">
+                <p style="color: var(--text-secondary); margin-bottom: var(--space-4);">
+                    Enter your audit access key to retrieve results from a previous audit.
+                </p>
+                <div class="form-group">
+                    <label for="retrieve-audit-key">Audit Key</label>
+                    <input type="text" id="retrieve-audit-key" placeholder="dga_..."
+                           style="font-family: monospace; width: 100%;">
+                </div>
+                <button id="retrieve-audit-btn" class="btn btn-primary" style="width: 100%; margin-top: var(--space-4);">
+                    🔍 Retrieve Results
+                </button>
+
+                <div id="recent-audit-keys" style="margin-top: var(--space-6);"></div>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    // Load recent keys from localStorage
+    try {
+        const savedKeys = JSON.parse(localStorage.getItem('auditKeys') || '[]');
+        if (savedKeys.length > 0) {
+            const recentContainer = document.getElementById('recent-audit-keys');
+            recentContainer.innerHTML = `
+                <h4 style="color: var(--text-secondary); margin-bottom: var(--space-2);">Recent Audits</h4>
+                <div class="recent-keys-list">
+                    ${savedKeys.map(({ key, timestamp }) => `
+                        <button class="recent-key-btn" onclick="document.getElementById('retrieve-audit-key').value='${key}'; window.retrieveAuditByKey('${key}'); document.getElementById('audit-key-modal').style.display='none';">
+                            <code>${key.substring(0, 20)}...</code>
+                            <span class="recent-key-time">${new Date(timestamp).toLocaleDateString()}</span>
+                        </button>
+                    `).join('')}
+                </div>
+            `;
+        }
+    } catch (e) {
+        console.warn('Could not load recent audit keys:', e);
+    }
+
+    // Handle retrieve button click
+    document.getElementById('retrieve-audit-btn').addEventListener('click', async () => {
+        const key = document.getElementById('retrieve-audit-key').value.trim();
+        if (key) {
+            modal.style.display = 'none';
+            await window.retrieveAuditByKey(key);
+        }
+    });
+
+    // Handle Enter key
+    document.getElementById('retrieve-audit-key').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+            document.getElementById('retrieve-audit-btn').click();
+        }
+    });
+
+    // Close on backdrop click
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+            modal.style.display = 'none';
+        }
+    });
+};
+
+// ---------------------------------------------------------------------
 // TOAST NOTIFICATION SYSTEM - For background job notifications
 // ---------------------------------------------------------------------
 const ToastNotification = {
@@ -205,13 +382,14 @@ document.addEventListener('DOMContentLoaded', () => {
 class AuditQueueTracker {
     constructor() {
         this.jobId = null;
+        this.auditKey = null;
         this.ws = null;
         this.onUpdate = null;
         this.onComplete = null;
         this.onError = null;
         this.pollInterval = null;
     }
-    
+
     async submitAudit(formData, csrfToken) {
         try {
             const response = await fetch('/audit/submit', {
@@ -220,27 +398,82 @@ class AuditQueueTracker {
                 body: formData,
                 credentials: 'include'
             });
-            
+
             if (!response.ok) {
                 const errorData = await response.json().catch(() => ({}));
                 throw new Error(errorData.detail || 'Failed to submit audit');
             }
-            
+
             const data = await response.json();
             this.jobId = data.job_id;
-            
-            log('QUEUE', `Audit submitted: job_id=${this.jobId}, position=${data.position}`);
-            
+            this.auditKey = data.audit_key;
+
+            log('QUEUE', `Audit submitted: job_id=${this.jobId}, audit_key=${this.auditKey}, position=${data.position}`);
+
+            // Show audit key to user
+            if (this.auditKey) {
+                this.showAuditKey(this.auditKey);
+            }
+
             // Start WebSocket connection for real-time updates
             this.connectWebSocket();
-            
+
             // Fallback polling in case WebSocket fails
             this.startPolling();
-            
+
             return data;
         } catch (error) {
             log('QUEUE_ERROR', error.message);
             throw error;
+        }
+    }
+
+    showAuditKey(auditKey) {
+        // Create and show the audit key notification
+        const existingNotif = document.getElementById('audit-key-notification');
+        if (existingNotif) existingNotif.remove();
+
+        const notification = document.createElement('div');
+        notification.id = 'audit-key-notification';
+        notification.className = 'audit-key-notification';
+        notification.innerHTML = `
+            <div class="audit-key-card">
+                <div class="audit-key-header">
+                    <span class="audit-key-icon">🔑</span>
+                    <h4>Your Audit Access Key</h4>
+                    <button class="audit-key-close" onclick="this.closest('.audit-key-notification').remove()">×</button>
+                </div>
+                <div class="audit-key-body">
+                    <p class="audit-key-info">Save this key to access your results anytime, even after leaving this page:</p>
+                    <div class="audit-key-value">
+                        <code id="audit-key-display">${auditKey}</code>
+                        <button class="audit-key-copy" onclick="window.copyAuditKey('${auditKey}')" title="Copy to clipboard">
+                            📋
+                        </button>
+                    </div>
+                    <p class="audit-key-hint">
+                        📧 Pro/Enterprise users will also receive an email when the audit completes.
+                    </p>
+                </div>
+            </div>
+        `;
+
+        // Insert after the audit form
+        const auditForm = document.getElementById('audit-form');
+        if (auditForm) {
+            auditForm.insertAdjacentElement('afterend', notification);
+        } else {
+            document.body.appendChild(notification);
+        }
+
+        // Store in localStorage for persistence
+        try {
+            const savedKeys = JSON.parse(localStorage.getItem('auditKeys') || '[]');
+            savedKeys.unshift({ key: auditKey, timestamp: Date.now() });
+            // Keep only last 10 keys
+            localStorage.setItem('auditKeys', JSON.stringify(savedKeys.slice(0, 10)));
+        } catch (e) {
+            console.warn('Could not save audit key to localStorage:', e);
         }
     }
     

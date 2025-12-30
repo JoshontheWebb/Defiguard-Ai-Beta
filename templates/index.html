@@ -263,9 +263,14 @@
                 </div>
 
                 <!-- Submit Button -->
-                <button type="submit" id="submit-audit">
-                    🚀 Analyze Contract
-                </button>
+                <div style="display: flex; gap: var(--space-3); flex-wrap: wrap;">
+                    <button type="submit" id="submit-audit" style="flex: 1; min-width: 200px;">
+                        🚀 Analyze Contract
+                    </button>
+                    <button type="button" id="retrieve-previous-audit" class="btn btn-secondary" style="min-width: 180px;" onclick="window.showAuditKeyRetrievalModal()">
+                        🔑 Retrieve Previous Audit
+                    </button>
+                </div>
             </form>
             <!-- Queue Status UI -->
             <div id="queue-status" aria-live="polite"></div>
@@ -987,59 +992,43 @@
                 </div>
             </div>
             
-            <!-- Certora Jobs Management (Enterprise/Diamond only) -->
-            <div class="settings-section" id="modal-certora-section" style="display: none;">
-                <h3>🔒 Certora Verification Jobs</h3>
+            <!-- Audit History & Retrieval (Pro/Enterprise) -->
+            <div class="settings-section" id="modal-audit-history-section">
+                <h3>🔑 Audit History & Retrieval</h3>
 
-                <div class="certora-jobs-info" style="margin-bottom: var(--space-4); padding: var(--space-3); background: var(--glass-bg); border-radius: var(--radius-md); font-size: var(--text-sm); color: var(--text-tertiary);">
+                <div class="audit-history-info" style="margin-bottom: var(--space-4); padding: var(--space-3); background: var(--glass-bg); border-radius: var(--radius-md); font-size: var(--text-sm); color: var(--text-tertiary);">
                     <p style="margin: 0 0 8px 0;">
-                        <strong>Formal verification</strong> mathematically proves contract properties. Run Certora ahead of time so results are ready when you audit.
+                        <strong>Background Audits</strong> - Start an audit, leave the page, and retrieve results anytime with your audit key.
                     </p>
-                    <p style="margin: 0; color: var(--accent-purple);">
-                        ⏱️ Verification typically takes 2-5 minutes. Results are cached and reused automatically.
+                    <p style="margin: 0; color: var(--accent-teal);">
+                        📧 Pro/Enterprise users receive email notifications when audits complete.
                     </p>
                 </div>
 
-                <!-- Certora Jobs Table -->
-                <div class="certora-jobs-table-container" style="margin-bottom: var(--space-6); max-height: 300px; overflow-y: auto;">
-                    <table class="certora-jobs-table" style="width: 100%; border-collapse: collapse;">
-                        <thead style="position: sticky; top: 0; background: var(--bg-primary);">
-                            <tr style="border-bottom: 1px solid var(--glass-border);">
-                                <th style="padding: var(--space-3); text-align: left; font-size: var(--text-sm); color: var(--text-tertiary);">Contract</th>
-                                <th style="padding: var(--space-3); text-align: left; font-size: var(--text-sm); color: var(--text-tertiary);">Status</th>
-                                <th style="padding: var(--space-3); text-align: center; font-size: var(--text-sm); color: var(--text-tertiary);">Results</th>
-                                <th style="padding: var(--space-3); text-align: left; font-size: var(--text-sm); color: var(--text-tertiary);">Job ID</th>
-                                <th style="padding: var(--space-3); text-align: right; font-size: var(--text-sm); color: var(--text-tertiary);">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="certora-jobs-table-body">
-                            <tr>
-                                <td colspan="5" style="padding: var(--space-6); text-align: center; color: var(--text-tertiary);">
-                                    Loading Certora jobs...
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-
-                <!-- Start New Verification -->
-                <div class="certora-upload-section" style="border: 2px dashed var(--glass-border); border-radius: var(--radius-lg); padding: var(--space-6); text-align: center; background: var(--glass-bg); margin-bottom: var(--space-4);">
+                <!-- Retrieve by Key -->
+                <div class="audit-retrieve-section" style="border: 2px dashed var(--glass-border); border-radius: var(--radius-lg); padding: var(--space-6); text-align: center; background: var(--glass-bg); margin-bottom: var(--space-4);">
                     <div style="margin-bottom: var(--space-3);">
-                        <span style="font-size: 2rem;">📤</span>
+                        <span style="font-size: 2rem;">🔑</span>
                     </div>
                     <p style="margin: 0 0 12px 0; color: var(--text-secondary);">
-                        Start verification ahead of your audit
+                        Have an audit key? Retrieve your results:
                     </p>
-                    <input type="file" id="certora-upload-input" accept=".sol" style="display: none;">
-                    <button id="certora-upload-btn" class="btn" style="min-width: 200px;">
-                        🔒 Verify Contract Now
-                    </button>
+                    <div style="display: flex; gap: var(--space-2); max-width: 400px; margin: 0 auto;">
+                        <input type="text" id="settings-audit-key-input" placeholder="dga_..."
+                               style="flex: 1; font-family: 'JetBrains Mono', monospace; padding: var(--space-3); background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-md); color: var(--text-primary);">
+                        <button id="settings-retrieve-btn" class="btn" style="min-width: 120px;">
+                            🔍 Retrieve
+                        </button>
+                    </div>
                 </div>
 
-                <small class="text-tertiary" style="display: block;">
-                    <strong>Pro tip:</strong> Changed your contract? Delete the cached job to force a fresh verification.
-                    Job IDs link to Certora's dashboard where you can see detailed rule outputs.
-                </small>
+                <!-- Recent Audits List -->
+                <div id="settings-recent-audits" style="margin-top: var(--space-4);">
+                    <h4 style="color: var(--text-secondary); margin-bottom: var(--space-3); font-size: var(--text-sm);">Recent Audits (stored locally)</h4>
+                    <div id="settings-recent-audits-list" style="display: flex; flex-direction: column; gap: var(--space-2);">
+                        <!-- Populated by JavaScript -->
+                    </div>
+                </div>
             </div>
 
             <!-- Theme Selection -->

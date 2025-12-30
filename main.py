@@ -76,6 +76,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from web3 import Web3
 import stripe
 import re  # For username sanitization
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # On-chain analysis module
 from onchain_analyzer import OnChainAnalyzer
@@ -810,6 +813,304 @@ class CertoraJob(Base):
 
     # Relationship
     user = relationship("User")
+
+
+class AuditResult(Base):
+    """
+    Persistent storage for complete audit results.
+
+    Allows users to:
+    1. Start an audit and leave the page
+    2. Retrieve results later using their unique audit key
+    3. Receive email notification when audit completes
+
+    Each audit gets a unique access key (dga_xxx) that can be used
+    to retrieve results without being logged in.
+    """
+    __tablename__ = "audit_results"
+    __table_args__ = {'extend_existing': True}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey('users.id'), nullable=True, index=True)
+
+    # Unique access key for this audit (e.g., dga_abc123xyz...)
+    audit_key: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+
+    # Contract information
+    contract_name: Mapped[str] = mapped_column(String(255), default="contract.sol")
+    contract_hash: Mapped[str] = mapped_column(String(64), index=True)  # SHA256
+    contract_address: Mapped[Optional[str]] = mapped_column(String(42), nullable=True)  # On-chain address
+
+    # Queue/Processing status
+    status: Mapped[str] = mapped_column(String(50), default="queued", index=True)
+    # Status values: queued, processing, completed, failed
+    queue_position: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    current_phase: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Individual tool results (JSON strings)
+    slither_results: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    mythril_results: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    echidna_results: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    certora_results: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    onchain_results: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # AI analysis and final report
+    ai_analysis: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    full_report: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Complete normalized response JSON
+
+    # PDF report path
+    pdf_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+
+    # Summary metrics
+    risk_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    issues_count: Mapped[int] = mapped_column(Integer, default=0)
+    critical_count: Mapped[int] = mapped_column(Integer, default=0)
+    high_count: Mapped[int] = mapped_column(Integer, default=0)
+    medium_count: Mapped[int] = mapped_column(Integer, default=0)
+    low_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # Email notification
+    notification_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    email_sent: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # User tier at time of audit (for feature gating in results)
+    user_tier: Mapped[str] = mapped_column(String(50), default="free")
+
+    # Error information if failed
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Link to in-memory job_id for real-time updates
+    job_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+
+    # Relationship
+    user = relationship("User")
+
+
+def generate_audit_key() -> str:
+    """Generate a unique audit access key."""
+    import secrets
+    return f"dga_{secrets.token_urlsafe(32)}"
+
+
+# ============================================================================
+# EMAIL NOTIFICATION SYSTEM
+# ============================================================================
+# Environment variables:
+#   SMTP_HOST - SMTP server hostname (default: smtp.gmail.com)
+#   SMTP_PORT - SMTP server port (default: 587)
+#   SMTP_USER - SMTP username/email
+#   SMTP_PASSWORD - SMTP password or app-specific password
+#   SMTP_FROM_EMAIL - From email address (default: uses SMTP_USER)
+#   SMTP_FROM_NAME - From name (default: DeFiGuard AI)
+
+def get_smtp_config() -> dict:
+    """Get SMTP configuration from environment."""
+    return {
+        "host": os.getenv("SMTP_HOST", "smtp.gmail.com"),
+        "port": int(os.getenv("SMTP_PORT", "587")),
+        "user": os.getenv("SMTP_USER", ""),
+        "password": os.getenv("SMTP_PASSWORD", ""),
+        "from_email": os.getenv("SMTP_FROM_EMAIL", os.getenv("SMTP_USER", "")),
+        "from_name": os.getenv("SMTP_FROM_NAME", "DeFiGuard AI"),
+    }
+
+
+def is_email_configured() -> bool:
+    """Check if email sending is properly configured."""
+    config = get_smtp_config()
+    return bool(config["user"] and config["password"])
+
+
+def send_audit_completion_email(
+    to_email: str,
+    audit_key: str,
+    contract_name: str,
+    risk_score: float,
+    issues_count: int,
+    critical_count: int,
+    high_count: int,
+    status: str = "completed"
+) -> bool:
+    """
+    Send email notification when audit completes.
+
+    Returns True if email sent successfully, False otherwise.
+    """
+    if not is_email_configured():
+        logger.warning("Email not configured - skipping audit notification")
+        return False
+
+    config = get_smtp_config()
+    base_url = os.getenv("BASE_URL", "https://defiguard.onrender.com")
+
+    try:
+        # Create message
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"🔒 DeFiGuard Audit Complete: {contract_name}"
+        msg["From"] = f"{config['from_name']} <{config['from_email']}>"
+        msg["To"] = to_email
+
+        # Determine status emoji and message
+        if status == "completed":
+            status_emoji = "✅"
+            status_text = "Your smart contract audit has completed successfully!"
+        else:
+            status_emoji = "❌"
+            status_text = "Your smart contract audit encountered an issue."
+
+        # Risk level indicator
+        if risk_score is not None:
+            if risk_score >= 80:
+                risk_color = "#22c55e"  # green
+                risk_label = "Low Risk"
+            elif risk_score >= 60:
+                risk_color = "#eab308"  # yellow
+                risk_label = "Medium Risk"
+            elif risk_score >= 40:
+                risk_color = "#f97316"  # orange
+                risk_label = "High Risk"
+            else:
+                risk_color = "#ef4444"  # red
+                risk_label = "Critical Risk"
+        else:
+            risk_color = "#6b7280"
+            risk_label = "Unknown"
+            risk_score = 0
+
+        # Plain text version
+        text_content = f"""
+DeFiGuard Smart Contract Audit Complete
+========================================
+
+{status_text}
+
+Contract: {contract_name}
+Security Score: {risk_score:.0f}/100 ({risk_label})
+Issues Found: {issues_count} total ({critical_count} critical, {high_count} high)
+
+View your full audit results:
+{base_url}/audit/retrieve/{audit_key}
+
+Your Audit Key: {audit_key}
+(Save this key to access your results anytime)
+
+---
+DeFiGuard AI - Advanced Smart Contract Security
+"""
+
+        # HTML version
+        html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #0a0a0a; color: #ffffff; padding: 20px; margin: 0;">
+    <div style="max-width: 600px; margin: 0 auto; background-color: #1a1a2e; border-radius: 12px; overflow: hidden; border: 1px solid #333;">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #6366f1, #8b5cf6); padding: 30px; text-align: center;">
+            <h1 style="margin: 0; font-size: 24px; color: white;">🔒 DeFiGuard AI</h1>
+            <p style="margin: 10px 0 0; opacity: 0.9; color: white;">Smart Contract Security Audit</p>
+        </div>
+
+        <!-- Content -->
+        <div style="padding: 30px;">
+            <h2 style="margin: 0 0 20px; color: #fff;">{status_emoji} Audit Complete</h2>
+            <p style="color: #a0a0a0; margin-bottom: 25px;">{status_text}</p>
+
+            <!-- Contract Info -->
+            <div style="background-color: #252542; border-radius: 8px; padding: 20px; margin-bottom: 20px;">
+                <p style="margin: 0 0 10px; color: #a0a0a0; font-size: 14px;">Contract</p>
+                <p style="margin: 0; font-size: 18px; font-weight: bold; color: #fff;">{contract_name}</p>
+            </div>
+
+            <!-- Security Score -->
+            <div style="background-color: #252542; border-radius: 8px; padding: 20px; margin-bottom: 20px; text-align: center;">
+                <p style="margin: 0 0 10px; color: #a0a0a0; font-size: 14px;">Security Score</p>
+                <p style="margin: 0; font-size: 48px; font-weight: bold; color: {risk_color};">{risk_score:.0f}</p>
+                <p style="margin: 5px 0 0; color: {risk_color}; font-weight: bold;">{risk_label}</p>
+            </div>
+
+            <!-- Issues Summary -->
+            <div style="display: flex; gap: 10px; margin-bottom: 25px;">
+                <div style="flex: 1; background-color: #252542; border-radius: 8px; padding: 15px; text-align: center;">
+                    <p style="margin: 0; font-size: 24px; font-weight: bold; color: #ef4444;">{critical_count}</p>
+                    <p style="margin: 5px 0 0; font-size: 12px; color: #a0a0a0;">Critical</p>
+                </div>
+                <div style="flex: 1; background-color: #252542; border-radius: 8px; padding: 15px; text-align: center;">
+                    <p style="margin: 0; font-size: 24px; font-weight: bold; color: #f97316;">{high_count}</p>
+                    <p style="margin: 5px 0 0; font-size: 12px; color: #a0a0a0;">High</p>
+                </div>
+                <div style="flex: 1; background-color: #252542; border-radius: 8px; padding: 15px; text-align: center;">
+                    <p style="margin: 0; font-size: 24px; font-weight: bold; color: #fff;">{issues_count}</p>
+                    <p style="margin: 5px 0 0; font-size: 12px; color: #a0a0a0;">Total</p>
+                </div>
+            </div>
+
+            <!-- CTA Button -->
+            <a href="{base_url}/audit/retrieve/{audit_key}" style="display: block; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; text-decoration: none; padding: 15px 30px; border-radius: 8px; font-weight: bold; text-align: center; margin-bottom: 20px;">
+                View Full Audit Report
+            </a>
+
+            <!-- Audit Key -->
+            <div style="background-color: #252542; border-radius: 8px; padding: 15px; text-align: center;">
+                <p style="margin: 0 0 5px; color: #a0a0a0; font-size: 12px;">Your Audit Key (save this)</p>
+                <code style="color: #8b5cf6; font-size: 14px; word-break: break-all;">{audit_key}</code>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div style="background-color: #0f0f1a; padding: 20px; text-align: center; border-top: 1px solid #333;">
+            <p style="margin: 0; color: #666; font-size: 12px;">
+                DeFiGuard AI - Advanced Smart Contract Security<br>
+                <a href="{base_url}" style="color: #6366f1;">defiguard.onrender.com</a>
+            </p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+        msg.attach(MIMEText(text_content, "plain"))
+        msg.attach(MIMEText(html_content, "html"))
+
+        # Send email
+        with smtplib.SMTP(config["host"], config["port"]) as server:
+            server.starttls()
+            server.login(config["user"], config["password"])
+            server.sendmail(config["from_email"], to_email, msg.as_string())
+
+        logger.info(f"Audit completion email sent to {to_email} for audit {audit_key}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to send audit email to {to_email}: {e}")
+        return False
+
+
+async def send_audit_email_async(
+    to_email: str,
+    audit_key: str,
+    contract_name: str,
+    risk_score: float,
+    issues_count: int,
+    critical_count: int,
+    high_count: int,
+    status: str = "completed"
+) -> bool:
+    """Async wrapper for sending audit completion emails."""
+    return await asyncio.to_thread(
+        send_audit_completion_email,
+        to_email, audit_key, contract_name, risk_score,
+        issues_count, critical_count, high_count, status
+    )
 
 
 Base.metadata.create_all(bind=engine, checkfirst=True)
@@ -3423,7 +3724,7 @@ def run_echidna(temp_path: str) -> list[dict[str, str]]:
             cmd,
             capture_output=True,
             text=True,
-            timeout=60  # Hard timeout
+            timeout=180  # 3 minutes - generous for complex contracts
         )
         
         logger.info(f"[ECHIDNA] Return code: {result.returncode}")
@@ -3453,8 +3754,8 @@ def run_echidna(temp_path: str) -> list[dict[str, str]]:
             return [{"vulnerability": "Echidna completed", "description": result.stderr[:500] or "No output"}]
     
     except subprocess.TimeoutExpired:
-        logger.warning("[ECHIDNA] Timed out after 60 seconds")
-        return [{"vulnerability": "Echidna timeout", "description": "Fuzzing exceeded 60s limit - partial results may be available"}]
+        logger.warning("[ECHIDNA] Timed out after 180 seconds")
+        return [{"vulnerability": "Echidna timeout", "description": "Fuzzing exceeded 3 minute limit - contract may be complex. Partial results may be available."}]
     
     except FileNotFoundError:
         logger.warning("[ECHIDNA] Binary not found")
@@ -3472,18 +3773,18 @@ def run_mythril(temp_path: str) -> list[dict[str, str]]:
     try:
         logger.info(f"[MYTHRIL] Starting analysis for {temp_path}")
         
-        # Mythril command with execution limits for faster analysis
+        # Mythril command with execution limits for thorough but bounded analysis
         result = subprocess.run(
             [
-                "myth", "analyze", temp_path, 
+                "myth", "analyze", temp_path,
                 "-o", "json",
-                "--execution-timeout", "60",      # Limit symbolic execution
-                "--max-depth", "22",              # Limit search depth
-                "--solver-timeout", "10000"       # 10s solver timeout
+                "--execution-timeout", "180",     # 3 minutes for symbolic execution
+                "--max-depth", "30",              # Increased search depth for better coverage
+                "--solver-timeout", "30000"       # 30s solver timeout
             ],
             capture_output=True,
             text=True,
-            timeout=90  # Reduced from 120s
+            timeout=300  # 5 minutes total - generous for complex contracts
         )
         
         logger.info(f"[MYTHRIL] Return code: {result.returncode}")
@@ -3514,8 +3815,8 @@ def run_mythril(temp_path: str) -> list[dict[str, str]]:
             return [{"vulnerability": "Mythril completed", "description": result.stderr[:500] or "No output"}]
    
     except subprocess.TimeoutExpired:
-        logger.warning("[MYTHRIL] Timed out after 90 seconds")
-        return [{"vulnerability": "Mythril timeout", "description": "Analysis exceeded 90s limit - contract may be complex"}]
+        logger.warning("[MYTHRIL] Timed out after 300 seconds")
+        return [{"vulnerability": "Mythril timeout", "description": "Analysis exceeded 5 minute limit - contract may be highly complex. Try running a focused audit."}]
     except FileNotFoundError:
         logger.warning("[MYTHRIL] Binary not found")
         return [{"vulnerability": "Mythril unavailable", "description": "Mythril not installed"}]
@@ -5762,129 +6063,41 @@ async def delete_certora_job(
 
 
 @app.post("/api/certora/start")
-async def start_certora_verification(
+async def start_certora_verification_deprecated(
     request: Request,
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ) -> dict[str, Any]:
     """
-    Start Certora verification separately from the main audit.
+    DEPRECATED: Manual Certora submission has been replaced by the integrated audit system.
 
-    This allows users to:
-    1. Run Certora ahead of time
-    2. Get their job ID
-    3. Include completed results in future audits
+    Certora formal verification now runs automatically as part of the full audit flow.
+    Use /audit/submit to start an audit - you'll receive an audit_key that can be used
+    to retrieve results (including Certora verification) once the audit completes.
 
-    The job runs in background and user can poll for status.
+    Benefits of the new system:
+    - Certora runs with full Slither context for better specs
+    - Results are permanently stored and accessible via audit_key
+    - Email notifications when audit completes
+    - No need to manually poll for status
     """
-    user = await get_authenticated_user(request, db)
-    if not user:
-        raise HTTPException(status_code=401, detail="Authentication required")
-
-    # Check tier - Certora is Enterprise only
-    if user.tier not in ["enterprise", "diamond"] and not user.has_diamond:
-        raise HTTPException(
-            status_code=403,
-            detail="Certora formal verification is available for Enterprise and Diamond tiers only"
-        )
-
-    # Check if CERTORAKEY is configured
-    if not os.getenv("CERTORAKEY"):
-        raise HTTPException(
-            status_code=503,
-            detail="Certora service not configured. Please contact support."
-        )
-
-    # Read contract content
-    content = await file.read()
-    contract_code = content.decode("utf-8")
-    contract_hash = compute_contract_hash(contract_code)
-    contract_name = file.filename or "Contract.sol"
-
-    # Check for existing pending job
-    pending_job = get_pending_certora_job(db, user.id, contract_hash)
-    if pending_job:
-        return {
-            "status": "already_running",
-            "job_id": pending_job.job_id,
-            "job_url": pending_job.job_url,
-            "message": "A verification job for this contract is already running."
-        }
-
-    # Check for existing completed job
-    cached_job = get_cached_certora_result(db, user.id, contract_hash)
-    if cached_job:
-        return {
-            "status": "cached",
-            "job_id": cached_job.job_id,
-            "job_url": cached_job.job_url,
-            "rules_verified": cached_job.rules_verified,
-            "rules_violated": cached_job.rules_violated,
-            "completed_at": cached_job.completed_at.isoformat() if cached_job.completed_at else None,
-            "message": "A completed verification exists for this contract. Delete it to run fresh verification."
-        }
-
-    # Save contract to temp file
-    temp_path = None
-    try:
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.sol', delete=False) as f:
-            f.write(contract_code)
-            temp_path = f.name
-
-        # Import and run Certora (non-blocking mode)
-        from certora import CVLGenerator, CertoraRunner
-
-        # Generate specs
-        generator = CVLGenerator()
-        cvl_specs = generator.generate_specs_sync(contract_code, None)
-
-        if not cvl_specs:
-            raise HTTPException(status_code=400, detail="Could not generate CVL specifications for this contract")
-
-        # Submit job (don't wait for results)
-        runner = CertoraRunner()
-        results = runner.run_verification_sync(temp_path, cvl_specs, wait_for_results=False)
-
-        job_url = results.get("job_url")
-        if not job_url:
-            raise HTTPException(status_code=500, detail="Failed to submit Certora job")
-
-        # Extract job ID from URL
-        job_id = job_url.split("/")[-1] if "/" in job_url else job_url
-
-        # Save to database
-        # Note: has_slither_context=False because Settings flow doesn't run Slither
-        new_job = CertoraJob(
-            user_id=user.id,
-            contract_hash=contract_hash,
-            contract_name=contract_name,
-            job_id=job_id,
-            job_url=job_url,
-            status="pending",
-            has_slither_context=False  # Settings flow doesn't have Slither findings
-        )
-        db.add(new_job)
-        db.commit()
-
-        logger.info(f"Certora job started for {user.username}: {job_id}")
-
-        return {
-            "status": "started",
-            "job_id": job_id,
-            "job_url": job_url,
-            "message": "Certora verification started. Poll /api/certora/job/{job_id} for status, or wait a few minutes and run your audit."
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to start Certora job: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to start verification: {str(e)}")
-
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            os.unlink(temp_path)
+    return {
+        "status": "deprecated",
+        "message": "Manual Certora submission has been replaced. Please use the main audit flow instead.",
+        "instructions": {
+            "step1": "Submit your contract via POST /audit/submit",
+            "step2": "Save the audit_key returned in the response",
+            "step3": "Your audit (including Certora verification) will run in the background",
+            "step4": "Retrieve results anytime via GET /audit/retrieve/{audit_key}",
+            "step5": "Optional: Provide notify_email parameter to receive email when complete"
+        },
+        "benefits": [
+            "Certora runs with full Slither context for better specifications",
+            "Results are permanently stored and accessible anytime",
+            "Email notifications when audit completes",
+            "No need to manually track job IDs"
+        ]
+    }
 
 
 @app.post("/api/certora/poll/{job_id}")
@@ -6377,7 +6590,7 @@ def summarize_context(context: str) -> str:
 async def process_audit_queue():
     """Background task that continuously processes the audit queue."""
     logger.info("[QUEUE_PROCESSOR] Starting background queue processor")
-    
+
     while True:
         try:
             job = await audit_queue.process_next()
@@ -6385,17 +6598,26 @@ async def process_audit_queue():
                 try:
                     # Route through MAIN audit_contract for 100% feature parity
                     from io import BytesIO
-                    
+
                     file_obj = UploadFile(
                         filename=job.filename,
                         file=BytesIO(job.file_content),
                         size=len(job.file_content)
                     )
-                    
+
                     # Create fresh DB session for this job
                     queue_db = SessionLocal()
-                    
+
                     try:
+                        # Update AuditResult status to processing
+                        audit_result = queue_db.query(AuditResult).filter(
+                            AuditResult.job_id == job.job_id
+                        ).first()
+                        if audit_result:
+                            audit_result.status = "processing"
+                            audit_result.started_at = datetime.now()
+                            queue_db.commit()
+
                         # Update phase for WebSocket subscribers
                         await audit_queue.update_phase(job.job_id, "starting", 5)
                         await notify_job_subscribers(job.job_id, {
@@ -6403,7 +6625,7 @@ async def process_audit_queue():
                             "phase": "starting",
                             "progress": 5
                         })
-                        
+
                         # Call MAIN audit function with _from_queue=True
                         result = await audit_contract(
                             file=file_obj,
@@ -6411,23 +6633,100 @@ async def process_audit_queue():
                             username=job.username,
                             db=queue_db,
                             request=None,
-                            _from_queue=True
+                            _from_queue=True,
+                            _job_id=job.job_id  # Pass job_id for phase updates
                         )
-                        
+
                         await audit_queue.complete(job.job_id, result)
+
+                        # Save results to AuditResult for persistent storage
+                        if audit_result:
+                            audit_result.status = "completed"
+                            audit_result.completed_at = datetime.now()
+                            audit_result.full_report = json.dumps(result) if result else None
+                            audit_result.risk_score = result.get("risk_score") if result else None
+
+                            # Count issues by severity
+                            issues = result.get("issues", []) if result else []
+                            audit_result.issues_count = len(issues)
+                            audit_result.critical_count = sum(1 for i in issues if i.get("severity", "").lower() == "critical")
+                            audit_result.high_count = sum(1 for i in issues if i.get("severity", "").lower() == "high")
+                            audit_result.medium_count = sum(1 for i in issues if i.get("severity", "").lower() == "medium")
+                            audit_result.low_count = sum(1 for i in issues if i.get("severity", "").lower() == "low")
+
+                            # Store individual tool results
+                            audit_result.slither_results = json.dumps(result.get("slither_results", [])) if result else None
+                            audit_result.mythril_results = json.dumps(result.get("mythril_results", [])) if result else None
+                            audit_result.echidna_results = json.dumps(result.get("fuzzing_results", [])) if result else None
+                            audit_result.certora_results = json.dumps(result.get("certora_results", [])) if result else None
+                            audit_result.pdf_path = result.get("pdf_path") if result else None
+
+                            queue_db.commit()
+                            logger.info(f"[AUDIT_RESULT] Saved completed results for audit {audit_result.audit_key[:20]}...")
+
+                            # Send email notification if configured
+                            if audit_result.notification_email and not audit_result.email_sent:
+                                try:
+                                    email_sent = await send_audit_email_async(
+                                        to_email=audit_result.notification_email,
+                                        audit_key=audit_result.audit_key,
+                                        contract_name=audit_result.contract_name,
+                                        risk_score=audit_result.risk_score or 0,
+                                        issues_count=audit_result.issues_count,
+                                        critical_count=audit_result.critical_count,
+                                        high_count=audit_result.high_count,
+                                        status="completed"
+                                    )
+                                    if email_sent:
+                                        audit_result.email_sent = True
+                                        queue_db.commit()
+                                except Exception as email_err:
+                                    logger.error(f"[AUDIT_EMAIL] Failed to send notification: {email_err}")
+
                         await notify_job_subscribers(job.job_id, {
                             "status": "completed",
-                            "result": result
+                            "result": result,
+                            "audit_key": audit_result.audit_key if audit_result else None
                         })
-                        
+
                     finally:
                         queue_db.close()
-                    
+
                 except Exception as e:
                     error_msg = str(e)
                     logger.exception(f"[QUEUE_PROCESSOR] Audit failed for job {job.job_id[:8]}...")
                     await audit_queue.fail(job.job_id, error_msg)
-                    
+
+                    # Update AuditResult with failure
+                    try:
+                        fail_db = SessionLocal()
+                        audit_result = fail_db.query(AuditResult).filter(
+                            AuditResult.job_id == job.job_id
+                        ).first()
+                        if audit_result:
+                            audit_result.status = "failed"
+                            audit_result.error_message = error_msg
+                            audit_result.completed_at = datetime.now()
+                            fail_db.commit()
+
+                            # Send failure notification email
+                            if audit_result.notification_email and not audit_result.email_sent:
+                                await send_audit_email_async(
+                                    to_email=audit_result.notification_email,
+                                    audit_key=audit_result.audit_key,
+                                    contract_name=audit_result.contract_name,
+                                    risk_score=0,
+                                    issues_count=0,
+                                    critical_count=0,
+                                    high_count=0,
+                                    status="failed"
+                                )
+                                audit_result.email_sent = True
+                                fail_db.commit()
+                        fail_db.close()
+                    except Exception as db_err:
+                        logger.error(f"[QUEUE_PROCESSOR] Failed to update AuditResult: {db_err}")
+
                     await notify_job_subscribers(job.job_id, {
                         "status": "failed",
                         "error": error_msg
@@ -6435,7 +6734,7 @@ async def process_audit_queue():
             else:
                 # No jobs available, wait before checking again
                 await asyncio.sleep(1)
-                
+
         except asyncio.CancelledError:
             logger.info("[QUEUE_PROCESSOR] Queue processor cancelled")
             break
@@ -6485,23 +6784,34 @@ async def submit_audit_to_queue(
     file: UploadFile = File(...),
     contract_address: str = Query(None),
     username: str = Query(None),
+    notify_email: str = Query(None),
+    generate_key: bool = Query(True),
     db: Session = Depends(get_db)
 ) -> dict:
     """
-    Submit an audit to the queue. Returns immediately with job_id.
-    Client should then poll /audit/status/{job_id} or connect to WebSocket.
+    Submit an audit to the queue. Returns immediately with job_id and audit_key.
+
+    The audit_key can be used to retrieve results later without being logged in.
+    This allows users to start an audit, leave the page, and return later.
+
+    Parameters:
+        file: The Solidity contract file
+        contract_address: Optional on-chain address for verification
+        notify_email: Optional email to notify when audit completes
+        generate_key: Whether to generate an audit access key (default: True)
     """
     await verify_csrf_token(request)
-    
+
     session_username = request.session.get("username")
     userinfo = request.session.get("userinfo")
     session_email = userinfo.get("email") if userinfo else None
-    
+
     effective_username = username or session_username or session_email or "guest"
-    
-    # Get user tier
+
+    # Get user and tier
     user = None
     tier = "free"
+    user_email = notify_email or session_email
     if effective_username != "guest":
         user = db.query(User).filter(
             (User.username == effective_username) |
@@ -6509,14 +6819,16 @@ async def submit_audit_to_queue(
         ).first()
         if user:
             tier = user.tier
-    
+            if not user_email:
+                user_email = user.email
+
     # Read file
     code_bytes = await file.read()
     file_size = len(code_bytes)
-    
+
     if file_size == 0:
         raise HTTPException(status_code=400, detail="Empty file uploaded")
-    
+
     # Check file size limits
     size_limit = usage_tracker.size_limits.get(tier, 250 * 1024)
     if file_size > size_limit and tier not in ["enterprise", "diamond"]:
@@ -6524,7 +6836,13 @@ async def submit_audit_to_queue(
             status_code=400,
             detail=f"File size ({file_size / 1024:.1f}KB) exceeds {tier} tier limit ({size_limit / 1024:.1f}KB). Upgrade to continue."
         )
-    
+
+    # Generate unique audit key
+    audit_key = generate_audit_key() if generate_key else None
+
+    # Compute contract hash
+    contract_hash = compute_contract_hash(code_bytes.decode('utf-8', errors='replace'))
+
     # Submit to queue
     job = await audit_queue.submit(
         username=effective_username,
@@ -6533,13 +6851,30 @@ async def submit_audit_to_queue(
         tier=tier,
         contract_address=contract_address
     )
-    
+
+    # Create AuditResult record for persistent storage
+    if audit_key:
+        audit_result = AuditResult(
+            user_id=user.id if user else None,
+            audit_key=audit_key,
+            contract_name=file.filename or "contract.sol",
+            contract_hash=contract_hash,
+            contract_address=contract_address,
+            status="queued",
+            user_tier=tier,
+            notification_email=user_email if tier in ["pro", "enterprise"] else None,
+            job_id=job.job_id
+        )
+        db.add(audit_result)
+        db.commit()
+        logger.info(f"[AUDIT_KEY] Created audit key {audit_key[:20]}... for job {job.job_id[:8]}...")
+
     # Get initial status
     status = await audit_queue.get_status(job.job_id)
-    
+
     logger.info(f"[QUEUE_SUBMIT] Job {job.job_id[:8]}... submitted by {effective_username}, position: {status['position']}")
-    
-    return {
+
+    response = {
         "job_id": job.job_id,
         "status": "queued",
         "position": status["position"],
@@ -6547,6 +6882,13 @@ async def submit_audit_to_queue(
         "estimated_wait_seconds": status["estimated_wait_seconds"],
         "message": f"Audit queued successfully. Position: {status['position']}"
     }
+
+    if audit_key:
+        response["audit_key"] = audit_key
+        response["retrieve_url"] = f"/audit/retrieve/{audit_key}"
+        response["message"] += f"\n\nSave your audit key to access results later: {audit_key}"
+
+    return response
 
 
 @app.get("/audit/status/{job_id}")
@@ -6564,6 +6906,182 @@ async def get_audit_status(job_id: str) -> dict:
 async def get_queue_stats() -> dict:
     """Get current queue statistics (for monitoring/debugging)."""
     return audit_queue.get_stats()
+
+
+# ============================================================================
+# AUDIT KEY RETRIEVAL ENDPOINTS
+# ============================================================================
+
+@app.get("/audit/retrieve/{audit_key}")
+async def retrieve_audit_by_key(
+    audit_key: str,
+    db: Session = Depends(get_db)
+) -> dict:
+    """
+    Retrieve audit results using an audit access key.
+
+    This endpoint does NOT require authentication - the audit key itself
+    serves as the access credential. Users can bookmark this URL to
+    return to their results later.
+
+    Returns the full audit report if completed, or status if still processing.
+    """
+    # Validate audit key format
+    if not audit_key.startswith("dga_"):
+        raise HTTPException(status_code=400, detail="Invalid audit key format")
+
+    # Look up the audit
+    audit_result = db.query(AuditResult).filter(
+        AuditResult.audit_key == audit_key
+    ).first()
+
+    if not audit_result:
+        raise HTTPException(status_code=404, detail="Audit not found. The key may be invalid or expired.")
+
+    # Build response based on status
+    response = {
+        "audit_key": audit_result.audit_key,
+        "status": audit_result.status,
+        "contract_name": audit_result.contract_name,
+        "created_at": audit_result.created_at.isoformat() if audit_result.created_at else None,
+        "user_tier": audit_result.user_tier
+    }
+
+    if audit_result.status == "queued":
+        # Still in queue - provide position if available
+        if audit_result.job_id:
+            queue_status = await audit_queue.get_status(audit_result.job_id)
+            response["queue_position"] = queue_status.get("position")
+            response["estimated_wait_seconds"] = queue_status.get("estimated_wait_seconds")
+        response["message"] = "Your audit is queued and will begin shortly."
+
+    elif audit_result.status == "processing":
+        # Currently being processed
+        response["started_at"] = audit_result.started_at.isoformat() if audit_result.started_at else None
+        response["current_phase"] = audit_result.current_phase
+        response["progress"] = audit_result.progress
+        response["message"] = "Your audit is in progress."
+
+    elif audit_result.status == "completed":
+        # Completed - return full results
+        response["completed_at"] = audit_result.completed_at.isoformat() if audit_result.completed_at else None
+        response["risk_score"] = audit_result.risk_score
+        response["issues_count"] = audit_result.issues_count
+        response["critical_count"] = audit_result.critical_count
+        response["high_count"] = audit_result.high_count
+        response["medium_count"] = audit_result.medium_count
+        response["low_count"] = audit_result.low_count
+
+        # Parse and return full report
+        if audit_result.full_report:
+            try:
+                response["report"] = json.loads(audit_result.full_report)
+            except json.JSONDecodeError:
+                response["report"] = None
+
+        # Include PDF path if available
+        if audit_result.pdf_path:
+            response["pdf_url"] = f"/api/reports/{os.path.basename(audit_result.pdf_path)}"
+
+        response["message"] = "Audit completed successfully."
+
+    elif audit_result.status == "failed":
+        # Failed - return error info
+        response["completed_at"] = audit_result.completed_at.isoformat() if audit_result.completed_at else None
+        response["error"] = audit_result.error_message
+        response["message"] = "Audit failed. Please try again or contact support."
+
+    return response
+
+
+@app.get("/api/user/audits")
+async def list_user_audits(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0)
+) -> dict:
+    """
+    List all audits for the authenticated user.
+
+    Returns a paginated list of the user's audits with their keys and status.
+    Requires authentication.
+    """
+    user = await get_authenticated_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Query user's audits
+    query = db.query(AuditResult).filter(
+        AuditResult.user_id == user.id
+    ).order_by(AuditResult.created_at.desc())
+
+    total = query.count()
+    audits = query.offset(offset).limit(limit).all()
+
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "audits": [
+            {
+                "audit_key": a.audit_key,
+                "contract_name": a.contract_name,
+                "status": a.status,
+                "risk_score": a.risk_score,
+                "issues_count": a.issues_count,
+                "critical_count": a.critical_count,
+                "high_count": a.high_count,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+                "completed_at": a.completed_at.isoformat() if a.completed_at else None
+            }
+            for a in audits
+        ]
+    }
+
+
+@app.post("/api/audit/resend-email/{audit_key}")
+async def resend_audit_email(
+    audit_key: str,
+    email: str = Query(..., description="Email address to send notification to"),
+    db: Session = Depends(get_db)
+) -> dict:
+    """
+    Resend completion email for a completed audit.
+
+    Requires the audit key and a valid email address.
+    Only works for completed audits.
+    """
+    # Validate audit key
+    if not audit_key.startswith("dga_"):
+        raise HTTPException(status_code=400, detail="Invalid audit key format")
+
+    audit_result = db.query(AuditResult).filter(
+        AuditResult.audit_key == audit_key
+    ).first()
+
+    if not audit_result:
+        raise HTTPException(status_code=404, detail="Audit not found")
+
+    if audit_result.status != "completed":
+        raise HTTPException(status_code=400, detail="Audit is not yet completed")
+
+    # Send email
+    success = await send_audit_email_async(
+        to_email=email,
+        audit_key=audit_result.audit_key,
+        contract_name=audit_result.contract_name,
+        risk_score=audit_result.risk_score or 0,
+        issues_count=audit_result.issues_count,
+        critical_count=audit_result.critical_count,
+        high_count=audit_result.high_count,
+        status="completed"
+    )
+
+    if success:
+        return {"success": True, "message": f"Email sent to {email}"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to send email. Check email configuration.")
 
 
 @app.websocket("/ws/job/{job_id}")

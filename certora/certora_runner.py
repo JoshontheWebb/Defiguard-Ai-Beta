@@ -25,13 +25,15 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Timeout for job submission (just getting the URL, not waiting for results)
-SUBMISSION_TIMEOUT = 120  # 2 minutes to submit and get URL
+SUBMISSION_TIMEOUT = 300  # 5 minutes to submit and get URL (generous for network issues)
 
 # Timeout for polling results (if we choose to wait)
-POLL_TIMEOUT = 600  # 10 minutes max wait for results
+# Since we now save results to database and can retrieve later, this is just for
+# initial wait time - if it times out, status is "pending" not "failed"
+POLL_TIMEOUT = 1800  # 30 minutes max wait for results (Certora can take a while)
 
 # How often to poll for results
-POLL_INTERVAL = 15  # Check every 15 seconds
+POLL_INTERVAL = 20  # Check every 20 seconds
 
 # Certora cloud job URL pattern
 CERTORA_JOB_URL = "https://prover.certora.com/output/{job_id}"
