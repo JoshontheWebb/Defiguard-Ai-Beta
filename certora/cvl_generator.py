@@ -861,49 +861,11 @@ class CVLGenerator:
         Returns:
             CVL specification string or None if generation fails
         """
-        if not self.client:
-            logger.warning("CVLGenerator: No client available, using template-based specs")
-            return self._generate_template_specs(contract_code, slither_findings, contract_name)
-
-        try:
-            # Extract contract name if not provided
-            if not contract_name:
-                contract_name = self._extract_contract_name(contract_code)
-
-            # Detect contract types
-            contract_types = self._detect_contract_types(contract_code)
-            logger.info(f"CVLGenerator: Detected contract types: {contract_types}")
-
-            # Build the comprehensive prompt
-            prompt = self._build_comprehensive_prompt(
-                contract_code,
-                slither_findings,
-                contract_name,
-                contract_types
-            )
-
-            # Call Claude with higher token limit for comprehensive specs
-            response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=8192,  # Increased for comprehensive specs
-                messages=[{"role": "user", "content": prompt}]
-            )
-
-            cvl_content = response.content[0].text
-
-            # Extract CVL from response
-            cvl_specs = self._extract_cvl(cvl_content)
-
-            if cvl_specs:
-                logger.info(f"CVLGenerator: Generated {len(cvl_specs)} chars of CVL specs")
-                return cvl_specs
-            else:
-                logger.warning("CVLGenerator: No CVL extracted, using templates")
-                return self._generate_template_specs(contract_code, slither_findings, contract_name)
-
-        except Exception as e:
-            logger.error(f"CVLGenerator: AI generation failed: {e}")
-            return self._generate_template_specs(contract_code, slither_findings, contract_name)
+        # Always use template-based specs for reliability
+        # Template specs are derived from actual contract parsing, ensuring
+        # the methods block and rules match the contract's real signatures
+        logger.info("CVLGenerator: Using template-based specs for reliable verification")
+        return self._generate_template_specs(contract_code, slither_findings, contract_name)
 
     async def generate_specs(
         self,
