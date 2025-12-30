@@ -2763,11 +2763,17 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           const verified = certoraResults.filter(r => r.status === 'verified').length;
           const violated = certoraResults.filter(r => r.status === 'violated' || r.status === 'issues_found').length;
           const skipped = certoraResults.filter(r => r.status === 'skipped').length;
+          const pending = certoraResults.filter(r => r.status === 'pending').length;
           const errors = certoraResults.filter(r => r.status === 'error' || r.status === 'incomplete' || r.status === 'timeout').length;
 
           // Determine overall status and messaging
           let overallStatus, statusIcon, statusText;
-          if (violated > 0) {
+          if (pending > 0 && verified === 0 && violated === 0) {
+            // Verification in progress on Certora cloud
+            overallStatus = 'pending';
+            statusIcon = '🔄';
+            statusText = 'Verification In Progress';
+          } else if (violated > 0) {
             overallStatus = 'warning';
             statusIcon = '⚠️';
             statusText = `Found ${violated} Issue${violated > 1 ? 's' : ''} Requiring Review`;
@@ -2828,10 +2834,17 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
                   <div class="stat-value">${violated}</div>
                   <div class="stat-label">Issues Found</div>
                 </div>
+                ${pending > 0 ? `
+                <div class="certora-stat pending">
+                  <div class="stat-value">${pending}</div>
+                  <div class="stat-label">In Progress</div>
+                </div>
+                ` : `
                 <div class="certora-stat skipped">
                   <div class="stat-value">${skipped + errors}</div>
                   <div class="stat-label">Skipped/Errors</div>
                 </div>
+                `}
               </div>
 
               <div class="certora-rules-list">
@@ -2862,6 +2875,10 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
               case 'skipped':
                 ruleIcon = '⏭️';
                 ruleClass = 'skipped';
+                break;
+              case 'pending':
+                ruleIcon = '🔄';
+                ruleClass = 'pending';
                 break;
               default:
                 ruleIcon = '🔍';
@@ -2995,12 +3012,14 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             if (report.certora_results && report.certora_results.length > 0) {
               const certoraVerified = report.certora_results.filter(r => r.status === 'verified').length;
               const certoraViolated = report.certora_results.filter(r => r.status === 'violated' || r.status === 'issues_found').length;
-              const certoraStatus = certoraViolated > 0 ? '⚠️ Issues Found' : certoraVerified > 0 ? '✅ Verified' : '🔍 Complete';
+              const certoraPending = report.certora_results.filter(r => r.status === 'pending').length;
+              const certoraStatus = certoraPending > 0 && certoraVerified === 0 ? '🔄 In Progress' : certoraViolated > 0 ? '⚠️ Issues Found' : certoraVerified > 0 ? '✅ Verified' : '🔍 Complete';
 
               toolsHtml += `<div class="mobile-certora-summary" style="margin-top: 8px; padding: 8px; background: rgba(var(--accent-purple-rgb), 0.1); border-radius: 8px; font-size: 0.85em;">
                 <strong>🔒 Formal Verification:</strong> ${certoraStatus}
                 ${certoraVerified > 0 ? `<br><span style="color: var(--green);">✓ ${certoraVerified} properties proven</span>` : ''}
                 ${certoraViolated > 0 ? `<br><span style="color: var(--red);">✗ ${certoraViolated} issues to review</span>` : ''}
+                ${certoraPending > 0 ? `<br><span style="color: var(--accent-purple);">⏳ Analysis running on Certora cloud</span>` : ''}
               </div>`;
             }
 

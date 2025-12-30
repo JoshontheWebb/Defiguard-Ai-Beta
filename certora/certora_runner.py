@@ -3,6 +3,13 @@ Certora Prover Runner for DeFiGuard AI.
 
 Handles submission of verification jobs to Certora's cloud infrastructure
 and parsing of verification results.
+
+Architecture:
+- Certora jobs run on Certora's cloud (NOT on your server)
+- The CLI submits jobs and can optionally wait for results
+- For reliability, we use non-blocking mode: submit job, get URL, then poll
+
+This prevents timeout failures when Certora cloud is slow or network has latency.
 """
 
 import os
@@ -11,13 +18,20 @@ import subprocess
 import tempfile
 import logging
 import re
+import time
 from typing import Optional, Any
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Default timeout for verification (10 minutes)
-DEFAULT_TIMEOUT = 600
+# Timeout for job submission (just getting the URL, not waiting for results)
+SUBMISSION_TIMEOUT = 120  # 2 minutes to submit and get URL
+
+# Timeout for polling results (if we choose to wait)
+POLL_TIMEOUT = 600  # 10 minutes max wait for results
+
+# How often to poll for results
+POLL_INTERVAL = 15  # Check every 15 seconds
 
 # Certora cloud job URL pattern
 CERTORA_JOB_URL = "https://prover.certora.com/output/{job_id}"
@@ -26,15 +40,17 @@ CERTORA_JOB_URL = "https://prover.certora.com/output/{job_id}"
 class CertoraRunner:
     """Interface to Certora Prover cloud."""
 
-    def __init__(self, timeout: int = DEFAULT_TIMEOUT):
+    def __init__(self, submission_timeout: int = SUBMISSION_TIMEOUT, poll_timeout: int = POLL_TIMEOUT):
         """
         Initialize Certora Runner.
 
         Args:
-            timeout: Maximum time to wait for verification (seconds)
+            submission_timeout: Time to wait for job submission (getting URL)
+            poll_timeout: Max time to wait for results after submission
         """
         self.api_key = os.getenv("CERTORAKEY")
-        self.timeout = timeout
+        self.submission_timeout = submission_timeout
+        self.poll_timeout = poll_timeout
 
         if not self.api_key:
             logger.warning("CertoraRunner: CERTORAKEY not set - verification will be skipped")
@@ -47,20 +63,29 @@ class CertoraRunner:
         self,
         contract_path: str,
         spec_content: str,
-        contract_name: str = None
+        contract_name: str = None,
+        wait_for_results: bool = True
     ) -> dict[str, Any]:
         """
-        Run Certora verification synchronously.
+        Run Certora verification with non-blocking job submission.
+
+        This method uses a two-phase approach:
+        1. Submit job and get URL immediately (fast, ~30 seconds)
+        2. Poll for results (can be slow, depends on Certora cloud)
+
+        This prevents timeout failures - if polling times out, we still have the job URL.
 
         Args:
             contract_path: Path to Solidity contract file
             spec_content: CVL specification content
             contract_name: Optional contract name (extracted from file if not provided)
+            wait_for_results: If True, poll for results. If False, return after submission.
 
         Returns:
             Dictionary with verification results:
             {
                 "success": bool,
+                "status": "verified" | "issues_found" | "pending" | "error" | "skipped",
                 "rules_verified": int,
                 "rules_violated": int,
                 "rules_timeout": int,
@@ -102,51 +127,74 @@ class CertoraRunner:
             # Write spec to temp file
             spec_path = self._write_temp_file(spec_content, suffix=".spec")
 
-            # Create conf file
-            conf_content = self._create_conf_file(contract_path, spec_path, contract_name)
+            # Create conf file - NON-BLOCKING MODE (don't wait for results)
+            conf_content = self._create_conf_file(contract_path, spec_path, contract_name, wait_for_results=False)
             conf_path = self._write_temp_file(conf_content, suffix=".conf")
 
-            logger.info(f"CertoraRunner: Starting verification for {contract_name}")
+            logger.info(f"CertoraRunner: Submitting verification for {contract_name}")
             logger.debug(f"CertoraRunner: Contract: {contract_path}")
-            logger.debug(f"CertoraRunner: Spec: {spec_path}")
 
-            # Build command: certoraRun config.conf
-            # Note: solc paths are handled via solc_allow_paths in config (as single path string)
-            # Certora CLI will use absolute paths from config for file access
+            # PHASE 1: Submit job and get URL (quick, ~30 seconds)
             cmd = ["certoraRun", conf_path]
-
             logger.debug(f"CertoraRunner: Command: {' '.join(cmd)}")
 
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=self.timeout,
+                timeout=self.submission_timeout,
                 env={**os.environ, "CERTORAKEY": self.api_key}
             )
 
-            logger.info(f"CertoraRunner: certoraRun returned {result.returncode}")
-            logger.info(f"CertoraRunner: stdout length: {len(result.stdout)}")
+            logger.info(f"CertoraRunner: Job submission returned {result.returncode}")
 
-            # Log output for debugging verification issues - always log for visibility
-            if result.returncode != 0:
-                logger.warning(f"CertoraRunner: Non-zero exit ({result.returncode})")
-                logger.warning(f"CertoraRunner: stdout: {result.stdout[:2000]}")
+            # Extract job URL from output (this is available immediately)
+            job_url = self._extract_job_url(result.stdout)
+
+            if not job_url:
+                # No job URL means submission failed
+                logger.warning(f"CertoraRunner: No job URL found in output")
                 if result.stderr:
                     logger.warning(f"CertoraRunner: stderr: {result.stderr[:1000]}")
+                return self._parse_output(result.stdout, result.stderr, result.returncode)
 
-            # Parse output
-            return self._parse_output(result.stdout, result.stderr, result.returncode)
+            logger.info(f"CertoraRunner: Job submitted successfully: {job_url}")
+
+            # If not waiting for results, return immediately with pending status
+            if not wait_for_results:
+                return {
+                    "success": True,
+                    "status": "pending",
+                    "job_url": job_url,
+                    "rules_verified": 0,
+                    "rules_violated": 0,
+                    "verified_rules": [],
+                    "violations": [],
+                    "message": "Job submitted to Certora cloud. Results will be available at the job URL."
+                }
+
+            # PHASE 2: Poll for results
+            logger.info(f"CertoraRunner: Polling for results (timeout: {self.poll_timeout}s)")
+            poll_result = self._poll_for_results(job_url, self.poll_timeout)
+
+            # Merge job URL into result
+            poll_result["job_url"] = job_url
+
+            return poll_result
 
         except subprocess.TimeoutExpired:
-            logger.warning(f"CertoraRunner: Verification timed out after {self.timeout}s")
+            logger.warning(f"CertoraRunner: Job submission timed out after {self.submission_timeout}s")
             return {
                 "success": False,
                 "status": "timeout",
-                "error": f"Verification timed out after {self.timeout} seconds",
+                "error": f"Job submission timed out after {self.submission_timeout} seconds. Certora cloud may be busy.",
                 "rules_verified": 0,
                 "rules_violated": 0,
-                "violations": []
+                "violations": [{
+                    "rule": "Job Submission",
+                    "status": "timeout",
+                    "description": "Could not submit job to Certora cloud. Try again later."
+                }]
             }
 
         except FileNotFoundError:
@@ -184,11 +232,187 @@ class CertoraRunner:
             self._cleanup_temp_file(spec_path)
             self._cleanup_temp_file(conf_path)
 
+    def _extract_job_url(self, output: str) -> Optional[str]:
+        """Extract job URL from Certora CLI output."""
+        url_patterns = [
+            r"https://prover\.certora\.com/output/[a-zA-Z0-9/_-]+",
+            r"https://prover\.certora\.com/job/[a-zA-Z0-9/_-]+",
+            r"Job URL:\s*(https://prover\.certora\.com[^\s]+)",
+            r"Report:\s*(https://prover\.certora\.com[^\s]+)",
+        ]
+
+        for pattern in url_patterns:
+            match = re.search(pattern, output)
+            if match:
+                url = match.group(0)
+                if "://" not in url and len(match.groups()) > 0:
+                    url = match.group(1)
+                return url
+
+        return None
+
+    def _poll_for_results(self, job_url: str, timeout: int) -> dict[str, Any]:
+        """
+        Poll Certora cloud for job results.
+
+        Args:
+            job_url: URL of the Certora job
+            timeout: Maximum time to wait for results
+
+        Returns:
+            Verification results dictionary
+        """
+        start_time = time.time()
+        poll_count = 0
+
+        # Base result for timeout case
+        timeout_result = {
+            "success": True,  # Job was submitted successfully
+            "status": "pending",
+            "job_url": job_url,
+            "rules_verified": 0,
+            "rules_violated": 0,
+            "verified_rules": [],
+            "violations": [],
+            "message": "Verification is running on Certora cloud. Check job URL for results."
+        }
+
+        while time.time() - start_time < timeout:
+            poll_count += 1
+            logger.info(f"CertoraRunner: Poll attempt {poll_count} for {job_url}")
+
+            try:
+                # Use certoraRun --wait to check status
+                # Or fetch results from the job URL API
+                result = self._fetch_job_results(job_url)
+
+                if result.get("status") in ["verified", "issues_found", "error"]:
+                    logger.info(f"CertoraRunner: Got final result: {result.get('status')}")
+                    return result
+
+                if result.get("status") == "running":
+                    logger.info(f"CertoraRunner: Job still running, waiting {POLL_INTERVAL}s...")
+                    time.sleep(POLL_INTERVAL)
+                    continue
+
+            except Exception as e:
+                logger.warning(f"CertoraRunner: Poll error: {e}")
+                time.sleep(POLL_INTERVAL)
+                continue
+
+        # Timeout - but job might still complete
+        logger.warning(f"CertoraRunner: Polling timed out after {timeout}s")
+        logger.info(f"CertoraRunner: Job may still be running at: {job_url}")
+        return timeout_result
+
+    def _fetch_job_results(self, job_url: str) -> dict[str, Any]:
+        """
+        Fetch results from a Certora job URL.
+
+        Args:
+            job_url: URL of the Certora job
+
+        Returns:
+            Results dictionary with status
+        """
+        try:
+            import urllib.request
+            import urllib.error
+
+            # Convert output URL to API URL if needed
+            # e.g., .../output/jobId -> .../api/job/jobId/results
+            api_url = job_url
+            if "/output/" in job_url:
+                # Try fetching the HTML page and parsing status
+                # Or use the JSON API endpoint
+                json_url = job_url.replace("/output/", "/api/job/") + "/results"
+                api_url = json_url
+
+            # Try to fetch results
+            req = urllib.request.Request(api_url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=30) as response:
+                data = json.loads(response.read().decode())
+
+                # Parse the Certora API response
+                if isinstance(data, dict):
+                    status = data.get("status", "").lower()
+
+                    if status in ["complete", "finished", "done"]:
+                        return self._parse_api_results(data)
+                    elif status in ["running", "pending", "queued"]:
+                        return {"status": "running"}
+                    elif status in ["error", "failed"]:
+                        return {
+                            "success": False,
+                            "status": "error",
+                            "error": data.get("message", "Verification failed"),
+                            "rules_verified": 0,
+                            "rules_violated": 0,
+                            "violations": []
+                        }
+
+                return {"status": "running"}  # Default to running if unclear
+
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                # Job not ready yet
+                return {"status": "running"}
+            logger.warning(f"CertoraRunner: HTTP error fetching results: {e}")
+            return {"status": "running"}
+
+        except Exception as e:
+            logger.warning(f"CertoraRunner: Error fetching results: {e}")
+            return {"status": "running"}
+
+    def _parse_api_results(self, data: dict) -> dict[str, Any]:
+        """Parse results from Certora API response."""
+        result = {
+            "success": True,
+            "status": "verified",
+            "rules_verified": 0,
+            "rules_violated": 0,
+            "rules_timeout": 0,
+            "verified_rules": [],
+            "violations": []
+        }
+
+        # Parse rules from API response
+        rules = data.get("rules", data.get("results", []))
+
+        for rule in rules:
+            if isinstance(rule, dict):
+                name = rule.get("name", rule.get("rule", "Unknown"))
+                status = rule.get("status", "").lower()
+
+                if status in ["verified", "passed", "pass"]:
+                    result["rules_verified"] += 1
+                    result["verified_rules"].append({
+                        "rule": name,
+                        "status": "verified",
+                        "description": f"Property '{name}' mathematically proven"
+                    })
+                elif status in ["violated", "failed", "fail"]:
+                    result["rules_violated"] += 1
+                    result["violations"].append({
+                        "rule": name,
+                        "status": "violated",
+                        "description": rule.get("message", f"Rule '{name}' was violated")
+                    })
+                elif status in ["timeout"]:
+                    result["rules_timeout"] += 1
+
+        if result["rules_violated"] > 0:
+            result["success"] = False
+            result["status"] = "issues_found"
+
+        return result
+
     async def run_verification(
         self,
         contract_path: str,
         spec_content: str,
-        contract_name: str = None
+        contract_name: str = None,
+        wait_for_results: bool = True
     ) -> dict[str, Any]:
         """
         Run Certora verification asynchronously.
@@ -197,6 +421,7 @@ class CertoraRunner:
             contract_path: Path to Solidity contract file
             spec_content: CVL specification content
             contract_name: Optional contract name
+            wait_for_results: If True, poll for results. If False, return after submission.
 
         Returns:
             Dictionary with verification results
@@ -206,7 +431,8 @@ class CertoraRunner:
             self.run_verification_sync,
             contract_path,
             spec_content,
-            contract_name
+            contract_name,
+            wait_for_results
         )
 
     def _write_temp_file(self, content: str, suffix: str) -> str:
@@ -245,10 +471,18 @@ class CertoraRunner:
         self,
         contract_path: str,
         spec_path: str,
-        contract_name: str
+        contract_name: str,
+        wait_for_results: bool = False
     ) -> str:
-        """Create Certora configuration file content."""
+        """
+        Create Certora configuration file content.
 
+        Args:
+            contract_path: Path to Solidity contract
+            spec_path: Path to CVL spec file
+            contract_name: Name of the contract to verify
+            wait_for_results: If True, CLI waits for results. If False, returns after submission.
+        """
         # JSON format conf file for Certora Prover
         # Use path:contract format to handle UUID filenames with hyphens
         #
@@ -261,7 +495,9 @@ class CertoraRunner:
             "files": [f"{contract_path}:{contract_name}"],
             "verify": f"{contract_name}:{spec_path}",
             "msg": f"DeFiGuard AI: {contract_name}",
-            "wait_for_results": "all",  # Wait for verification to complete
+            # CRITICAL: "none" returns immediately after job submission
+            # "all" blocks until verification completes (can timeout on slow jobs)
+            "wait_for_results": "all" if wait_for_results else "none",
             "rule_sanity": "basic",  # Check for tautologies
             "optimistic_loop": True,  # Assume loops terminate
             "loop_iter": "3",  # String per docs: "numbers are also encoded as strings"
@@ -617,18 +853,36 @@ class CertoraRunner:
 def run_certora_verification(
     contract_path: str,
     spec_content: str,
-    timeout: int = DEFAULT_TIMEOUT
+    wait_for_results: bool = True,
+    submission_timeout: int = SUBMISSION_TIMEOUT,
+    poll_timeout: int = POLL_TIMEOUT
 ) -> dict[str, Any]:
     """
     Run Certora verification on a contract.
 
+    This uses non-blocking job submission for reliability:
+    1. Submits job to Certora cloud (fast, ~30 seconds)
+    2. Polls for results (optional, can take several minutes)
+
+    If polling times out, returns "pending" status with job URL instead of failing.
+
     Args:
         contract_path: Path to Solidity contract
         spec_content: CVL specification content
-        timeout: Maximum verification time in seconds
+        wait_for_results: If True, poll for results. If False, return after submission.
+        submission_timeout: Time to wait for job submission
+        poll_timeout: Max time to wait for results after submission
 
     Returns:
-        Verification results dictionary
+        Verification results dictionary with:
+        - success: bool
+        - status: "verified" | "issues_found" | "pending" | "error"
+        - job_url: URL to view results on Certora cloud
+        - rules_verified, rules_violated: counts
+        - verified_rules, violations: detailed results
     """
-    runner = CertoraRunner(timeout=timeout)
-    return runner.run_verification_sync(contract_path, spec_content)
+    runner = CertoraRunner(
+        submission_timeout=submission_timeout,
+        poll_timeout=poll_timeout
+    )
+    return runner.run_verification_sync(contract_path, spec_content, wait_for_results=wait_for_results)
