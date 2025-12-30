@@ -5509,6 +5509,20 @@ def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str,
         # Users see verification results but can't access Certora dashboard
         formatted_results = []
 
+        status = results.get("status", "complete")
+
+        # Handle "pending" status - job submitted but results not ready yet
+        # This happens when verification takes longer than expected
+        if status == "pending":
+            logger.info("Certora: Job submitted, results pending on Certora cloud")
+            formatted_results.append({
+                "rule": "Formal Verification",
+                "status": "pending",
+                "description": "Verification job submitted to Certora cloud. Comprehensive analysis is in progress - results will be included in future audits of this contract."
+            })
+            # Still return success since job was submitted
+            return formatted_results
+
         # Map rule names to user-friendly descriptions
         rule_descriptions = {
             "sanitycheck": "Contract functions are callable and specification is valid",
@@ -5544,7 +5558,6 @@ def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str,
 
         # Add summary if no specific results
         if not formatted_results:
-            status = results.get("status", "complete")
             if status == "verified":
                 formatted_results.append({
                     "rule": "Contract Verification",
@@ -5556,6 +5569,13 @@ def run_certora(temp_path: str, slither_findings: list = None) -> list[dict[str,
                     "rule": "Verification Status",
                     "status": status,
                     "description": results.get("error", "Verification could not be completed")
+                })
+            elif status == "timeout":
+                # Timeout during submission (not polling) - actual error
+                formatted_results.append({
+                    "rule": "Verification Status",
+                    "status": "timeout",
+                    "description": "Could not connect to Certora cloud service. Please try again later."
                 })
             else:
                 formatted_results.append({

@@ -3972,6 +3972,7 @@ a:focus-visible {
 .certora-header.success { border-bottom-color: var(--success); }
 .certora-header.warning { border-bottom-color: var(--warning); }
 .certora-header.info { border-bottom-color: var(--accent-teal); }
+.certora-header.pending { border-bottom-color: var(--accent-purple); }
 
 .certora-status {
     display: flex;
@@ -4001,6 +4002,7 @@ a:focus-visible {
 .certora-stat.verified .stat-value { color: var(--success); }
 .certora-stat.violated .stat-value { color: var(--error); }
 .certora-stat.skipped .stat-value { color: var(--text-tertiary); }
+.certora-stat.pending .stat-value { color: var(--accent-purple); }
 
 .certora-stat .stat-value {
     font-size: 1.5rem;
@@ -4034,6 +4036,9 @@ a:focus-visible {
 .certora-rule.verified { border-left-color: var(--success); }
 .certora-rule.violated { border-left-color: var(--error); }
 .certora-rule.skipped { border-left-color: var(--text-tertiary); }
+.certora-rule.pending { border-left-color: var(--accent-purple); }
+.certora-rule.timeout { border-left-color: var(--warning); }
+.certora-rule.error { border-left-color: var(--warning); }
 
 .certora-rule .rule-icon {
     font-size: 1.2rem;
