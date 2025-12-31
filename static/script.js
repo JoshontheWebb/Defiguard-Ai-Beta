@@ -1860,8 +1860,21 @@ document.addEventListener("DOMContentLoaded", () => {
       };
 
       // WebSocket audit log (single instance) - tracked by ResourceManager for cleanup
-      const wsUsername = (await fetchUsername())?.username || "guest";
-      const auditLogWs = new WebSocket(`${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws-audit-log?username=${encodeURIComponent(wsUsername)}`);
+      // Security: Fetch signed token from server instead of passing username directly
+      let wsToken = "";
+      try {
+        const tokenResponse = await fetch("/api/ws-token");
+        if (tokenResponse.ok) {
+          const tokenData = await tokenResponse.json();
+          wsToken = tokenData.token || "";
+        }
+      } catch (e) {
+        console.log("[AUDIT] Could not fetch WS token, connecting as guest");
+      }
+      const wsUrl = wsToken
+        ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws-audit-log?token=${encodeURIComponent(wsToken)}`
+        : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws-audit-log`;
+      const auditLogWs = new WebSocket(wsUrl);
       ResourceManager.addWebSocket(auditLogWs);
       auditLogWs.onopen = () => logMessage("Connected to audit log");
       auditLogWs.onmessage = (e) => {

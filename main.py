@@ -121,6 +121,8 @@ from cryptography.hazmat.primitives import serialization
 import requests
 import subprocess
 import asyncio
+import hmac
+import base64
 import heapq
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Flowable, Table, TableStyle, PageBreak, ListFlowable, ListItem, Preformatted
@@ -185,6 +187,53 @@ RATE_LIMITS = {
 # Queue limits
 MAX_QUEUE_SIZE = 1000  # Maximum jobs in queue
 MAX_JOBS_PER_USER = 10  # Maximum concurrent jobs per user
+
+# ============================================================================
+# WEBSOCKET TOKEN AUTHENTICATION
+# ============================================================================
+
+WS_TOKEN_EXPIRY_SECONDS = 3600  # 1 hour
+
+def generate_ws_token(username: str, secret_key: str) -> str:
+    """Generate a signed token for WebSocket authentication."""
+    timestamp = int(time_module.time())
+    message = f"{username}:{timestamp}"
+    signature = hmac.new(
+        secret_key.encode(),
+        message.encode(),
+        'sha256'
+    ).hexdigest()
+    token = base64.urlsafe_b64encode(f"{message}:{signature}".encode()).decode()
+    return token
+
+def verify_ws_token(token: str, secret_key: str) -> Optional[str]:
+    """Verify a WebSocket token and return the username if valid."""
+    try:
+        decoded = base64.urlsafe_b64decode(token.encode()).decode()
+        parts = decoded.split(':')
+        if len(parts) != 3:
+            return None
+        username, timestamp_str, provided_signature = parts
+        timestamp = int(timestamp_str)
+
+        # Check expiry
+        if time_module.time() - timestamp > WS_TOKEN_EXPIRY_SECONDS:
+            return None
+
+        # Verify signature
+        message = f"{username}:{timestamp_str}"
+        expected_signature = hmac.new(
+            secret_key.encode(),
+            message.encode(),
+            'sha256'
+        ).hexdigest()
+
+        if not hmac.compare_digest(provided_signature, expected_signature):
+            return None
+
+        return username
+    except Exception:
+        return None
 
 # ============================================================================
 # PHASE 1: IN-MEMORY AUDIT QUEUE SYSTEM
@@ -5109,7 +5158,7 @@ async def read_ui(
         return HTMLResponse(content="<h1>UI file not found. Check templates/index.html.</h1>")
     except Exception as e:
         logger.exception(f"Unexpected error in /ui: {e}")
-        return HTMLResponse(content=f"<h1>Internal error: {str(e)}</h1>", status_code=500)
+        return HTMLResponse(content="<h1>Internal server error</h1>", status_code=500)
 
 @app.get("/queue-monitor", response_class=HTMLResponse)
 async def queue_monitor(request: Request):
@@ -5126,7 +5175,7 @@ async def queue_monitor(request: Request):
         return HTMLResponse(content="<h1>Queue monitor not found. Check templates/queue-monitor.html.</h1>")
     except Exception as e:
         logger.exception(f"Unexpected error in /queue-monitor: {e}")
-        return HTMLResponse(content=f"<h1>Internal error: {str(e)}</h1>", status_code=500)
+        return HTMLResponse(content="<h1>Internal server error</h1>", status_code=500)
 
 @app.get("/auth", response_class=HTMLResponse)
 async def read_auth(request: Request):
@@ -5232,8 +5281,17 @@ async def get_tier(request: Request, db: Session = Depends(get_db)) -> dict[str,
 @app.post("/set-tier/{username}/{tier}")
 async def set_tier(username: str, tier: str, request: Request, has_diamond: bool = Query(False), db: Session = Depends(get_db)):
     await verify_csrf_token(request)
+
+    # Security: Validate session user matches path username to prevent privilege escalation
+    session_username = request.session.get("username")
+    if not session_username:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if session_username != username:
+        logger.warning(f"Tier bypass attempt: session user {session_username} tried to modify {username}")
+        raise HTTPException(status_code=403, detail="Cannot modify another user's tier")
+
     logger.debug(f"Set-tier request for {username}, tier: {tier}, has_diamond: {has_diamond}")
-    
+
     user = db.query(User).filter(User.username == username).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -5371,7 +5429,7 @@ async def set_tier(username: str, tier: str, request: Request, has_diamond: bool
             str(getattr(cast(Any, e), "code", None)) if hasattr(e, "code") else "None",
             str(getattr(e, "param", None)) if hasattr(e, "param") else "None"
         )
-        raise HTTPException(status_code=400, detail=f"Invalid Stripe request: {getattr(e, 'user_message', None) or str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid payment request. Please try again.")
     except stripe_error.StripeError as e:
         logger.error(f"Stripe error for {username} to {tier}: {str(e)}, error_code={getattr(e, 'code', None)}, param={getattr(e, 'param', None)}")
         raise HTTPException(status_code=503, detail=f"Failed to create checkout session: {getattr(e, 'user_message', None) or 'Payment processing error. Please try again or contact support.'}")
@@ -5468,15 +5526,21 @@ async def complete_tier_checkout(
     username: str = Query(...),
 ):
     logger.debug(f"Complete-tier-checkout request: session_id={session_id}, tier={tier}, has_diamond={has_diamond}, username={username}")
-    
+
     try:
         session = stripe.checkout.Session.retrieve(session_id)
         logger.info(f"Retrieved Stripe session: payment_status={session.payment_status}")
-        
+
+        # Security: Validate username matches Stripe session metadata to prevent redirect hijacking
+        metadata_username = session.metadata.get("username") if session.metadata else None
+        if not metadata_username or metadata_username != username:
+            logger.warning(f"Checkout hijack attempt: URL username {username} != metadata username {metadata_username}")
+            return RedirectResponse(url="/ui?upgrade=failed&message=Security%20validation%20failed")
+
         if session.payment_status != "paid":
             logger.error(f"Payment not completed for {username}, status={session.payment_status}")
             return RedirectResponse(url="/ui?upgrade=failed&message=Payment%20failed")
-        
+
         # Find and update the user
         user = db.query(User).filter(User.username == username).first()
         if not user:
@@ -5531,7 +5595,7 @@ async def complete_tier_checkout(
     
     except Exception as e:
         logger.error(f"Complete-tier-checkout error: {str(e)}")
-        return RedirectResponse(url=f"/ui?upgrade=error&message={str(e)}")
+        return RedirectResponse(url="/ui?upgrade=error&message=Checkout%20processing%20error")
 
 ## Section 4.4: Webhook Endpoint
 
@@ -5550,13 +5614,13 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
         logger.info(f"Webhook event received: type={event['type']}, id={event['id']}")
     except ValueError as e:
         logger.error(f"Stripe webhook error: Invalid payload - {str(e)}, payload={payload[:200]}")
-        return Response(status_code=400, content=f"Invalid payload: {str(e)}")
+        return Response(status_code=400, content="Invalid payload")
     except stripe.error.SignatureVerificationError as e:
         logger.error(f"Stripe webhook error: Invalid signature - {str(e)}, sig_header={sig_header}")
-        return Response(status_code=400, content=f"Invalid signature: {str(e)}")
+        return Response(status_code=400, content="Invalid signature")
     except Exception as e:
         logger.error(f"Stripe webhook unexpected error: {str(e)}, payload={payload[:200]}")
-        return Response(status_code=500, content=f"Webhook processing failed: {str(e)}")
+        return Response(status_code=500, content="Webhook processing failed")
     
     try:
         if event["type"] == "checkout.session.completed":
@@ -5658,13 +5722,21 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
     
     except Exception as e:
         logger.error(f"Webhook processing error for event {event['id']}: {str(e)}")
-        return Response(status_code=500, content=f"Webhook processing failed: {str(e)}")
+        return Response(status_code=500, content="Webhook processing failed")
 
 # WebSocket for real-time audit logging
 @app.websocket("/ws-audit-log")
-async def websocket_audit_log(websocket: WebSocket, username: str = Query(None)):
+async def websocket_audit_log(websocket: WebSocket, token: str = Query(None)):
+    # Security: Validate token to prevent unauthorized subscription to other users' audit logs
+    effective_username = "guest"
+    if token:
+        validated_username = verify_ws_token(token, _secret_key)
+        if validated_username:
+            effective_username = validated_username
+        else:
+            logger.warning(f"[WS_AUDIT] Invalid token attempted: {token[:20]}...")
+
     await websocket.accept()
-    effective_username = username or "guest"
     active_audit_websockets[effective_username] = websocket
     logger.info(f"[WS_AUDIT] ✅ Connected: '{effective_username}' (total connections: {len(active_audit_websockets)})")
     
@@ -6001,7 +6073,17 @@ async def api_audit(username: str, api_key: str, db: Session = Depends(get_db)):
         return {"message": "API audit endpoint (Pro/Enterprise tier)"}
     except Exception as e:
         logger.error(f"API audit error for {username}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/ws-token")
+async def get_ws_token(request: Request):
+    """Get a signed WebSocket token for authenticated users."""
+    session_username = request.session.get("username")
+    if not session_username:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    token = generate_ws_token(session_username, _secret_key)
+    return {"token": token, "expires_in": WS_TOKEN_EXPIRY_SECONDS}
 
 @app.post("/mint-nft")
 async def mint_nft(request: Request, db: Session = Depends(get_db)):
@@ -6036,7 +6118,7 @@ async def upgrade_page():
         return {"message": "Upgrade at /ui for Developer ($59/mo), Team ($199/mo), or Enterprise ($799/mo)."}
     except Exception as e:
         logger.error(f"Upgrade page error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/facets/{contract_address}")
 async def get_facets(contract_address: str, request: Request, api_key: str = Header(None, alias="X-API-Key"), db: Session = Depends(get_db)) -> dict[str, Any]:
@@ -6153,7 +6235,7 @@ async def get_facets(contract_address: str, request: Request, api_key: str = Hea
     
     except Exception as e:
         logger.error(f"Facet endpoint error for {username or 'anonymous'}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 ## Section 4.6 Main Audit Endpoint
 
