@@ -5,7 +5,9 @@ Unified interface for multi-chain on-chain analysis.
 
 import logging
 import os
+import re
 from typing import Any, Optional
+from urllib.parse import urlparse
 from web3 import Web3
 import asyncio
 
@@ -17,6 +19,7 @@ from .token_analyzer import TokenAnalyzer
 from .state_checker import StateChecker
 from .transaction_analyzer import TransactionAnalyzer
 from .event_analyzer import EventAnalyzer
+from .core import ALLOWED_RPC_DOMAINS
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,9 @@ class ChainConnection:
                 self.error = "No RPC URL configured"
                 return False
 
+            # Security: Validate URL before connecting
+            rpc_url = self._validate_rpc_url(rpc_url)
+
             self.w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': 30}))
 
             if self.w3.is_connected():
@@ -70,10 +76,71 @@ class ChainConnection:
                 self.error = "Connection failed"
                 return False
 
-        except Exception as e:
-            self.error = str(e)
-            logger.warning(f"[MULTICHAIN] Failed to connect to {self.name}: {e}")
+        except ValueError as e:
+            # URL validation error
+            self.error = f"Invalid RPC URL: {e}"
+            logger.warning(f"[MULTICHAIN] RPC URL validation failed for {self.name}: {e}")
             return False
+        except Exception as e:
+            # Mask any API keys in error messages
+            self.error = self._mask_api_key(str(e))
+            logger.warning(f"[MULTICHAIN] Failed to connect to {self.name}: {self.error}")
+            return False
+
+    @staticmethod
+    def _validate_rpc_url(url: str) -> str:
+        """
+        Validate RPC URL for security.
+
+        Args:
+            url: RPC URL to validate
+
+        Returns:
+            Validated URL
+
+        Raises:
+            ValueError: If URL fails validation
+        """
+        if not url:
+            raise ValueError("RPC URL cannot be empty")
+
+        try:
+            parsed = urlparse(url)
+        except Exception as e:
+            raise ValueError(f"Invalid URL format: {e}")
+
+        # Require HTTPS (except localhost)
+        if parsed.scheme not in ("https", "http"):
+            raise ValueError(f"Invalid scheme: {parsed.scheme}")
+
+        if parsed.scheme == "http" and parsed.hostname not in ("localhost", "127.0.0.1", "0.0.0.0"):
+            raise ValueError("HTTP only allowed for localhost")
+
+        # No credentials in URL
+        if parsed.username or parsed.password:
+            raise ValueError("Credentials in URL not allowed")
+
+        # Validate domain whitelist (skip localhost)
+        if parsed.hostname and parsed.hostname not in ("localhost", "127.0.0.1", "0.0.0.0"):
+            hostname = parsed.hostname.lower()
+            is_allowed = any(
+                hostname == domain or hostname.endswith(f".{domain}")
+                for domain in ALLOWED_RPC_DOMAINS
+            )
+            if not is_allowed:
+                logger.warning(f"RPC domain not in whitelist: {hostname}")
+
+        return url
+
+    @staticmethod
+    def _mask_api_key(text: str) -> str:
+        """Mask API keys in text for safe logging."""
+        if not text:
+            return text
+        masked = re.sub(r'/v3/[a-fA-F0-9]{32,}', '/v3/***MASKED***', text)
+        masked = re.sub(r'/[a-zA-Z0-9_-]{20,}$', '/***MASKED***', masked)
+        masked = re.sub(r'([?&])(api[_-]?key|key|token)=([^&]+)', r'\1\2=***MASKED***', masked, flags=re.IGNORECASE)
+        return masked
 
     def _get_rpc_url(self) -> Optional[str]:
         """

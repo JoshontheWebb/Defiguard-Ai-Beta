@@ -47,6 +47,7 @@ from .constants import (
     ETHERSCAN_MAX_RETRIES,
     ETHERSCAN_RETRY_DELAY,
 )
+from .core import ALLOWED_RPC_DOMAINS
 
 __all__ = [
     # Main analyzer
@@ -83,6 +84,9 @@ __all__ = [
     "ETHERSCAN_API_DELAY",
     "ETHERSCAN_MAX_RETRIES",
     "ETHERSCAN_RETRY_DELAY",
+
+    # Security
+    "ALLOWED_RPC_DOMAINS",
 ]
 
 __version__ = "2.0.0"
