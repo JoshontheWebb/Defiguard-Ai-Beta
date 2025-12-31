@@ -5327,7 +5327,7 @@ async def get_tier(request: Request, db: Session = Depends(get_db)) -> dict[str,
     if audit_limit == float("inf"):
         audit_limit = 9999
 
-    logger.debug(f"Retrieved tier for {effective_username}: {user_tier}, audit count: {audit_count}, has_diamond: {has_diamond}")
+    logger.debug(f"Retrieved tier for {session_username}: {user_tier}, audit count: {audit_count}, has_diamond: {has_diamond}")
     logger.debug("Flushing log file after tier retrieval")
     for handler in logging.getLogger().handlers:
         handler.flush()

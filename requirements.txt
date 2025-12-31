@@ -1,4 +1,4 @@
-fastapi==0.115.0
+fastapi==0.115.6
 uvicorn==0.30.6
 gunicorn==23.0.0
 openai==1.55.3
@@ -10,12 +10,12 @@ pydantic==2.9.2
 bcrypt==4.2.0
 sqlalchemy==2.0.35
 itsdangerous==2.2.0
-python-multipart==0.0.12
+python-multipart==0.0.18
 stripe==10.5.0
 redis==5.1.1
 reportlab==4.2.5
 authlib>=1.0.0
-jinja2==3.1.4
+jinja2==3.1.6
 python-jose==3.5.0
 anthropic>=0.75.0
 httpx>=0.25.0

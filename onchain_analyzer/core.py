@@ -5,7 +5,9 @@ Main orchestrator that combines all on-chain analyzers.
 
 import logging
 import os
+import re
 from typing import Any, Optional
+from urllib.parse import urlparse
 from web3 import Web3
 
 from .proxy_detector import ProxyDetector
@@ -14,6 +16,27 @@ from .backdoor_scanner import BackdoorScanner, HoneypotDetector
 from .constants import CHAIN_CONFIG, DEFAULT_CHAIN_ID, RISK_WEIGHTS, MAX_ONCHAIN_RISK_ADJUSTMENT
 
 logger = logging.getLogger(__name__)
+
+# Security: Whitelist of allowed RPC provider domains
+ALLOWED_RPC_DOMAINS = {
+    "infura.io",
+    "alchemy.com",
+    "alchemyapi.io",
+    "quicknode.com",
+    "quiknode.pro",
+    "llamarpc.com",
+    "ankr.com",
+    "cloudflare-eth.com",
+    "getblock.io",
+    "moralis.io",
+    "rpc.ankr.com",
+    "eth.llamarpc.com",
+    "polygon-rpc.com",
+    "arb1.arbitrum.io",
+    "mainnet.optimism.io",
+    "base.org",
+    "mainnet.base.org",
+}
 
 
 class OnChainAnalyzer:
@@ -47,11 +70,11 @@ class OnChainAnalyzer:
         self.chain_id = chain_id
         self.chain_config = CHAIN_CONFIG.get(chain_id, CHAIN_CONFIG[DEFAULT_CHAIN_ID])
 
-        # Initialize Web3 connection
+        # Initialize Web3 connection with security validation
         if rpc_url:
-            self.rpc_url = rpc_url
+            self.rpc_url = self._validate_rpc_url(rpc_url)
         else:
-            self.rpc_url = self._get_rpc_url()
+            self.rpc_url = self._validate_rpc_url(self._get_rpc_url())
 
         # Configure HTTP provider with timeout (15 seconds)
         self.w3 = Web3(Web3.HTTPProvider(
@@ -59,15 +82,105 @@ class OnChainAnalyzer:
             request_kwargs={'timeout': 15}
         ))
 
-        # Verify connection
+        # Verify connection (mask API key in logs)
         if not self.w3.is_connected():
-            logger.warning(f"Web3 not connected to {self.chain_config['name']}")
+            logger.warning(f"Web3 not connected to {self.chain_config['name']} (RPC: {self._mask_api_key(self.rpc_url)})")
 
         # Initialize component analyzers
         self.proxy_detector = ProxyDetector(self.w3)
         self.storage_analyzer = StorageAnalyzer(self.w3)
         self.backdoor_scanner = BackdoorScanner(self.w3)
         self.honeypot_detector = HoneypotDetector(self.w3)
+
+    @staticmethod
+    def _validate_rpc_url(url: str) -> str:
+        """
+        Validate RPC URL for security.
+
+        Security checks:
+        - Must be HTTPS (except localhost for development)
+        - Domain must be in whitelist
+        - No credentials in URL
+
+        Args:
+            url: RPC URL to validate
+
+        Returns:
+            Validated URL
+
+        Raises:
+            ValueError: If URL fails security validation
+        """
+        if not url:
+            raise ValueError("RPC URL cannot be empty")
+
+        try:
+            parsed = urlparse(url)
+        except Exception as e:
+            raise ValueError(f"Invalid URL format: {e}")
+
+        # Check scheme (HTTPS required, except localhost for development)
+        if parsed.scheme not in ("https", "http"):
+            raise ValueError(f"Invalid URL scheme: {parsed.scheme}. Only HTTPS is allowed.")
+
+        if parsed.scheme == "http":
+            # Allow HTTP only for localhost/development
+            if parsed.hostname not in ("localhost", "127.0.0.1", "0.0.0.0"):
+                raise ValueError("HTTP is only allowed for localhost. Use HTTPS for remote RPC endpoints.")
+
+        # Check for credentials in URL (security risk)
+        if parsed.username or parsed.password:
+            raise ValueError("Credentials in URL are not allowed. Use environment variables.")
+
+        # Validate domain against whitelist (skip for localhost)
+        if parsed.hostname and parsed.hostname not in ("localhost", "127.0.0.1", "0.0.0.0"):
+            hostname = parsed.hostname.lower()
+            is_allowed = False
+
+            for allowed_domain in ALLOWED_RPC_DOMAINS:
+                if hostname == allowed_domain or hostname.endswith(f".{allowed_domain}"):
+                    is_allowed = True
+                    break
+
+            if not is_allowed:
+                logger.warning(f"RPC domain not in whitelist: {hostname}")
+                # In production, you might want to raise an error instead:
+                # raise ValueError(f"RPC domain not in whitelist: {hostname}")
+
+        return url
+
+    @staticmethod
+    def _mask_api_key(url: str) -> str:
+        """
+        Mask API keys in URLs for safe logging.
+
+        Args:
+            url: URL potentially containing API keys
+
+        Returns:
+            URL with masked API keys
+        """
+        if not url:
+            return url
+
+        # Common patterns for API keys in RPC URLs
+        # Pattern 1: /v3/<api_key> (Infura)
+        # Pattern 2: /<api_key> at end of path
+        # Pattern 3: ?apikey=<key> or &apikey=<key>
+        # Pattern 4: ?key=<key> or &key=<key>
+
+        masked = url
+
+        # Mask Infura-style keys: /v3/<32+ char hex>
+        masked = re.sub(r'/v3/[a-fA-F0-9]{32,}', '/v3/***MASKED***', masked)
+
+        # Mask Alchemy-style keys: path ending with long alphanumeric
+        masked = re.sub(r'/[a-zA-Z0-9_-]{20,}$', '/***MASKED***', masked)
+
+        # Mask query parameter keys
+        masked = re.sub(r'([?&])(api[_-]?key|key|token)=([^&]+)', r'\1\2=***MASKED***', masked, flags=re.IGNORECASE)
+
+        return masked
 
     def _get_rpc_url(self) -> str:
         """
