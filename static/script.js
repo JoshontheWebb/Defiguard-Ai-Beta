@@ -1840,11 +1840,42 @@ document.addEventListener("DOMContentLoaded", () => {
       const {
         auditForm, loading, resultsDiv, riskScoreSpan, issuesBody, predictionsList,
         recommendationsList, fuzzingList, remediationRoadmap, usageWarning, sidebarTierName,
-        sidebarTierUsage, sidebarTierFeatures, tierDescription, sizeLimit, features, 
-        upgradeLink, tierSelect, tierSwitchButton, contractAddressInput, facetWell, 
-        downloadReportButton, pdfDownloadButton, mintNftButton, customReportInput, apiKeySpan, 
+        sidebarTierUsage, sidebarTierFeatures, tierDescription, sizeLimit, features,
+        upgradeLink, tierSelect, tierSwitchButton, contractAddressInput, facetWell,
+        downloadReportButton, pdfDownloadButton, mintNftButton, customReportInput, apiKeySpan,
         hamburger, sidebar, mainContent, logoutSidebar, authStatus, auditLog
       } = els;
+
+      // =====================================================
+      // HAMBURGER MENU - Initialize FIRST before async operations
+      // This ensures navigation works even if other init fails
+      // =====================================================
+      try {
+        if (hamburger && sidebar && mainContent) {
+          hamburger.addEventListener("click", () => {
+            sidebar.classList.toggle("open");
+            hamburger.classList.toggle("open");
+            document.body.classList.toggle('sidebar-open');
+            mainContent.style.marginLeft = sidebar.classList.contains("open") ? "270px" : "";
+          });
+          hamburger.setAttribute("tabindex", "0");
+          hamburger.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              hamburger.click();
+            }
+          });
+          debugLog('[INIT] Hamburger menu initialized');
+        } else {
+          console.warn('[INIT] Hamburger elements missing:', {
+            hamburger: !!hamburger,
+            sidebar: !!sidebar,
+            mainContent: !!mainContent
+          });
+        }
+      } catch (e) {
+        console.error('[INIT] Hamburger init error:', e);
+      }
 
       // Real-time audit log
       const logMessage = (msg) => {
@@ -1889,24 +1920,6 @@ document.addEventListener("DOMContentLoaded", () => {
         ResourceManager.removeWebSocket(auditLogWs);
       };
 
-      // Hamburger Menu
-      if (hamburger && sidebar && mainContent) {
-        hamburger.addEventListener("click", () => {
-          sidebar.classList.toggle("open");
-          hamburger.classList.toggle("open");
-          document.body.classList.toggle('sidebar-open');
-          // Use empty string when closed to let CSS handle centering
-          mainContent.style.marginLeft = sidebar.classList.contains("open") ? "270px" : "";
-        });
-        hamburger.setAttribute("tabindex", "0");
-        hamburger.addEventListener("keydown", (e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            hamburger.click();
-          }
-        });
-      }
-      
       // Section6: Authentication – instantly show real username + provider
       const updateAuthStatus = async () => {
         const user = await fetchUsername();  // Returns { username, sub, provider } from /me
