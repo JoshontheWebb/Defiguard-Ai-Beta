@@ -2693,22 +2693,26 @@ document.addEventListener("DOMContentLoaded", () => {
             const isProxy = proxy.is_proxy;
             const statusClass = isProxy ? (proxy.upgrade_risk === 'HIGH' || proxy.upgrade_risk === 'CRITICAL' ? 'danger' : 'warning') : 'safe';
 
+            // Security: Escape all on-chain data to prevent XSS
+            const proxyType = escapeHtml(proxy.proxy_type || 'Unknown');
+            const upgradeRisk = escapeHtml(proxy.upgrade_risk || 'N/A');
+            const implementation = escapeHtml(proxy.implementation || '');
             proxyContent.innerHTML = `
               <div class="onchain-status">
                 <span class="onchain-status-indicator ${statusClass}"></span>
-                <span class="onchain-status-text">${isProxy ? (proxy.proxy_type || 'Unknown') + ' Proxy' : 'Not a Proxy'}</span>
+                <span class="onchain-status-text">${isProxy ? proxyType + ' Proxy' : 'Not a Proxy'}</span>
               </div>
               ${isProxy ? `
                 <div class="onchain-detail">
                   <div class="onchain-detail-row">
                     <span class="onchain-detail-label">Upgrade Risk:</span>
-                    <span class="onchain-detail-value">${proxy.upgrade_risk || 'N/A'}</span>
+                    <span class="onchain-detail-value">${upgradeRisk}</span>
                   </div>
                   ${proxy.implementation ? `
                     <div class="onchain-detail-row">
                       <span class="onchain-detail-label">Implementation:</span>
                     </div>
-                    <div class="onchain-address">${proxy.implementation}</div>
+                    <div class="onchain-address">${implementation}</div>
                   ` : ''}
                 </div>
               ` : '<div class="onchain-detail">Contract code is immutable</div>'}
@@ -2719,8 +2723,9 @@ document.addEventListener("DOMContentLoaded", () => {
           const storageContent = document.getElementById("onchain-storage-content");
           if (storageContent && onchain.storage) {
             const storage = onchain.storage;
-            const centralRisk = storage.centralization_risk || 'LOW';
-            const statusClass = centralRisk === 'HIGH' || centralRisk === 'CRITICAL' ? 'danger' : (centralRisk === 'MEDIUM' ? 'warning' : 'safe');
+            const centralRisk = escapeHtml(storage.centralization_risk || 'LOW');
+            const statusClass = (storage.centralization_risk === 'HIGH' || storage.centralization_risk === 'CRITICAL') ? 'danger' : (storage.centralization_risk === 'MEDIUM' ? 'warning' : 'safe');
+            const ownerAddress = escapeHtml(storage.owner || '');
 
             storageContent.innerHTML = `
               <div class="onchain-status">
@@ -2732,7 +2737,7 @@ document.addEventListener("DOMContentLoaded", () => {
                   <div class="onchain-detail-row">
                     <span class="onchain-detail-label">Owner:</span>
                   </div>
-                  <div class="onchain-address">${storage.owner}</div>
+                  <div class="onchain-address">${ownerAddress}</div>
                 ` : '<div class="onchain-detail-row"><span class="onchain-detail-label">No owner detected</span></div>'}
                 ${storage.is_pausable !== undefined ? `
                   <div class="onchain-detail-row">
@@ -2755,8 +2760,8 @@ document.addEventListener("DOMContentLoaded", () => {
           if (backdoorsContent && onchain.backdoors) {
             const backdoors = onchain.backdoors;
             const hasBackdoors = backdoors.has_backdoors;
-            const riskLevel = backdoors.risk_level || 'LOW';
-            const statusClass = riskLevel === 'CRITICAL' || riskLevel === 'HIGH' ? 'danger' : (riskLevel === 'MEDIUM' ? 'warning' : 'safe');
+            const riskLevel = escapeHtml(backdoors.risk_level || 'LOW');
+            const statusClass = (backdoors.risk_level === 'CRITICAL' || backdoors.risk_level === 'HIGH') ? 'danger' : (backdoors.risk_level === 'MEDIUM' ? 'warning' : 'safe');
 
             backdoorsContent.innerHTML = `
               <div class="onchain-status">
@@ -2767,8 +2772,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 <ul class="onchain-danger-list">
                   ${backdoors.dangerous_functions.slice(0, 3).map(fn => `
                     <li class="onchain-danger-item">
-                      <code>${fn.name || fn.selector}</code>
-                      <span>(${fn.category || 'unknown'})</span>
+                      <code>${escapeHtml(fn.name || fn.selector || '')}</code>
+                      <span>(${escapeHtml(fn.category || 'unknown')})</span>
                     </li>
                   `).join('')}
                   ${backdoors.dangerous_functions.length > 3 ? `
@@ -2786,8 +2791,9 @@ document.addEventListener("DOMContentLoaded", () => {
           if (honeypotContent && onchain.honeypot) {
             const honeypot = onchain.honeypot;
             const isHoneypot = honeypot.is_honeypot;
-            const confidence = honeypot.confidence || 'LOW';
-            const statusClass = isHoneypot ? (confidence === 'HIGH' ? 'danger' : 'warning') : 'safe';
+            const confidence = escapeHtml(honeypot.confidence || 'LOW');
+            const statusClass = isHoneypot ? (honeypot.confidence === 'HIGH' ? 'danger' : 'warning') : 'safe';
+            const recommendation = escapeHtml(honeypot.recommendation || '');
 
             honeypotContent.innerHTML = `
               <div class="onchain-status">
@@ -2795,11 +2801,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 <span class="onchain-status-text">${isHoneypot ? '⚠️ Honeypot (' + confidence + ')' : '✅ Not a Honeypot'}</span>
               </div>
               <div class="onchain-detail">
-                ${honeypot.recommendation ? '<p style="margin: 0; font-size: 0.75rem;">' + honeypot.recommendation + '</p>' : ''}
+                ${honeypot.recommendation ? '<p style="margin: 0; font-size: 0.75rem;">' + recommendation + '</p>' : ''}
                 ${honeypot.indicators && honeypot.indicators.length > 0 ? `
                   <ul class="onchain-danger-list">
                     ${honeypot.indicators.slice(0, 2).map(ind => `
-                      <li class="onchain-danger-item">${ind.description || ind.type}</li>
+                      <li class="onchain-danger-item">${escapeHtml(ind.description || ind.type || '')}</li>
                     `).join('')}
                   </ul>
                 ` : ''}
@@ -2856,11 +2862,12 @@ document.addEventListener("DOMContentLoaded", () => {
           ? '<tr><td colspan="8">No issues found.</td></tr>'
           : report.issues.map((issue, index) => {
           // Add null safety checks for all fields
+          // Security: Escape all user-controlled data to prevent XSS
           const severity = (issue.severity || "unknown").toLowerCase();
-          const severityDisplay = issue.severity || "Unknown";
-          const type = issue.type || "Unknown Issue";
-          const description = issue.description || "No description available";
-          const fix = issue.fix || "No fix recommendation available";
+          const severityDisplay = escapeHtml(issue.severity || "Unknown");
+          const type = escapeHtml(issue.type || "Unknown Issue");
+          const description = escapeHtml(issue.description || "No description available");
+          const fix = escapeHtml(issue.fix || "No fix recommendation available");
           const isProven = issue.proven === true;
           const source = issue.source || "";
 
