@@ -534,7 +534,10 @@ from jose import jwt, JWTError
 
 # === JINJA2 TEMPLATE SETUP (required for /ui and /auth) ===
 templates_dir = "templates"
-jinja_env = Environment(loader=FileSystemLoader(templates_dir))
+jinja_env = Environment(
+    loader=FileSystemLoader(templates_dir),
+    autoescape=True  # Security: Auto-escape HTML to prevent XSS
+)
 
 # === FASTAPI APP INSTANCE (MUST COME BEFORE ANY @app ROUTES) ===
 app = FastAPI()
@@ -624,10 +627,20 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
 
+        # HSTS - Force HTTPS (1 year, include subdomains, preload-ready)
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
+
         # Add CSP header for HTML responses
         content_type = response.headers.get("content-type", "")
         if "text/html" in content_type:
             response.headers["Content-Security-Policy"] = self.CSP_POLICY
+
+        # Add Cache-Control for sensitive API endpoints
+        path = request.url.path
+        sensitive_paths = ["/tier", "/me", "/api/keys", "/api/regenerate-key", "/api/ws-token"]
+        if any(path.startswith(p) for p in sensitive_paths):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+            response.headers["Pragma"] = "no-cache"
 
         return response
 
@@ -742,7 +755,7 @@ async def startup_certora_poller():
 async def debug_files(admin_key: str = Query(None)):
     """Debug endpoint - requires admin key in production."""
     expected_key = os.getenv("ADMIN_KEY")
-    if expected_key and admin_key != expected_key:
+    if not expected_key or not admin_key or not secrets.compare_digest(admin_key, expected_key):
         raise HTTPException(status_code=403, detail="Admin access required")
     import os
     files = os.listdir("templates") if os.path.exists("templates") else "NO templates folder"
@@ -1127,6 +1140,58 @@ def sanitize_filename(filename: str) -> str:
     if len(filename) > 240:
         filename = filename[:240]
     return filename or "contract.sol"
+
+
+def validate_solidity_file(filename: str, content: bytes) -> tuple[bool, str]:
+    """
+    Validate that the uploaded file is a valid Solidity contract.
+    Returns (is_valid, error_message).
+    Security: Prevents upload of malicious files disguised as .sol files.
+    """
+    # Check extension
+    if not filename or not filename.lower().endswith('.sol'):
+        return False, "Only .sol (Solidity) files are accepted"
+
+    # Try to decode as UTF-8
+    try:
+        text_content = content.decode('utf-8')
+    except UnicodeDecodeError:
+        return False, "File must be valid UTF-8 text"
+
+    # Check for Solidity markers (at least one must be present)
+    solidity_markers = [
+        'pragma solidity',
+        'contract ',
+        'interface ',
+        'library ',
+        'abstract contract',
+        'function ',
+        'event ',
+        'mapping(',
+        'address ',
+        'uint256',
+        'uint ',
+        'bytes32',
+        'SPDX-License-Identifier'
+    ]
+
+    content_lower = text_content.lower()
+    if not any(marker.lower() in content_lower for marker in solidity_markers):
+        return False, "File does not appear to be a Solidity contract"
+
+    # Check for obviously malicious content
+    dangerous_patterns = [
+        '<?php',
+        '<script>',
+        '#!/bin/',
+        '#!/usr/bin/',
+        'eval(',
+        'exec(',
+    ]
+    if any(pattern.lower() in content_lower for pattern in dangerous_patterns):
+        return False, "File contains potentially dangerous content"
+
+    return True, ""
 
 
 def send_audit_completion_email(
@@ -1772,7 +1837,7 @@ async def list_api_keys(
         
         keys_data = [{
             "id": key.id,
-            "key": key.key,  # Full key (frontend will truncate for display)
+            "key_preview": f"{key.key[:12]}...{key.key[-4:]}" if key.key and len(key.key) > 16 else "****",  # Security: Only show masked key
             "label": key.label,
             "created_at": key.created_at.isoformat(),
             "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
@@ -2429,8 +2494,8 @@ async def verify_csrf_token(request: Request):
         request.session["csrf_token"] = secrets.token_urlsafe(32)
         expected = request.session["csrf_token"]
     
-    if not token or token != expected:
-        logger.error(f"CSRF failed: header={token} session={expected}")
+    if not token or not secrets.compare_digest(token, expected):
+        logger.error("CSRF validation failed")  # Security: Don't log tokens
         raise HTTPException(status_code=403, detail="CSRF token invalid")
     
     logger.debug("CSRF valid")
@@ -4998,7 +5063,7 @@ async def verify_api_key(
 async def debug_log(admin_key: str = Query(None)):
     """Debug endpoint - requires admin key in production."""
     expected_key = os.getenv("ADMIN_KEY")
-    if expected_key and admin_key != expected_key:
+    if not expected_key or not admin_key or not secrets.compare_digest(admin_key, expected_key):
         raise HTTPException(status_code=403, detail="Admin access required")
     logger.debug("Debug endpoint called")
     logger.info("Test INFO log")
@@ -5995,14 +6060,22 @@ async def diamond_audit(
         raise HTTPException(status_code=500, detail="An error occurred processing your request")
 
 @app.get("/pending-status/{pending_id}")
-async def pending_status(pending_id: str, db: Session = Depends(get_db)):
-    pending_audit = db.query(PendingAudit).filter(PendingAudit.id == pending_id).first()
+async def pending_status(pending_id: str, request: Request, db: Session = Depends(get_db)):
+    # Security: Validate ownership - user can only check their own pending audits
+    session_username = request.session.get("username")
+    if not session_username:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    pending_audit = db.query(PendingAudit).filter(
+        PendingAudit.id == pending_id,
+        PendingAudit.username == session_username  # Ownership check prevents IDOR
+    ).first()
     if not pending_audit:
         raise HTTPException(status_code=404, detail="Pending audit not found")
-    
+
     if pending_audit.status == "complete" and pending_audit.results:
         return json.loads(pending_audit.results)
-    
+
     return {"status": pending_audit.status}
 
 @app.get("/complete-diamond-audit")
@@ -7182,6 +7255,11 @@ async def submit_audit_to_queue(
 
     if file_size == 0:
         raise HTTPException(status_code=400, detail="Empty file uploaded")
+
+    # Security: Validate file type
+    is_valid, error_msg = validate_solidity_file(file.filename, code_bytes)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=error_msg)
 
     # Check file size limits
     size_limit = usage_tracker.size_limits.get(tier, 250 * 1024)
@@ -8874,7 +8952,7 @@ async def migrate_tiers(request: Request, db: Session = Depends(get_db), admin_k
 async def debug_echidna_env(admin_key: str = Query(None)):
     """Check Echidna installation and environment - requires admin key."""
     expected_key = os.getenv("ADMIN_KEY")
-    if expected_key and admin_key != expected_key:
+    if not expected_key or not admin_key or not secrets.compare_digest(admin_key, expected_key):
         raise HTTPException(status_code=403, detail="Admin access required")
     import subprocess
     
