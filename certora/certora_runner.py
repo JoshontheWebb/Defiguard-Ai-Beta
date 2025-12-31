@@ -25,13 +25,15 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Timeout for job submission (just getting the URL, not waiting for results)
-SUBMISSION_TIMEOUT = 120  # 2 minutes to submit and get URL
+SUBMISSION_TIMEOUT = 300  # 5 minutes to submit and get URL (generous for network issues)
 
 # Timeout for polling results (if we choose to wait)
-POLL_TIMEOUT = 600  # 10 minutes max wait for results
+# Since we now save results to database and can retrieve later, this is just for
+# initial wait time - if it times out, status is "pending" not "failed"
+POLL_TIMEOUT = 1800  # 30 minutes max wait for results (Certora can take a while)
 
 # How often to poll for results
-POLL_INTERVAL = 15  # Check every 15 seconds
+POLL_INTERVAL = 20  # Check every 20 seconds
 
 # Certora cloud job URL pattern
 CERTORA_JOB_URL = "https://prover.certora.com/output/{job_id}"
@@ -532,14 +534,30 @@ class CertoraRunner:
         )
 
     def _write_temp_file(self, content: str, suffix: str) -> str:
-        """Write content to a temporary file and return the path."""
+        """Write content to a temporary file and return the path.
+
+        Uses proper file descriptor handling to prevent resource leaks.
+        """
         fd, path = tempfile.mkstemp(suffix=suffix)
+        fd_closed = False
         try:
+            # os.fdopen takes ownership of the file descriptor
             with os.fdopen(fd, 'w') as f:
+                fd_closed = True  # Context manager now owns fd
                 f.write(content)
             return path
         except Exception:
-            os.close(fd)
+            # Only close fd if os.fdopen failed (before it took ownership)
+            if not fd_closed:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass  # Already closed or invalid
+            # Clean up the temp file on error
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
             raise
 
     def _cleanup_temp_file(self, path: Optional[str]):

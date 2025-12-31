@@ -73,9 +73,12 @@ from authlib.integrations.starlette_client import OAuth
 from starlette.middleware.sessions import SessionMiddleware
 from urllib.parse import quote_plus, urlencode
 from fastapi.middleware.cors import CORSMiddleware
-from web3 import Web3
+# Note: Web3 already imported at line 19 for early client initialization
 import stripe
 import re  # For username sanitization
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # On-chain analysis module
 from onchain_analyzer import OnChainAnalyzer
@@ -109,7 +112,7 @@ from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.orm import sessionmaker, Session, Mapped, mapped_column
 from slither.slither import Slither
 from slither.exceptions import SlitherError
-from openai import OpenAI  # Sync
+# Note: OpenAI already imported at line 17 for early client initialization
 from tenacity import retry, stop_after_attempt, wait_fixed
 import uvicorn
 from pydantic import BaseModel, Field, field_validator
@@ -118,6 +121,8 @@ from cryptography.hazmat.primitives import serialization
 import requests
 import subprocess
 import asyncio
+import hmac
+import base64
 import heapq
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Flowable, Table, TableStyle, PageBreak, ListFlowable, ListItem, Preformatted
@@ -129,11 +134,110 @@ from jinja2 import Environment, FileSystemLoader
 from compliance_checker import get_compliance_analysis, ComplianceChecker
 
 # ============================================================================
-# PHASE 1: IN-MEMORY AUDIT QUEUE SYSTEM
+# RATE LIMITING - Prevents abuse and DoS attacks
 # ============================================================================
 from dataclasses import dataclass, field
 from typing import Optional
 from enum import Enum
+from collections import defaultdict
+import time as time_module
+
+class RateLimiter:
+    """Simple in-memory rate limiter using sliding window."""
+
+    def __init__(self):
+        self.requests: dict[str, list[float]] = defaultdict(list)
+        self.lock = asyncio.Lock()
+
+    async def is_allowed(self, key: str, max_requests: int, window_seconds: int) -> bool:
+        """Check if request is allowed under rate limit."""
+        async with self.lock:
+            now = time_module.time()
+            window_start = now - window_seconds
+
+            # Clean old requests outside window
+            self.requests[key] = [t for t in self.requests[key] if t > window_start]
+
+            if len(self.requests[key]) >= max_requests:
+                return False
+
+            self.requests[key].append(now)
+            return True
+
+    async def get_retry_after(self, key: str, window_seconds: int) -> int:
+        """Get seconds until next request is allowed."""
+        async with self.lock:
+            if not self.requests[key]:
+                return 0
+            oldest = min(self.requests[key])
+            return max(0, int(window_seconds - (time_module.time() - oldest)))
+
+# Global rate limiter instance
+rate_limiter = RateLimiter()
+
+# Rate limit configuration
+RATE_LIMITS = {
+    "audit_submit": {"max_requests": 10, "window_seconds": 60},  # 10 audits per minute
+    "audit_submit_guest": {"max_requests": 3, "window_seconds": 60},  # 3 for guests
+    "api_call": {"max_requests": 100, "window_seconds": 60},  # 100 API calls per minute
+    "push": {"max_requests": 5, "window_seconds": 60},  # 5 push notifications per minute
+    "overage": {"max_requests": 10, "window_seconds": 60},  # 10 overage checks per minute
+}
+
+# Queue limits
+MAX_QUEUE_SIZE = 1000  # Maximum jobs in queue
+MAX_JOBS_PER_USER = 10  # Maximum concurrent jobs per user
+
+# ============================================================================
+# WEBSOCKET TOKEN AUTHENTICATION
+# ============================================================================
+
+WS_TOKEN_EXPIRY_SECONDS = 3600  # 1 hour
+
+def generate_ws_token(username: str, secret_key: str) -> str:
+    """Generate a signed token for WebSocket authentication."""
+    timestamp = int(time_module.time())
+    message = f"{username}:{timestamp}"
+    signature = hmac.new(
+        secret_key.encode(),
+        message.encode(),
+        'sha256'
+    ).hexdigest()
+    token = base64.urlsafe_b64encode(f"{message}:{signature}".encode()).decode()
+    return token
+
+def verify_ws_token(token: str, secret_key: str) -> Optional[str]:
+    """Verify a WebSocket token and return the username if valid."""
+    try:
+        decoded = base64.urlsafe_b64decode(token.encode()).decode()
+        parts = decoded.split(':')
+        if len(parts) != 3:
+            return None
+        username, timestamp_str, provided_signature = parts
+        timestamp = int(timestamp_str)
+
+        # Check expiry
+        if time_module.time() - timestamp > WS_TOKEN_EXPIRY_SECONDS:
+            return None
+
+        # Verify signature
+        message = f"{username}:{timestamp_str}"
+        expected_signature = hmac.new(
+            secret_key.encode(),
+            message.encode(),
+            'sha256'
+        ).hexdigest()
+
+        if not hmac.compare_digest(provided_signature, expected_signature):
+            return None
+
+        return username
+    except Exception:
+        return None
+
+# ============================================================================
+# PHASE 1: IN-MEMORY AUDIT QUEUE SYSTEM
+# ============================================================================
 
 class AuditStatus(str, Enum):
     QUEUED = "queued"
@@ -187,16 +291,32 @@ class AuditQueue:
         self._counter = 0  # Monotonic counter for tie-breaking
         logger.info(f"[QUEUE] AuditQueue initialized with max_concurrent={max_concurrent} (PRIORITY ENABLED)")
     
-    async def submit(self, username: str, file_content: bytes, 
+    async def submit(self, username: str, file_content: bytes,
                      filename: str, tier: str, contract_address: Optional[str] = None) -> AuditJob:
-        """Submit a new audit job to the priority queue."""
+        """Submit a new audit job to the priority queue with limits enforcement."""
         async with self.lock:
+            # Security: Enforce queue depth limit to prevent memory exhaustion
+            if len(self.queue) >= MAX_QUEUE_SIZE:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Queue is full ({MAX_QUEUE_SIZE} jobs). Please try again later."
+                )
+
+            # Security: Enforce per-user job limit
+            user_jobs = sum(1 for j in self.jobs.values()
+                           if j.username == username and j.status in [AuditStatus.QUEUED, AuditStatus.PROCESSING])
+            if user_jobs >= MAX_JOBS_PER_USER:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Too many pending audits ({MAX_JOBS_PER_USER} max). Please wait for current audits to complete."
+                )
+
             self._counter += 1
             counter = self._counter
-            
+
             # Calculate position based on priority
             priority = self.TIER_PRIORITY.get(tier, 3)  # Default to free tier priority
-            
+
             job = AuditJob(
                 job_id=str(uuid.uuid4()),
                 username=username,
@@ -206,14 +326,14 @@ class AuditQueue:
                 contract_address=contract_address,
                 position=0  # Will be calculated dynamically
             )
-            
+
             self.jobs[job.job_id] = job
             heapq.heappush(self.queue, (priority, counter, job))
-            
+
             # Calculate actual position (how many jobs ahead with higher/equal priority)
             position = self._calculate_position(job.job_id, priority, counter)
             job.position = position
-        
+
         logger.info(f"[QUEUE] Job {job.job_id[:8]}... submitted for {username} (tier={tier}, priority={priority}), position {position}, queue size: {len(self.queue)}")
         return job
     
@@ -408,8 +528,8 @@ except Exception:
         def send_task(self, *args: Any, **kwargs: Any) -> None:
             raise RuntimeError("Celery is not installed in this environment")
 import redis.asyncio as aioredis
-import requests  # For cloud fallback
-import asyncio
+# Note: requests already imported at line 121
+# Note: asyncio already imported at line 123
 from jose import jwt, JWTError
 
 # === JINJA2 TEMPLATE SETUP (required for /ui and /auth) ===
@@ -425,17 +545,24 @@ app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=["*"])
 
 # CRITICAL: Session middleware for Auth0
 _secret_key = os.getenv("APP_SECRET_KEY")
+_environment = os.getenv("ENVIRONMENT", "development")
+
 if not _secret_key:
-    _secret_key = secrets.token_urlsafe(32)
-    logger.warning("APP_SECRET_KEY not set; using generated temporary secret (not for production)")
+    if _environment == "production":
+        # SECURITY: In production, APP_SECRET_KEY is mandatory
+        logger.critical("FATAL: APP_SECRET_KEY not set in production environment!")
+        raise RuntimeError("APP_SECRET_KEY environment variable is required in production")
+    else:
+        _secret_key = secrets.token_urlsafe(32)
+        logger.warning("APP_SECRET_KEY not set; using generated temporary secret (development only)")
 
 app.add_middleware(
     SessionMiddleware,
     secret_key=_secret_key,
     session_cookie="session",
-    max_age=14 * 24 * 60 * 60,  # 2 weeks
+    max_age=4 * 60 * 60,  # 4 hours (reduced from 2 weeks for security)
     same_site="lax",
-    https_only=os.getenv("ENVIRONMENT") == "production"  # Only True when explicitly set to production
+    https_only=_environment == "production"
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -465,6 +592,46 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["Authorization", "Content-Type", "X-CSRFToken", "Accept"],
 )
+
+# === SECURITY HEADERS MIDDLEWARE ===
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers including CSP to all responses."""
+
+    # Content Security Policy - restricts resource loading sources
+    CSP_POLICY = "; ".join([
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://www.googletagmanager.com https://js.stripe.com",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com",
+        "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com data:",
+        "img-src 'self' data: https: blob:",
+        "connect-src 'self' wss: ws: https://api.stripe.com https://*.infura.io https://*.walletconnect.com https://*.auth0.com",
+        "frame-src 'self' https://js.stripe.com https://verify.walletconnect.com",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self' https://*.auth0.com https://checkout.stripe.com",
+        "upgrade-insecure-requests"
+    ])
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+
+        # Add security headers to all responses
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+
+        # Add CSP header for HTML responses
+        content_type = response.headers.get("content-type", "")
+        if "text/html" in content_type:
+            response.headers["Content-Security-Policy"] = self.CSP_POLICY
+
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Global clients — already initialized at top of file
 # client and w3 are set above, no need to reset them here
@@ -733,8 +900,7 @@ class User(Base):
     # NFT minting (for future)
     wallet_address: Mapped[Optional[str]] = mapped_column(String, nullable=True, unique=True)
    
-from sqlalchemy import ForeignKey
-from sqlalchemy.orm import relationship
+# Note: ForeignKey and relationship already imported from sqlalchemy at lines 110-111
 
 class APIKey(Base):
     """Multi-key API key management for Pro/Enterprise users"""
@@ -810,6 +976,358 @@ class CertoraJob(Base):
 
     # Relationship
     user = relationship("User")
+
+
+class AuditResult(Base):
+    """
+    Persistent storage for complete audit results.
+
+    Allows users to:
+    1. Start an audit and leave the page
+    2. Retrieve results later using their unique audit key
+    3. Receive email notification when audit completes
+
+    Each audit gets a unique access key (dga_xxx) that can be used
+    to retrieve results without being logged in.
+    """
+    __tablename__ = "audit_results"
+    __table_args__ = {'extend_existing': True}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey('users.id'), nullable=True, index=True)
+
+    # Unique access key for this audit (e.g., dga_abc123xyz...)
+    audit_key: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+
+    # Contract information
+    contract_name: Mapped[str] = mapped_column(String(255), default="contract.sol")
+    contract_hash: Mapped[str] = mapped_column(String(64), index=True)  # SHA256
+    contract_address: Mapped[Optional[str]] = mapped_column(String(42), nullable=True)  # On-chain address
+
+    # Queue/Processing status
+    status: Mapped[str] = mapped_column(String(50), default="queued", index=True)
+    # Status values: queued, processing, completed, failed
+    queue_position: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    current_phase: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Individual tool results (JSON strings)
+    slither_results: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    mythril_results: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    echidna_results: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    certora_results: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    onchain_results: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # AI analysis and final report
+    ai_analysis: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    full_report: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Complete normalized response JSON
+
+    # PDF report path
+    pdf_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+
+    # Summary metrics
+    risk_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    issues_count: Mapped[int] = mapped_column(Integer, default=0)
+    critical_count: Mapped[int] = mapped_column(Integer, default=0)
+    high_count: Mapped[int] = mapped_column(Integer, default=0)
+    medium_count: Mapped[int] = mapped_column(Integer, default=0)
+    low_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # Email notification
+    notification_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    email_sent: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # User tier at time of audit (for feature gating in results)
+    user_tier: Mapped[str] = mapped_column(String(50), default="free")
+
+    # Error information if failed
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Link to in-memory job_id for real-time updates
+    job_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+
+    # Relationship
+    user = relationship("User")
+
+
+def generate_audit_key() -> str:
+    """Generate a unique audit access key."""
+    import secrets
+    return f"dga_{secrets.token_urlsafe(32)}"
+
+
+# ============================================================================
+# EMAIL NOTIFICATION SYSTEM
+# ============================================================================
+# Environment variables:
+#   SMTP_HOST - SMTP server hostname (default: smtp.gmail.com)
+#   SMTP_PORT - SMTP server port (default: 587)
+#   SMTP_USER - SMTP username/email
+#   SMTP_PASSWORD - SMTP password or app-specific password
+#   SMTP_FROM_EMAIL - From email address (default: uses SMTP_USER)
+#   SMTP_FROM_NAME - From name (default: DeFiGuard AI)
+
+def get_smtp_config() -> dict:
+    """Get SMTP configuration from environment."""
+    return {
+        "host": os.getenv("SMTP_HOST", "smtp.gmail.com"),
+        "port": int(os.getenv("SMTP_PORT", "587")),
+        "user": os.getenv("SMTP_USER", ""),
+        "password": os.getenv("SMTP_PASSWORD", ""),
+        "from_email": os.getenv("SMTP_FROM_EMAIL", os.getenv("SMTP_USER", "")),
+        "from_name": os.getenv("SMTP_FROM_NAME", "DeFiGuard AI"),
+    }
+
+
+def is_email_configured() -> bool:
+    """Check if email sending is properly configured."""
+    config = get_smtp_config()
+    return bool(config["user"] and config["password"])
+
+
+# Email validation pattern (RFC 5322 simplified)
+EMAIL_PATTERN = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+
+# Ethereum address validation pattern
+ETH_ADDRESS_PATTERN = re.compile(r'^0x[a-fA-F0-9]{40}$')
+
+
+def validate_email(email: str) -> bool:
+    """Validate email format."""
+    if not email or not isinstance(email, str):
+        return False
+    if len(email) > 254:  # RFC 5321 limit
+        return False
+    return bool(EMAIL_PATTERN.match(email))
+
+
+def validate_eth_address(address: str) -> bool:
+    """Validate Ethereum address format."""
+    if not address or not isinstance(address, str):
+        return False
+    return bool(ETH_ADDRESS_PATTERN.match(address))
+
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename to prevent path traversal and special characters."""
+    if not filename or not isinstance(filename, str):
+        return "contract.sol"
+    # Remove path components
+    filename = os.path.basename(filename)
+    # Remove special characters except . - _
+    filename = re.sub(r'[^\w\s\-.]', '', filename)
+    # Remove leading/trailing whitespace and dots
+    filename = filename.strip().strip('.')
+    # Limit length
+    if len(filename) > 240:
+        filename = filename[:240]
+    return filename or "contract.sol"
+
+
+def send_audit_completion_email(
+    to_email: str,
+    audit_key: str,
+    contract_name: str,
+    risk_score: float,
+    issues_count: int,
+    critical_count: int,
+    high_count: int,
+    status: str = "completed"
+) -> bool:
+    """
+    Send email notification when audit completes.
+
+    Returns True if email sent successfully, False otherwise.
+    """
+    if not is_email_configured():
+        logger.warning("Email not configured - skipping audit notification")
+        return False
+
+    # Validate email format
+    if not validate_email(to_email):
+        logger.error(f"Invalid email format: {to_email[:50]}...")
+        return False
+
+    # Validate audit key format
+    if not audit_key or not audit_key.startswith("dga_"):
+        logger.error("Invalid audit key format")
+        return False
+
+    config = get_smtp_config()
+    base_url = os.getenv("BASE_URL", "https://defiguard.onrender.com")
+
+    try:
+        # HTML escape user-controlled content to prevent injection
+        import html
+        safe_contract_name = html.escape(contract_name or "contract.sol")
+        safe_audit_key = html.escape(audit_key)
+
+        # Create message
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"🔒 DeFiGuard Audit Complete: {safe_contract_name}"
+        msg["From"] = f"{config['from_name']} <{config['from_email']}>"
+        msg["To"] = to_email
+
+        # Determine status emoji and message
+        if status == "completed":
+            status_emoji = "✅"
+            status_text = "Your smart contract audit has completed successfully!"
+        else:
+            status_emoji = "❌"
+            status_text = "Your smart contract audit encountered an issue."
+
+        # Risk level indicator
+        if risk_score is not None:
+            if risk_score >= 80:
+                risk_color = "#22c55e"  # green
+                risk_label = "Low Risk"
+            elif risk_score >= 60:
+                risk_color = "#eab308"  # yellow
+                risk_label = "Medium Risk"
+            elif risk_score >= 40:
+                risk_color = "#f97316"  # orange
+                risk_label = "High Risk"
+            else:
+                risk_color = "#ef4444"  # red
+                risk_label = "Critical Risk"
+        else:
+            risk_color = "#6b7280"
+            risk_label = "Unknown"
+            risk_score = 0
+
+        # Plain text version (no HTML escaping needed)
+        text_content = f"""
+DeFiGuard Smart Contract Audit Complete
+========================================
+
+{status_text}
+
+Contract: {safe_contract_name}
+Security Score: {risk_score:.0f}/100 ({risk_label})
+Issues Found: {issues_count} total ({critical_count} critical, {high_count} high)
+
+View your full audit results:
+{base_url}/audit/retrieve/{safe_audit_key}
+
+Your Audit Key: {safe_audit_key}
+(Save this key to access your results anytime)
+
+---
+DeFiGuard AI - Advanced Smart Contract Security
+"""
+
+        # HTML version (using escaped values)
+        html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #0a0a0a; color: #ffffff; padding: 20px; margin: 0;">
+    <div style="max-width: 600px; margin: 0 auto; background-color: #1a1a2e; border-radius: 12px; overflow: hidden; border: 1px solid #333;">
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #6366f1, #8b5cf6); padding: 30px; text-align: center;">
+            <h1 style="margin: 0; font-size: 24px; color: white;">🔒 DeFiGuard AI</h1>
+            <p style="margin: 10px 0 0; opacity: 0.9; color: white;">Smart Contract Security Audit</p>
+        </div>
+
+        <!-- Content -->
+        <div style="padding: 30px;">
+            <h2 style="margin: 0 0 20px; color: #fff;">{status_emoji} Audit Complete</h2>
+            <p style="color: #a0a0a0; margin-bottom: 25px;">{status_text}</p>
+
+            <!-- Contract Info -->
+            <div style="background-color: #252542; border-radius: 8px; padding: 20px; margin-bottom: 20px;">
+                <p style="margin: 0 0 10px; color: #a0a0a0; font-size: 14px;">Contract</p>
+                <p style="margin: 0; font-size: 18px; font-weight: bold; color: #fff;">{safe_contract_name}</p>
+            </div>
+
+            <!-- Security Score -->
+            <div style="background-color: #252542; border-radius: 8px; padding: 20px; margin-bottom: 20px; text-align: center;">
+                <p style="margin: 0 0 10px; color: #a0a0a0; font-size: 14px;">Security Score</p>
+                <p style="margin: 0; font-size: 48px; font-weight: bold; color: {risk_color};">{risk_score:.0f}</p>
+                <p style="margin: 5px 0 0; color: {risk_color}; font-weight: bold;">{risk_label}</p>
+            </div>
+
+            <!-- Issues Summary -->
+            <div style="display: flex; gap: 10px; margin-bottom: 25px;">
+                <div style="flex: 1; background-color: #252542; border-radius: 8px; padding: 15px; text-align: center;">
+                    <p style="margin: 0; font-size: 24px; font-weight: bold; color: #ef4444;">{critical_count}</p>
+                    <p style="margin: 5px 0 0; font-size: 12px; color: #a0a0a0;">Critical</p>
+                </div>
+                <div style="flex: 1; background-color: #252542; border-radius: 8px; padding: 15px; text-align: center;">
+                    <p style="margin: 0; font-size: 24px; font-weight: bold; color: #f97316;">{high_count}</p>
+                    <p style="margin: 5px 0 0; font-size: 12px; color: #a0a0a0;">High</p>
+                </div>
+                <div style="flex: 1; background-color: #252542; border-radius: 8px; padding: 15px; text-align: center;">
+                    <p style="margin: 0; font-size: 24px; font-weight: bold; color: #fff;">{issues_count}</p>
+                    <p style="margin: 5px 0 0; font-size: 12px; color: #a0a0a0;">Total</p>
+                </div>
+            </div>
+
+            <!-- CTA Button -->
+            <a href="{base_url}/audit/retrieve/{safe_audit_key}" style="display: block; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; text-decoration: none; padding: 15px 30px; border-radius: 8px; font-weight: bold; text-align: center; margin-bottom: 20px;">
+                View Full Audit Report
+            </a>
+
+            <!-- Audit Key -->
+            <div style="background-color: #252542; border-radius: 8px; padding: 15px; text-align: center;">
+                <p style="margin: 0 0 5px; color: #a0a0a0; font-size: 12px;">Your Audit Key (save this)</p>
+                <code style="color: #8b5cf6; font-size: 14px; word-break: break-all;">{safe_audit_key}</code>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div style="background-color: #0f0f1a; padding: 20px; text-align: center; border-top: 1px solid #333;">
+            <p style="margin: 0; color: #666; font-size: 12px;">
+                DeFiGuard AI - Advanced Smart Contract Security<br>
+                <a href="{base_url}" style="color: #6366f1;">defiguard.onrender.com</a>
+            </p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+        msg.attach(MIMEText(text_content, "plain"))
+        msg.attach(MIMEText(html_content, "html"))
+
+        # Send email
+        with smtplib.SMTP(config["host"], config["port"]) as server:
+            server.starttls()
+            server.login(config["user"], config["password"])
+            server.sendmail(config["from_email"], to_email, msg.as_string())
+
+        logger.info(f"Audit completion email sent to {to_email} for audit {audit_key}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to send audit email to {to_email}: {e}")
+        return False
+
+
+async def send_audit_email_async(
+    to_email: str,
+    audit_key: str,
+    contract_name: str,
+    risk_score: float,
+    issues_count: int,
+    critical_count: int,
+    high_count: int,
+    status: str = "completed"
+) -> bool:
+    """Async wrapper for sending audit completion emails."""
+    return await asyncio.to_thread(
+        send_audit_completion_email,
+        to_email, audit_key, contract_name, risk_score,
+        issues_count, critical_count, high_count, status
+    )
 
 
 Base.metadata.create_all(bind=engine, checkfirst=True)
@@ -3229,8 +3747,8 @@ class UsageTracker:
             
             return self.count
         except Exception as e:
-            logger.error(f"Reset usage error for {username or 'anonymous'}: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Failed to reset usage: {str(e)}")
+            logger.error(f"Reset usage error for {username or 'anonymous'}: {e}")
+            raise HTTPException(status_code=500, detail="Failed to reset usage")
     
     def set_tier(self, tier: str, has_diamond: bool = False, username: Optional[str] = None, db: Optional[Session] = None):
         # Support both old and new tier names
@@ -3423,7 +3941,7 @@ def run_echidna(temp_path: str) -> list[dict[str, str]]:
             cmd,
             capture_output=True,
             text=True,
-            timeout=60  # Hard timeout
+            timeout=180  # 3 minutes - generous for complex contracts
         )
         
         logger.info(f"[ECHIDNA] Return code: {result.returncode}")
@@ -3453,8 +3971,8 @@ def run_echidna(temp_path: str) -> list[dict[str, str]]:
             return [{"vulnerability": "Echidna completed", "description": result.stderr[:500] or "No output"}]
     
     except subprocess.TimeoutExpired:
-        logger.warning("[ECHIDNA] Timed out after 60 seconds")
-        return [{"vulnerability": "Echidna timeout", "description": "Fuzzing exceeded 60s limit - partial results may be available"}]
+        logger.warning("[ECHIDNA] Timed out after 180 seconds")
+        return [{"vulnerability": "Echidna timeout", "description": "Fuzzing exceeded 3 minute limit - contract may be complex. Partial results may be available."}]
     
     except FileNotFoundError:
         logger.warning("[ECHIDNA] Binary not found")
@@ -3472,18 +3990,18 @@ def run_mythril(temp_path: str) -> list[dict[str, str]]:
     try:
         logger.info(f"[MYTHRIL] Starting analysis for {temp_path}")
         
-        # Mythril command with execution limits for faster analysis
+        # Mythril command with execution limits for thorough but bounded analysis
         result = subprocess.run(
             [
-                "myth", "analyze", temp_path, 
+                "myth", "analyze", temp_path,
                 "-o", "json",
-                "--execution-timeout", "60",      # Limit symbolic execution
-                "--max-depth", "22",              # Limit search depth
-                "--solver-timeout", "10000"       # 10s solver timeout
+                "--execution-timeout", "180",     # 3 minutes for symbolic execution
+                "--max-depth", "30",              # Increased search depth for better coverage
+                "--solver-timeout", "30000"       # 30s solver timeout
             ],
             capture_output=True,
             text=True,
-            timeout=90  # Reduced from 120s
+            timeout=300  # 5 minutes total - generous for complex contracts
         )
         
         logger.info(f"[MYTHRIL] Return code: {result.returncode}")
@@ -3514,8 +4032,8 @@ def run_mythril(temp_path: str) -> list[dict[str, str]]:
             return [{"vulnerability": "Mythril completed", "description": result.stderr[:500] or "No output"}]
    
     except subprocess.TimeoutExpired:
-        logger.warning("[MYTHRIL] Timed out after 90 seconds")
-        return [{"vulnerability": "Mythril timeout", "description": "Analysis exceeded 90s limit - contract may be complex"}]
+        logger.warning("[MYTHRIL] Timed out after 300 seconds")
+        return [{"vulnerability": "Mythril timeout", "description": "Analysis exceeded 5 minute limit - contract may be highly complex. Try running a focused audit."}]
     except FileNotFoundError:
         logger.warning("[MYTHRIL] Binary not found")
         return [{"vulnerability": "Mythril unavailable", "description": "Mythril not installed"}]
@@ -4384,14 +4902,52 @@ async def ws_alerts(websocket: WebSocket):
 
 # /overage for pre-calc
 @app.post("/overage")
-async def overage(file_size: int = Body(...)):
+async def overage(request: Request, file_size: int = Body(...)):
+    """Calculate overage cost. Rate limited and requires authentication."""
+    # Get client IP for rate limiting
+    client_ip = request.client.host if request.client else "unknown"
+
+    # Rate limit check
+    limit = RATE_LIMITS["overage"]
+    if not await rate_limiter.is_allowed(f"overage:{client_ip}", limit["max_requests"], limit["window_seconds"]):
+        retry_after = await rate_limiter.get_retry_after(f"overage:{client_ip}", limit["window_seconds"])
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)}
+        )
+
+    # Input validation
+    if file_size < 0 or file_size > 1024 * 1024 * 1024:  # Max 1GB
+        raise HTTPException(status_code=400, detail="Invalid file size")
+
     cost = usage_tracker.calculate_diamond_overage(file_size) / 100
     return {"cost": cost}
 
-# /push for mobile
+# /push for mobile - requires authentication
 @app.post("/push")
-async def push(msg: str = Body(...)):
-    logger.info(f"Push sent: {msg}")
+async def push(request: Request, msg: str = Body(...)):
+    """Push notification endpoint. Requires authentication and rate limited."""
+    # Require authentication
+    session_username = request.session.get("username")
+    if not session_username:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Rate limit check
+    limit = RATE_LIMITS["push"]
+    if not await rate_limiter.is_allowed(f"push:{session_username}", limit["max_requests"], limit["window_seconds"]):
+        retry_after = await rate_limiter.get_retry_after(f"push:{session_username}", limit["window_seconds"])
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)}
+        )
+
+    # Input validation - limit message size
+    if len(msg) > 1000:
+        raise HTTPException(status_code=400, detail="Message too long (max 1000 characters)")
+
+    logger.info(f"Push sent by {session_username}: {msg[:100]}...")
     return {"message": "Push sent"}
 
 # API key verifier
@@ -4454,8 +5010,22 @@ from fastapi.responses import FileResponse
 
 @app.get("/static/{file_path:path}")
 async def serve_static(file_path: str):
+    """Serve static files with path traversal protection."""
     logger.info(f"Serving static file: /static/{file_path}")
-    file_full_path = os.path.join("static", file_path)
+
+    # Security: Reject path traversal attempts
+    if ".." in file_path or file_path.startswith("/") or file_path.startswith("\\"):
+        logger.warning(f"Path traversal attempt blocked: {file_path}")
+        raise HTTPException(status_code=403, detail="Invalid file path")
+
+    # Security: Validate path is within static directory using absolute path comparison
+    static_dir = os.path.abspath("static")
+    file_full_path = os.path.abspath(os.path.join("static", file_path))
+
+    if not file_full_path.startswith(static_dir + os.sep):
+        logger.warning(f"Path escape attempt blocked: {file_path} -> {file_full_path}")
+        raise HTTPException(status_code=403, detail="Access denied")
+
     if not os.path.isfile(file_full_path):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(file_full_path)
@@ -4531,7 +5101,8 @@ async def read_ui(
             request.session["csrf_token"] = secrets.token_urlsafe(32)
         
         session_username = request.session.get("username")
-        logger.debug(f"UI request, session_id={session_id}, tier={tier}, has_diamond={has_diamond}, temp_id={temp_id}, username={username}, session_username={session_username}, upgrade={upgrade}, message={message}, session: {request.session}")
+        # Security: Don't log session object - contains sensitive auth data
+        logger.debug(f"UI request: tier={tier}, has_diamond={has_diamond}, session_username={session_username}")
         
         if session_id:
             effective_username = username or session_username
@@ -4587,7 +5158,7 @@ async def read_ui(
         return HTMLResponse(content="<h1>UI file not found. Check templates/index.html.</h1>")
     except Exception as e:
         logger.exception(f"Unexpected error in /ui: {e}")
-        return HTMLResponse(content=f"<h1>Internal error: {str(e)}</h1>", status_code=500)
+        return HTMLResponse(content="<h1>Internal server error</h1>", status_code=500)
 
 @app.get("/queue-monitor", response_class=HTMLResponse)
 async def queue_monitor(request: Request):
@@ -4604,12 +5175,12 @@ async def queue_monitor(request: Request):
         return HTMLResponse(content="<h1>Queue monitor not found. Check templates/queue-monitor.html.</h1>")
     except Exception as e:
         logger.exception(f"Unexpected error in /queue-monitor: {e}")
-        return HTMLResponse(content=f"<h1>Internal error: {str(e)}</h1>", status_code=500)
+        return HTMLResponse(content="<h1>Internal server error</h1>", status_code=500)
 
 @app.get("/auth", response_class=HTMLResponse)
 async def read_auth(request: Request):
     try:
-        logger.debug(f"Auth page accessed, session: {request.session}")
+        logger.debug(f"Auth page accessed")
         with open("templates/auth.html", "r", encoding="utf-8") as f:
             html_content = f.read()
         logger.info(f"Loading auth from: {os.path.abspath('templates/auth.html')}")
@@ -4630,13 +5201,14 @@ class TierUpgradeRequest(BaseModel):
     has_diamond: bool = False
 
 @app.get("/tier")
-async def get_tier(request: Request, username: str = Query(None), db: Session = Depends(get_db)) -> dict[str, Any]:
+async def get_tier(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Get user tier information. Uses authenticated session only - no query param bypass."""
     session_username = request.session.get("username")
-    logger.debug(f"Tier request: Query username={username}, Session username={session_username}, session: {request.session}")
-    
-    effective_username = username or session_username
-    if not effective_username:
-        logger.debug("No username provided for /tier; returning free tier defaults")
+    logger.debug(f"Tier request: Session username={session_username}")
+
+    # Security: Only use authenticated session username, never trust query params
+    if not session_username:
+        logger.debug("No session username for /tier; returning free tier defaults")
         return {
             "tier": "free",
             "size_limit": "250KB",
@@ -4647,10 +5219,10 @@ async def get_tier(request: Request, username: str = Query(None), db: Session = 
             "has_diamond": False,
             "username": None
         }
-    
-    user = db.query(User).filter(User.username == effective_username).first()
+
+    user = db.query(User).filter(User.username == session_username).first()
     if not user:
-        logger.error(f"Tier fetch failed: User {effective_username} not found")
+        logger.warning(f"Tier fetch: User {session_username} not found in database")
         raise HTTPException(status_code=404, detail="User not found")
     
     user_tier = user.tier
@@ -4709,8 +5281,17 @@ async def get_tier(request: Request, username: str = Query(None), db: Session = 
 @app.post("/set-tier/{username}/{tier}")
 async def set_tier(username: str, tier: str, request: Request, has_diamond: bool = Query(False), db: Session = Depends(get_db)):
     await verify_csrf_token(request)
-    logger.debug(f"Set-tier request for {username}, tier: {tier}, has_diamond: {has_diamond}, session: {request.session}")
-    
+
+    # Security: Validate session user matches path username to prevent privilege escalation
+    session_username = request.session.get("username")
+    if not session_username:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if session_username != username:
+        logger.warning(f"Tier bypass attempt: session user {session_username} tried to modify {username}")
+        raise HTTPException(status_code=403, detail="Cannot modify another user's tier")
+
+    logger.debug(f"Set-tier request for {username}, tier: {tier}, has_diamond: {has_diamond}")
+
     user = db.query(User).filter(User.username == username).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -4790,7 +5371,7 @@ async def set_tier(username: str, tier: str, request: Request, has_diamond: bool
             metadata={"username": username, "tier": tier, "has_diamond": str(has_diamond).lower()}
         )
         
-        logger.info(f"Redirecting {username} to Stripe checkout for {tier} tier, has_diamond: {has_diamond}, session: {request.session}")
+        logger.info(f"Redirecting {username} to Stripe checkout for {tier} tier, has_diamond: {has_diamond}")
         logger.debug(f"Success URL: {session.url}, params: tier={tier}, has_diamond={has_diamond}, username={username}")
         
         if session.subscription:
@@ -4848,7 +5429,7 @@ async def set_tier(username: str, tier: str, request: Request, has_diamond: bool
             str(getattr(cast(Any, e), "code", None)) if hasattr(e, "code") else "None",
             str(getattr(e, "param", None)) if hasattr(e, "param") else "None"
         )
-        raise HTTPException(status_code=400, detail=f"Invalid Stripe request: {getattr(e, 'user_message', None) or str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid payment request. Please try again.")
     except stripe_error.StripeError as e:
         logger.error(f"Stripe error for {username} to {tier}: {str(e)}, error_code={getattr(e, 'code', None)}, param={getattr(e, 'param', None)}")
         raise HTTPException(status_code=503, detail=f"Failed to create checkout session: {getattr(e, 'user_message', None) or 'Payment processing error. Please try again or contact support.'}")
@@ -4945,15 +5526,21 @@ async def complete_tier_checkout(
     username: str = Query(...),
 ):
     logger.debug(f"Complete-tier-checkout request: session_id={session_id}, tier={tier}, has_diamond={has_diamond}, username={username}")
-    
+
     try:
         session = stripe.checkout.Session.retrieve(session_id)
         logger.info(f"Retrieved Stripe session: payment_status={session.payment_status}")
-        
+
+        # Security: Validate username matches Stripe session metadata to prevent redirect hijacking
+        metadata_username = session.metadata.get("username") if session.metadata else None
+        if not metadata_username or metadata_username != username:
+            logger.warning(f"Checkout hijack attempt: URL username {username} != metadata username {metadata_username}")
+            return RedirectResponse(url="/ui?upgrade=failed&message=Security%20validation%20failed")
+
         if session.payment_status != "paid":
             logger.error(f"Payment not completed for {username}, status={session.payment_status}")
             return RedirectResponse(url="/ui?upgrade=failed&message=Payment%20failed")
-        
+
         # Find and update the user
         user = db.query(User).filter(User.username == username).first()
         if not user:
@@ -5008,7 +5595,7 @@ async def complete_tier_checkout(
     
     except Exception as e:
         logger.error(f"Complete-tier-checkout error: {str(e)}")
-        return RedirectResponse(url=f"/ui?upgrade=error&message={str(e)}")
+        return RedirectResponse(url="/ui?upgrade=error&message=Checkout%20processing%20error")
 
 ## Section 4.4: Webhook Endpoint
 
@@ -5016,7 +5603,7 @@ async def complete_tier_checkout(
 async def webhook(request: Request, db: Session = Depends(get_db)):
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
-    logger.debug(f"Webhook received, payload: {payload[:100]}, sig_header: {sig_header}, session: {request.session}")
+    logger.debug(f"Webhook received, payload: {payload[:100]}, sig_header: {sig_header}")
     
     if not STRIPE_API_KEY or not STRIPE_WEBHOOK_SECRET:
         logger.error("Stripe webhook processing failed: STRIPE_API_KEY or STRIPE_WEBHOOK_SECRET not set")
@@ -5027,13 +5614,13 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
         logger.info(f"Webhook event received: type={event['type']}, id={event['id']}")
     except ValueError as e:
         logger.error(f"Stripe webhook error: Invalid payload - {str(e)}, payload={payload[:200]}")
-        return Response(status_code=400, content=f"Invalid payload: {str(e)}")
+        return Response(status_code=400, content="Invalid payload")
     except stripe.error.SignatureVerificationError as e:
         logger.error(f"Stripe webhook error: Invalid signature - {str(e)}, sig_header={sig_header}")
-        return Response(status_code=400, content=f"Invalid signature: {str(e)}")
+        return Response(status_code=400, content="Invalid signature")
     except Exception as e:
         logger.error(f"Stripe webhook unexpected error: {str(e)}, payload={payload[:200]}")
-        return Response(status_code=500, content=f"Webhook processing failed: {str(e)}")
+        return Response(status_code=500, content="Webhook processing failed")
     
     try:
         if event["type"] == "checkout.session.completed":
@@ -5135,13 +5722,21 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
     
     except Exception as e:
         logger.error(f"Webhook processing error for event {event['id']}: {str(e)}")
-        return Response(status_code=500, content=f"Webhook processing failed: {str(e)}")
+        return Response(status_code=500, content="Webhook processing failed")
 
 # WebSocket for real-time audit logging
 @app.websocket("/ws-audit-log")
-async def websocket_audit_log(websocket: WebSocket, username: str = Query(None)):
+async def websocket_audit_log(websocket: WebSocket, token: str = Query(None)):
+    # Security: Validate token to prevent unauthorized subscription to other users' audit logs
+    effective_username = "guest"
+    if token:
+        validated_username = verify_ws_token(token, _secret_key)
+        if validated_username:
+            effective_username = validated_username
+        else:
+            logger.warning(f"[WS_AUDIT] Invalid token attempted: {token[:20]}...")
+
     await websocket.accept()
-    effective_username = username or "guest"
     active_audit_websockets[effective_username] = websocket
     logger.info(f"[WS_AUDIT] ✅ Connected: '{effective_username}' (total connections: {len(active_audit_websockets)})")
     
@@ -5189,7 +5784,10 @@ async def process_pending_audit(db: Session, pending_id: str):
         file_size = os.path.getsize(temp_path)
         with open(temp_path, "rb") as f:
             file = UploadFile(filename="temp.sol", file=f, size=file_size)
-            raw_result: dict[str, Any] | None = await audit_contract(file, "", pending_audit.username, db, None)
+            raw_result: dict[str, Any] | None = await audit_contract(
+                file=file, contract_address="", db=db, request=None,
+                _from_queue=True, _queue_username=pending_audit.username
+            )
         
         os.unlink(temp_path)
         
@@ -5246,87 +5844,89 @@ from io import BytesIO
 async def upload_temp(
     request: Request,
     file: UploadFile = File(...),
-    username: str = Query(None),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    """Upload temp file. Security: Uses authenticated session only."""
     if request is None:
         raise HTTPException(status_code=400, detail="Request object is required")
-    
+
     await verify_csrf_token(request)
-    
+
+    # Security: Only use authenticated session username
     session_username = request.session.get("username")
-    logger.debug(f"Upload-temp request: Query username={username}, Session username={session_username}, session: {request.session}")
-    
-    effective_username = username or session_username
-    if not effective_username:
-        logger.error("No username provided for /upload-temp; redirecting to login")
+    logger.debug(f"Upload-temp request: Session username={session_username}")
+
+    if not session_username:
+        logger.error("No session username for /upload-temp; authentication required")
         raise HTTPException(status_code=401, detail="Please login to continue")
-    
-    user = db.query(User).filter(User.username == effective_username).first()
+
+    user = db.query(User).filter(User.username == session_username).first()
     if not user or not user.has_diamond:
         raise HTTPException(status_code=403, detail="Temporary file upload requires Diamond add-on")
-    
+
     temp_id = str(uuid.uuid4())
     temp_dir = os.path.join(DATA_DIR, "temp_files")
     os.makedirs(temp_dir, exist_ok=True)
     temp_path = os.path.join(temp_dir, f"{temp_id}.sol")
-    
+
     try:
         code_bytes = await file.read()
         file_size = len(code_bytes)
-        
+
         with open(temp_path, "wb") as f:
             f.write(code_bytes)
     except PermissionError as e:
-        logger.error(f"Failed to write temp file: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to save temporary file due to permissions")
+        logger.error(f"Failed to write temp file: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save temporary file")
     except Exception as e:
-        logger.error(f"Upload temp file failed for {effective_username}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to upload temporary file: {str(e)}")
-    
-    logger.info(f"Temporary file uploaded for {effective_username}: {temp_id}, size: {file_size / 1024 / 1024:.2f}MB")
+        logger.error(f"Upload temp file failed for {session_username}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload temporary file")
+
+    logger.info(f"Temporary file uploaded for {session_username}: {temp_id}, size: {file_size / 1024 / 1024:.2f}MB")
     return {"temp_id": temp_id, "file_size": file_size}
 
 @app.post("/diamond-audit")
 async def diamond_audit(
     request: Request,
     file: UploadFile = File(...),
-    username: str = Query(None),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    """Diamond audit endpoint. Security: Uses authenticated session only."""
     await verify_csrf_token(request)
-    
+
+    # Security: Only use authenticated session username, never trust query params
     session_username = request.session.get("username") if request is not None else None
-    logger.debug(f"Diamond-audit request: Query username={username}, Session username={session_username}, session: {getattr(request, 'session', None)}")
-    
-    effective_username = username or session_username
-    if not effective_username:
-        logger.error("No username provided for /diamond-audit; redirecting to login")
+    logger.debug(f"Diamond-audit request: Session username={session_username}")
+
+    if not session_username:
+        logger.error("No session username for /diamond-audit; authentication required")
         raise HTTPException(status_code=401, detail="Please login to continue")
-    
-    user = db.query(User).filter(User.username == effective_username).first()
+
+    user = db.query(User).filter(User.username == session_username).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
     try:
         code_bytes = await file.read()
         file_size = len(code_bytes)
-        
+
         if file_size == 0:
-            logger.error(f"Empty file uploaded for {effective_username}")
+            logger.error(f"Empty file uploaded for {session_username}")
             raise HTTPException(status_code=400, detail="Empty file uploaded")
-        
+
         if file_size > 50 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="File size exceeds 50MB limit")
-        
+
         overage_cost = usage_tracker.calculate_diamond_overage(file_size)
-        logger.info(f"Preparing Diamond audit for {effective_username} with overage ${overage_cost / 100:.2f} for file size {file_size / 1024 / 1024:.2f}MB")
-        
+        logger.info(f"Preparing Diamond audit for {session_username} with overage ${overage_cost / 100:.2f} for file size {file_size / 1024 / 1024:.2f}MB")
+
         if user.has_diamond:
             # Process audit directly
             new_file = UploadFile(filename=file.filename, file=BytesIO(code_bytes), size=file_size)
-            result = cast(dict[str, Any], await audit_contract(new_file, "", effective_username, db, request) or {})
-            
+            result = cast(dict[str, Any], await audit_contract(
+                file=new_file, contract_address="", db=db, request=request
+            ) or {})
+
             # Report overage post-audit
             overage_mb = (file_size - 1024 * 1024) / (1024 * 1024)
             if overage_mb > 0 and user.stripe_subscription_id and user.stripe_subscription_item_id:
@@ -5337,10 +5937,10 @@ async def diamond_audit(
                         timestamp=int(time.time()),
                         action="increment"
                     )
-                    logger.info(f"Reported {overage_mb:.2f}MB overage for {effective_username} to Stripe post-audit")
+                    logger.info(f"Reported {overage_mb:.2f}MB overage for {session_username} to Stripe post-audit")
                 except Exception as e:
-                    logger.error(f"Failed to report overage for {effective_username}: {str(e)}")
-            
+                    logger.error(f"Failed to report overage for {session_username}: {e}")
+
             return result
         else:
             # Persist to PendingAudit
@@ -5348,49 +5948,51 @@ async def diamond_audit(
             temp_dir = os.path.join(DATA_DIR, "temp_files")
             os.makedirs(temp_dir, exist_ok=True)
             temp_path = os.path.join(temp_dir, f"{pending_id}.sol")
-            
+
             with open(temp_path, "wb") as f:
                 f.write(code_bytes)
-            
-            pending_audit = PendingAudit(id=pending_id, username=effective_username, temp_path=temp_path)
+
+            pending_audit = PendingAudit(id=pending_id, username=session_username, temp_path=temp_path)
             db.add(pending_audit)
             db.commit()
-            
+
             if user.tier == "pro":
                 line_items = [{"price": STRIPE_PRICE_DIAMOND, "quantity": 1}]
             else:
                 line_items = [{"price": STRIPE_PRICE_PRO, "quantity": 1}, {"price": STRIPE_PRICE_DIAMOND, "quantity": 1}]
-            
+
             if not STRIPE_API_KEY:
-                logger.error(f"Stripe checkout creation failed for {effective_username} Diamond add-on: STRIPE_API_KEY not set")
+                logger.error(f"Stripe checkout creation failed for {session_username} Diamond add-on: STRIPE_API_KEY not set")
                 os.unlink(temp_path)
                 db.delete(pending_audit)
                 db.commit()
-                raise HTTPException(status_code=503, detail="Payment processing unavailable: Please set STRIPE_API_KEY in environment variables.")
-            
+                raise HTTPException(status_code=503, detail="Payment processing unavailable")
+
             if request is not None:
                 base_url = f"{request.url.scheme}://{request.url.netloc}"
             else:
                 base_url = APP_BASE_URL
-            
+
             success_url = f"{base_url}/ui?upgrade=success&audit=complete&pending_id={urllib.parse.quote(pending_id)}"
             cancel_url = f"{base_url}/ui"
-            
+
             session = stripe.checkout.Session.create(
                 payment_method_types=["card"],
                 line_items=line_items,
                 mode="subscription",
                 success_url=success_url,
                 cancel_url=cancel_url,
-                metadata={"pending_id": pending_id, "username": effective_username, "audit_type": "diamond_overage"}
+                metadata={"pending_id": pending_id, "username": session_username, "audit_type": "diamond_overage"}
             )
-            
-            logger.info(f"Redirecting {effective_username} to Stripe checkout for Diamond add-on")
+
+            logger.info(f"Redirecting {session_username} to Stripe checkout for Diamond add-on")
             return {"session_url": session.url}
-    
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Diamond audit error for {effective_username}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        logger.error(f"Diamond audit error for {session_username}: {e}")
+        raise HTTPException(status_code=500, detail="An error occurred processing your request")
 
 @app.get("/pending-status/{pending_id}")
 async def pending_status(pending_id: str, db: Session = Depends(get_db)):
@@ -5409,46 +6011,56 @@ async def complete_diamond_audit(
     db: Session = Depends(get_db),
     session_id: str = Query(...),
     temp_id: str = Query(...),
-    username: str = Query(None),
 ):
+    """Complete diamond audit after Stripe payment. Security: Uses session + Stripe metadata verification."""
     session_username = request.session.get("username") if request is not None else None
-    logger.debug(f"Complete-diamond-audit request: Query username={username}, Session username={session_username}, session_id={session_id}, temp_id={temp_id}, session: {getattr(request, 'session', None)}")
-    
-    effective_username = username or session_username
-    if not effective_username:
-        logger.error("No username provided for /complete-diamond-audit; redirecting to login")
+    logger.debug(f"Complete-diamond-audit: Session username={session_username}, session_id={session_id}, temp_id={temp_id}")
+
+    if not session_username:
+        logger.error("No session username for /complete-diamond-audit; authentication required")
         return RedirectResponse(url="/auth?redirect_reason=no_username")
-    
-    user = db.query(User).filter(User.username == effective_username).first()
+
+    user = db.query(User).filter(User.username == session_username).first()
     if not user:
-        logger.error(f"User {effective_username} not found for /complete-diamond-audit")
+        logger.error(f"User {session_username} not found for /complete-diamond-audit")
         return RedirectResponse(url="/auth?redirect_reason=user_not_found")
-    
+
     if not STRIPE_API_KEY:
-        logger.error(f"Complete diamond audit failed for {effective_username}: STRIPE_API_KEY not set")
+        logger.error(f"Complete diamond audit failed for {session_username}: STRIPE_API_KEY not set")
         return RedirectResponse(url="/ui?upgrade=error&message=Payment%20processing%20unavailable")
-    
+
     try:
         session = stripe.checkout.Session.retrieve(session_id)
+
+        # Security: Verify the Stripe session belongs to this user
+        stripe_username = session.metadata.get("username") if session.metadata else None
+        if stripe_username and stripe_username != session_username:
+            logger.warning(f"Stripe session username mismatch: session={session_username}, stripe={stripe_username}")
+            return RedirectResponse(url="/ui?upgrade=error&message=Session%20mismatch")
+
         if session.payment_status == "paid":
             temp_path = os.path.join(DATA_DIR, "temp_files", f"{temp_id}.sol")
             if not os.path.exists(temp_path):
                 raise HTTPException(status_code=404, detail="Temporary file not found")
-            
+
             file_size = os.path.getsize(temp_path)
             with open(temp_path, "rb") as f:
                 file = UploadFile(filename="temp.sol", file=f, size=file_size)
-                _result: dict[str, Any] | None = await audit_contract(file, None, effective_username, db, request)
-            
+                _result: dict[str, Any] | None = await audit_contract(
+                    file=file, contract_address=None, db=db, request=request
+                )
+
             os.unlink(temp_path)
-            logger.info(f"Diamond audit completed for {effective_username} after payment, session: {request.session}")
+            logger.info(f"Diamond audit completed for {session_username} after payment")
             return RedirectResponse(url="/ui?upgrade=success")
         else:
-            logger.error(f"Payment not completed for {effective_username}, session_id={session_id}, payment_status={session.payment_status}")
+            logger.error(f"Payment not completed for {session_username}, session_id={session_id}")
             return RedirectResponse(url="/ui?upgrade=failed")
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Complete diamond audit failed for {effective_username}: {str(e)}")
-        return RedirectResponse(url=f"/ui?upgrade=error&message={str(e)}")
+        logger.error(f"Complete diamond audit failed for {session_username}: {e}")
+        return RedirectResponse(url="/ui?upgrade=error&message=Processing%20error")
 
 @app.get("/api/audit")
 async def api_audit(username: str, api_key: str, db: Session = Depends(get_db)):
@@ -5461,18 +6073,34 @@ async def api_audit(username: str, api_key: str, db: Session = Depends(get_db)):
         return {"message": "API audit endpoint (Pro/Enterprise tier)"}
     except Exception as e:
         logger.error(f"API audit error for {username}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/ws-token")
+async def get_ws_token(request: Request):
+    """Get a signed WebSocket token for authenticated users."""
+    session_username = request.session.get("username")
+    if not session_username:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    token = generate_ws_token(session_username, _secret_key)
+    return {"token": token, "expires_in": WS_TOKEN_EXPIRY_SECONDS}
 
 @app.post("/mint-nft")
-async def mint_nft(request: Request, username: str = Query(...), db: Session = Depends(get_db)):
+async def mint_nft(request: Request, db: Session = Depends(get_db)):
+    """Mint NFT for enterprise users. Security: Uses authenticated session only."""
     await verify_csrf_token(request)
-    
-    user = db.query(User).filter(User.username == username).first()
+
+    # Security: Only use authenticated session username
+    session_username = request.session.get("username")
+    if not session_username:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    user = db.query(User).filter(User.username == session_username).first()
     if not user or user.tier != "enterprise":
         raise HTTPException(status_code=403, detail="NFT mint requires Enterprise tier")
-    
+
     token_id = secrets.token_hex(8)
-    logger.info(f"Minted NFT for {username}: token_id={token_id}")
+    logger.info(f"Minted NFT for {session_username}: token_id={token_id}")
     return {"token_id": token_id}
 
 # Removed: /oauth-google stub endpoint (was using placeholder client ID)
@@ -5490,28 +6118,27 @@ async def upgrade_page():
         return {"message": "Upgrade at /ui for Developer ($59/mo), Team ($199/mo), or Enterprise ($799/mo)."}
     except Exception as e:
         logger.error(f"Upgrade page error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/facets/{contract_address}")
-async def get_facets(contract_address: str, request: Request, username: str = Query(None), api_key: str = Header(None, alias="X-API-Key"), db: Session = Depends(get_db)) -> dict[str, Any]:
+async def get_facets(contract_address: str, request: Request, api_key: str = Header(None, alias="X-API-Key"), db: Session = Depends(get_db)) -> dict[str, Any]:
     """
     Get diamond proxy facets. Supports both session auth (web UI) and API key auth.
+    Security: No username query param - uses session or API key only.
     """
     try:
-        logger.debug(f"Received /facets request for {contract_address} by {username or 'anonymous'}, session: {request.session}")
-
         if w3 is None or not w3.is_address(contract_address):
             logger.error(f"Invalid Ethereum address or Web3 not initialized: {contract_address}")
             raise HTTPException(status_code=400, detail="Invalid Ethereum address or Web3 not initialized")
 
-        # Try session auth first, then API key
+        # Security: Only use authenticated session or API key - no query param bypass
         session_username = request.session.get("username")
-        effective_username = username or session_username
         user = None
 
-        # Check session auth
-        if effective_username:
-            user = db.query(User).filter(User.username == effective_username).first()
+        # Try session auth first
+        if session_username:
+            user = db.query(User).filter(User.username == session_username).first()
+            logger.debug(f"Facets request for {contract_address} by session user {session_username}")
 
         # If no session user, try API key auth
         if not user and api_key:
@@ -5521,6 +6148,7 @@ async def get_facets(contract_address: str, request: Request, username: str = Qu
                 if user:
                     api_key_obj.last_used_at = datetime.now()
                     db.commit()
+                    logger.debug(f"Facets request for {contract_address} by API key user {user.username}")
 
         if not user:
             raise HTTPException(status_code=401, detail="Authentication required. Please sign in or provide API key.")
@@ -5531,10 +6159,10 @@ async def get_facets(contract_address: str, request: Request, username: str = Qu
         if current_tier not in ["pro", "enterprise", "diamond"] and not has_diamond:
             logger.warning(f"Facet preview denied for {user.username} (tier: {current_tier}, has_diamond: {has_diamond})")
             raise HTTPException(status_code=403, detail="Facet preview requires Pro/Enterprise tier. Upgrade at /ui.")
-        
+
         if not os.getenv("INFURA_PROJECT_ID"):
-            logger.error(f"Facet fetch failed for {effective_username}: INFURA_PROJECT_ID not set")
-            raise HTTPException(status_code=503, detail="On-chain analysis unavailable: Please set INFURA_PROJECT_ID in environment variables.")
+            logger.error(f"Facet fetch failed for {user.username}: INFURA_PROJECT_ID not set")
+            raise HTTPException(status_code=503, detail="On-chain analysis unavailable")
         
         diamond_abi: list[dict[str, Any]] = [
             {
@@ -5607,7 +6235,7 @@ async def get_facets(contract_address: str, request: Request, username: str = Qu
     
     except Exception as e:
         logger.error(f"Facet endpoint error for {username or 'anonymous'}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 ## Section 4.6 Main Audit Endpoint
 
@@ -5727,7 +6355,8 @@ async def get_certora_job_status(
     if job.status == "completed" and job.results_json:
         try:
             result["results"] = json.loads(job.results_json)
-        except:
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.warning(f"Failed to parse results_json for job {job.id}: {e}")
             result["results"] = []
 
     return result
@@ -5762,129 +6391,41 @@ async def delete_certora_job(
 
 
 @app.post("/api/certora/start")
-async def start_certora_verification(
+async def start_certora_verification_deprecated(
     request: Request,
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ) -> dict[str, Any]:
     """
-    Start Certora verification separately from the main audit.
+    DEPRECATED: Manual Certora submission has been replaced by the integrated audit system.
 
-    This allows users to:
-    1. Run Certora ahead of time
-    2. Get their job ID
-    3. Include completed results in future audits
+    Certora formal verification now runs automatically as part of the full audit flow.
+    Use /audit/submit to start an audit - you'll receive an audit_key that can be used
+    to retrieve results (including Certora verification) once the audit completes.
 
-    The job runs in background and user can poll for status.
+    Benefits of the new system:
+    - Certora runs with full Slither context for better specs
+    - Results are permanently stored and accessible via audit_key
+    - Email notifications when audit completes
+    - No need to manually poll for status
     """
-    user = await get_authenticated_user(request, db)
-    if not user:
-        raise HTTPException(status_code=401, detail="Authentication required")
-
-    # Check tier - Certora is Enterprise only
-    if user.tier not in ["enterprise", "diamond"] and not user.has_diamond:
-        raise HTTPException(
-            status_code=403,
-            detail="Certora formal verification is available for Enterprise and Diamond tiers only"
-        )
-
-    # Check if CERTORAKEY is configured
-    if not os.getenv("CERTORAKEY"):
-        raise HTTPException(
-            status_code=503,
-            detail="Certora service not configured. Please contact support."
-        )
-
-    # Read contract content
-    content = await file.read()
-    contract_code = content.decode("utf-8")
-    contract_hash = compute_contract_hash(contract_code)
-    contract_name = file.filename or "Contract.sol"
-
-    # Check for existing pending job
-    pending_job = get_pending_certora_job(db, user.id, contract_hash)
-    if pending_job:
-        return {
-            "status": "already_running",
-            "job_id": pending_job.job_id,
-            "job_url": pending_job.job_url,
-            "message": "A verification job for this contract is already running."
-        }
-
-    # Check for existing completed job
-    cached_job = get_cached_certora_result(db, user.id, contract_hash)
-    if cached_job:
-        return {
-            "status": "cached",
-            "job_id": cached_job.job_id,
-            "job_url": cached_job.job_url,
-            "rules_verified": cached_job.rules_verified,
-            "rules_violated": cached_job.rules_violated,
-            "completed_at": cached_job.completed_at.isoformat() if cached_job.completed_at else None,
-            "message": "A completed verification exists for this contract. Delete it to run fresh verification."
-        }
-
-    # Save contract to temp file
-    temp_path = None
-    try:
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.sol', delete=False) as f:
-            f.write(contract_code)
-            temp_path = f.name
-
-        # Import and run Certora (non-blocking mode)
-        from certora import CVLGenerator, CertoraRunner
-
-        # Generate specs
-        generator = CVLGenerator()
-        cvl_specs = generator.generate_specs_sync(contract_code, None)
-
-        if not cvl_specs:
-            raise HTTPException(status_code=400, detail="Could not generate CVL specifications for this contract")
-
-        # Submit job (don't wait for results)
-        runner = CertoraRunner()
-        results = runner.run_verification_sync(temp_path, cvl_specs, wait_for_results=False)
-
-        job_url = results.get("job_url")
-        if not job_url:
-            raise HTTPException(status_code=500, detail="Failed to submit Certora job")
-
-        # Extract job ID from URL
-        job_id = job_url.split("/")[-1] if "/" in job_url else job_url
-
-        # Save to database
-        # Note: has_slither_context=False because Settings flow doesn't run Slither
-        new_job = CertoraJob(
-            user_id=user.id,
-            contract_hash=contract_hash,
-            contract_name=contract_name,
-            job_id=job_id,
-            job_url=job_url,
-            status="pending",
-            has_slither_context=False  # Settings flow doesn't have Slither findings
-        )
-        db.add(new_job)
-        db.commit()
-
-        logger.info(f"Certora job started for {user.username}: {job_id}")
-
-        return {
-            "status": "started",
-            "job_id": job_id,
-            "job_url": job_url,
-            "message": "Certora verification started. Poll /api/certora/job/{job_id} for status, or wait a few minutes and run your audit."
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to start Certora job: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to start verification: {str(e)}")
-
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            os.unlink(temp_path)
+    return {
+        "status": "deprecated",
+        "message": "Manual Certora submission has been replaced. Please use the main audit flow instead.",
+        "instructions": {
+            "step1": "Submit your contract via POST /audit/submit",
+            "step2": "Save the audit_key returned in the response",
+            "step3": "Your audit (including Certora verification) will run in the background",
+            "step4": "Retrieve results anytime via GET /audit/retrieve/{audit_key}",
+            "step5": "Optional: Provide notify_email parameter to receive email when complete"
+        },
+        "benefits": [
+            "Certora runs with full Slither context for better specifications",
+            "Results are permanently stored and accessible anytime",
+            "Email notifications when audit completes",
+            "No need to manually track job IDs"
+        ]
+    }
 
 
 @app.post("/api/certora/poll/{job_id}")
@@ -6377,7 +6918,7 @@ def summarize_context(context: str) -> str:
 async def process_audit_queue():
     """Background task that continuously processes the audit queue."""
     logger.info("[QUEUE_PROCESSOR] Starting background queue processor")
-    
+
     while True:
         try:
             job = await audit_queue.process_next()
@@ -6385,17 +6926,26 @@ async def process_audit_queue():
                 try:
                     # Route through MAIN audit_contract for 100% feature parity
                     from io import BytesIO
-                    
+
                     file_obj = UploadFile(
                         filename=job.filename,
                         file=BytesIO(job.file_content),
                         size=len(job.file_content)
                     )
-                    
+
                     # Create fresh DB session for this job
                     queue_db = SessionLocal()
-                    
+
                     try:
+                        # Update AuditResult status to processing
+                        audit_result = queue_db.query(AuditResult).filter(
+                            AuditResult.job_id == job.job_id
+                        ).first()
+                        if audit_result:
+                            audit_result.status = "processing"
+                            audit_result.started_at = datetime.now()
+                            queue_db.commit()
+
                         # Update phase for WebSocket subscribers
                         await audit_queue.update_phase(job.job_id, "starting", 5)
                         await notify_job_subscribers(job.job_id, {
@@ -6403,31 +6953,117 @@ async def process_audit_queue():
                             "phase": "starting",
                             "progress": 5
                         })
-                        
+
                         # Call MAIN audit function with _from_queue=True
                         result = await audit_contract(
                             file=file_obj,
                             contract_address=job.contract_address,
-                            username=job.username,
                             db=queue_db,
                             request=None,
-                            _from_queue=True
+                            _from_queue=True,
+                            _queue_username=job.username,
+                            _job_id=job.job_id  # Pass job_id for phase updates
                         )
-                        
+
                         await audit_queue.complete(job.job_id, result)
+
+                        # Save results to AuditResult for persistent storage
+                        if audit_result:
+                            audit_result.status = "completed"
+                            audit_result.completed_at = datetime.now()
+                            audit_result.full_report = json.dumps(result) if result else None
+                            audit_result.risk_score = result.get("risk_score") if result else None
+
+                            # Count issues by severity
+                            issues = result.get("issues", []) if result else []
+                            audit_result.issues_count = len(issues)
+                            audit_result.critical_count = sum(1 for i in issues if i.get("severity", "").lower() == "critical")
+                            audit_result.high_count = sum(1 for i in issues if i.get("severity", "").lower() == "high")
+                            audit_result.medium_count = sum(1 for i in issues if i.get("severity", "").lower() == "medium")
+                            audit_result.low_count = sum(1 for i in issues if i.get("severity", "").lower() == "low")
+
+                            # Store individual tool results
+                            audit_result.slither_results = json.dumps(result.get("slither_results", [])) if result else None
+                            audit_result.mythril_results = json.dumps(result.get("mythril_results", [])) if result else None
+                            audit_result.echidna_results = json.dumps(result.get("fuzzing_results", [])) if result else None
+                            audit_result.certora_results = json.dumps(result.get("certora_results", [])) if result else None
+                            audit_result.pdf_path = result.get("pdf_path") if result else None
+
+                            queue_db.commit()
+                            logger.info(f"[AUDIT_RESULT] Saved completed results for audit {audit_result.audit_key[:20]}...")
+
+                            # Send email notification if configured
+                            if audit_result.notification_email and not audit_result.email_sent:
+                                try:
+                                    email_sent = await send_audit_email_async(
+                                        to_email=audit_result.notification_email,
+                                        audit_key=audit_result.audit_key,
+                                        contract_name=audit_result.contract_name,
+                                        risk_score=audit_result.risk_score or 0,
+                                        issues_count=audit_result.issues_count,
+                                        critical_count=audit_result.critical_count,
+                                        high_count=audit_result.high_count,
+                                        status="completed"
+                                    )
+                                    if email_sent:
+                                        audit_result.email_sent = True
+                                        queue_db.commit()
+                                except Exception as email_err:
+                                    logger.error(f"[AUDIT_EMAIL] Failed to send notification: {email_err}")
+
                         await notify_job_subscribers(job.job_id, {
                             "status": "completed",
-                            "result": result
+                            "result": result,
+                            "audit_key": audit_result.audit_key if audit_result else None
                         })
-                        
+
                     finally:
                         queue_db.close()
-                    
+
                 except Exception as e:
                     error_msg = str(e)
                     logger.exception(f"[QUEUE_PROCESSOR] Audit failed for job {job.job_id[:8]}...")
                     await audit_queue.fail(job.job_id, error_msg)
-                    
+
+                    # Update AuditResult with failure (use separate session with proper cleanup)
+                    fail_db = None
+                    try:
+                        fail_db = SessionLocal()
+                        audit_result_fail = fail_db.query(AuditResult).filter(
+                            AuditResult.job_id == job.job_id
+                        ).first()
+                        if audit_result_fail:
+                            audit_result_fail.status = "failed"
+                            audit_result_fail.error_message = error_msg[:2000] if error_msg else "Unknown error"  # Limit error message length
+                            audit_result_fail.completed_at = datetime.now()
+                            fail_db.commit()
+
+                            # Send failure notification email (separate try block)
+                            if audit_result_fail.notification_email and not audit_result_fail.email_sent:
+                                try:
+                                    email_sent = await send_audit_email_async(
+                                        to_email=audit_result_fail.notification_email,
+                                        audit_key=audit_result_fail.audit_key,
+                                        contract_name=audit_result_fail.contract_name,
+                                        risk_score=0,
+                                        issues_count=0,
+                                        critical_count=0,
+                                        high_count=0,
+                                        status="failed"
+                                    )
+                                    if email_sent:
+                                        audit_result_fail.email_sent = True
+                                        fail_db.commit()
+                                except Exception as email_err:
+                                    logger.error(f"[QUEUE_PROCESSOR] Failed to send failure email: {email_err}")
+                    except Exception as db_err:
+                        logger.error(f"[QUEUE_PROCESSOR] Failed to update AuditResult: {db_err}")
+                        if fail_db:
+                            fail_db.rollback()
+                    finally:
+                        if fail_db:
+                            fail_db.close()
+
                     await notify_job_subscribers(job.job_id, {
                         "status": "failed",
                         "error": error_msg
@@ -6435,7 +7071,7 @@ async def process_audit_queue():
             else:
                 # No jobs available, wait before checking again
                 await asyncio.sleep(1)
-                
+
         except asyncio.CancelledError:
             logger.info("[QUEUE_PROCESSOR] Queue processor cancelled")
             break
@@ -6484,24 +7120,52 @@ async def submit_audit_to_queue(
     request: Request,
     file: UploadFile = File(...),
     contract_address: str = Query(None),
-    username: str = Query(None),
+    notify_email: str = Query(None),
+    generate_key: bool = Query(True),
     db: Session = Depends(get_db)
 ) -> dict:
     """
-    Submit an audit to the queue. Returns immediately with job_id.
-    Client should then poll /audit/status/{job_id} or connect to WebSocket.
+    Submit an audit to the queue. Returns immediately with job_id and audit_key.
+
+    The audit_key can be used to retrieve results later without being logged in.
+    This allows users to start an audit, leave the page, and return later.
+
+    Security: Uses authenticated session only - no username query param bypass.
+    Unauthenticated users can still submit as "guest" with stricter rate limits.
+
+    Parameters:
+        file: The Solidity contract file
+        contract_address: Optional on-chain address for verification
+        notify_email: Optional email to notify when audit completes
+        generate_key: Whether to generate an audit access key (default: True)
     """
     await verify_csrf_token(request)
-    
+
+    # Security: Only use authenticated session username, never trust query params
     session_username = request.session.get("username")
     userinfo = request.session.get("userinfo")
     session_email = userinfo.get("email") if userinfo else None
-    
-    effective_username = username or session_username or session_email or "guest"
-    
-    # Get user tier
+
+    # Use session auth or fall back to guest (no query param override)
+    effective_username = session_username or session_email or "guest"
+
+    # Rate limiting - stricter for guests
+    client_ip = request.client.host if request.client else "unknown"
+    rate_key = f"audit:{effective_username}" if effective_username != "guest" else f"audit:guest:{client_ip}"
+    limit_config = RATE_LIMITS["audit_submit"] if effective_username != "guest" else RATE_LIMITS["audit_submit_guest"]
+
+    if not await rate_limiter.is_allowed(rate_key, limit_config["max_requests"], limit_config["window_seconds"]):
+        retry_after = await rate_limiter.get_retry_after(rate_key, limit_config["window_seconds"])
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)}
+        )
+
+    # Get user and tier
     user = None
     tier = "free"
+    user_email = notify_email or session_email
     if effective_username != "guest":
         user = db.query(User).filter(
             (User.username == effective_username) |
@@ -6509,14 +7173,16 @@ async def submit_audit_to_queue(
         ).first()
         if user:
             tier = user.tier
-    
+            if not user_email:
+                user_email = user.email
+
     # Read file
     code_bytes = await file.read()
     file_size = len(code_bytes)
-    
+
     if file_size == 0:
         raise HTTPException(status_code=400, detail="Empty file uploaded")
-    
+
     # Check file size limits
     size_limit = usage_tracker.size_limits.get(tier, 250 * 1024)
     if file_size > size_limit and tier not in ["enterprise", "diamond"]:
@@ -6524,22 +7190,79 @@ async def submit_audit_to_queue(
             status_code=400,
             detail=f"File size ({file_size / 1024:.1f}KB) exceeds {tier} tier limit ({size_limit / 1024:.1f}KB). Upgrade to continue."
         )
-    
-    # Submit to queue
+
+    # Validate contract_address if provided
+    if contract_address:
+        if not validate_eth_address(contract_address):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid Ethereum address format. Must be 0x followed by 40 hex characters."
+            )
+
+    # Validate notify_email if provided
+    if notify_email and not validate_email(notify_email):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid email format for notification address."
+        )
+
+    # Sanitize filename to prevent path traversal and special characters
+    safe_filename = sanitize_filename(file.filename)
+
+    # Compute contract hash
+    contract_hash = compute_contract_hash(code_bytes.decode('utf-8', errors='replace'))
+
+    # Submit to queue first
     job = await audit_queue.submit(
         username=effective_username,
         file_content=code_bytes,
-        filename=file.filename or "contract.sol",
+        filename=safe_filename,
         tier=tier,
         contract_address=contract_address
     )
-    
+
+    # Generate unique audit key with retry logic for race condition safety
+    audit_key = None
+    if generate_key:
+        from sqlalchemy.exc import IntegrityError
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                audit_key = generate_audit_key()
+                audit_result = AuditResult(
+                    user_id=user.id if user else None,
+                    audit_key=audit_key,
+                    contract_name=safe_filename,
+                    contract_hash=contract_hash,
+                    contract_address=contract_address,
+                    status="queued",
+                    user_tier=tier,
+                    notification_email=user_email if tier in ["pro", "enterprise"] else None,
+                    job_id=job.job_id
+                )
+                db.add(audit_result)
+                db.commit()
+                logger.info(f"[AUDIT_KEY] Created audit key {audit_key[:20]}... for job {job.job_id[:8]}...")
+                break
+            except IntegrityError:
+                db.rollback()
+                audit_key = None
+                logger.warning(f"[AUDIT_KEY] Key collision on attempt {attempt + 1}, retrying...")
+                if attempt == max_retries - 1:
+                    logger.error("[AUDIT_KEY] Failed to generate unique key after max retries")
+                    # Continue without audit key - job is already in queue
+            except Exception as e:
+                db.rollback()
+                logger.error(f"[AUDIT_KEY] Failed to save audit result: {e}")
+                audit_key = None
+                break  # Don't retry on other errors
+
     # Get initial status
     status = await audit_queue.get_status(job.job_id)
-    
+
     logger.info(f"[QUEUE_SUBMIT] Job {job.job_id[:8]}... submitted by {effective_username}, position: {status['position']}")
-    
-    return {
+
+    response = {
         "job_id": job.job_id,
         "status": "queued",
         "position": status["position"],
@@ -6547,6 +7270,13 @@ async def submit_audit_to_queue(
         "estimated_wait_seconds": status["estimated_wait_seconds"],
         "message": f"Audit queued successfully. Position: {status['position']}"
     }
+
+    if audit_key:
+        response["audit_key"] = audit_key
+        response["retrieve_url"] = f"/audit/retrieve/{audit_key}"
+        response["message"] += f"\n\nSave your audit key to access results later: {audit_key}"
+
+    return response
 
 
 @app.get("/audit/status/{job_id}")
@@ -6564,6 +7294,187 @@ async def get_audit_status(job_id: str) -> dict:
 async def get_queue_stats() -> dict:
     """Get current queue statistics (for monitoring/debugging)."""
     return audit_queue.get_stats()
+
+
+# ============================================================================
+# AUDIT KEY RETRIEVAL ENDPOINTS
+# ============================================================================
+
+@app.get("/audit/retrieve/{audit_key}")
+async def retrieve_audit_by_key(
+    audit_key: str,
+    db: Session = Depends(get_db)
+) -> dict:
+    """
+    Retrieve audit results using an audit access key.
+
+    This endpoint does NOT require authentication - the audit key itself
+    serves as the access credential. Users can bookmark this URL to
+    return to their results later.
+
+    Returns the full audit report if completed, or status if still processing.
+    """
+    # Validate audit key format
+    if not audit_key.startswith("dga_"):
+        raise HTTPException(status_code=400, detail="Invalid audit key format")
+
+    # Look up the audit
+    audit_result = db.query(AuditResult).filter(
+        AuditResult.audit_key == audit_key
+    ).first()
+
+    if not audit_result:
+        raise HTTPException(status_code=404, detail="Audit not found. The key may be invalid or expired.")
+
+    # Build response based on status
+    response = {
+        "audit_key": audit_result.audit_key,
+        "status": audit_result.status,
+        "contract_name": audit_result.contract_name,
+        "created_at": audit_result.created_at.isoformat() if audit_result.created_at else None,
+        "user_tier": audit_result.user_tier
+    }
+
+    if audit_result.status == "queued":
+        # Still in queue - provide position if available
+        if audit_result.job_id:
+            queue_status = await audit_queue.get_status(audit_result.job_id)
+            response["queue_position"] = queue_status.get("position")
+            response["estimated_wait_seconds"] = queue_status.get("estimated_wait_seconds")
+        response["message"] = "Your audit is queued and will begin shortly."
+
+    elif audit_result.status == "processing":
+        # Currently being processed
+        response["started_at"] = audit_result.started_at.isoformat() if audit_result.started_at else None
+        response["current_phase"] = audit_result.current_phase
+        response["progress"] = audit_result.progress
+        response["message"] = "Your audit is in progress."
+
+    elif audit_result.status == "completed":
+        # Completed - return full results
+        response["completed_at"] = audit_result.completed_at.isoformat() if audit_result.completed_at else None
+        response["risk_score"] = audit_result.risk_score
+        response["issues_count"] = audit_result.issues_count
+        response["critical_count"] = audit_result.critical_count
+        response["high_count"] = audit_result.high_count
+        response["medium_count"] = audit_result.medium_count
+        response["low_count"] = audit_result.low_count
+
+        # Parse and return full report
+        if audit_result.full_report:
+            try:
+                response["report"] = json.loads(audit_result.full_report)
+            except json.JSONDecodeError:
+                response["report"] = None
+
+        # Include PDF path if available
+        if audit_result.pdf_path:
+            response["pdf_url"] = f"/api/reports/{os.path.basename(audit_result.pdf_path)}"
+
+        response["message"] = "Audit completed successfully."
+
+    elif audit_result.status == "failed":
+        # Failed - return error info
+        response["completed_at"] = audit_result.completed_at.isoformat() if audit_result.completed_at else None
+        response["error"] = audit_result.error_message
+        response["message"] = "Audit failed. Please try again or contact support."
+
+    return response
+
+
+@app.get("/api/user/audits")
+async def list_user_audits(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0)
+) -> dict:
+    """
+    List all audits for the authenticated user.
+
+    Returns a paginated list of the user's audits with their keys and status.
+    Requires authentication.
+    """
+    user = await get_authenticated_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Query user's audits
+    query = db.query(AuditResult).filter(
+        AuditResult.user_id == user.id
+    ).order_by(AuditResult.created_at.desc())
+
+    total = query.count()
+    audits = query.offset(offset).limit(limit).all()
+
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "audits": [
+            {
+                "audit_key": a.audit_key,
+                "contract_name": a.contract_name,
+                "status": a.status,
+                "risk_score": a.risk_score,
+                "issues_count": a.issues_count,
+                "critical_count": a.critical_count,
+                "high_count": a.high_count,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+                "completed_at": a.completed_at.isoformat() if a.completed_at else None
+            }
+            for a in audits
+        ]
+    }
+
+
+@app.post("/api/audit/resend-email/{audit_key}")
+async def resend_audit_email(
+    audit_key: str,
+    email: str = Query(..., description="Email address to send notification to"),
+    db: Session = Depends(get_db)
+) -> dict:
+    """
+    Resend completion email for a completed audit.
+
+    Requires the audit key and a valid email address.
+    Only works for completed audits.
+    """
+    # Validate audit key format and length
+    if not audit_key or not audit_key.startswith("dga_") or len(audit_key) > 64:
+        raise HTTPException(status_code=400, detail="Invalid audit key format")
+
+    # Validate email format
+    if not validate_email(email):
+        raise HTTPException(status_code=400, detail="Invalid email format")
+
+    audit_result = db.query(AuditResult).filter(
+        AuditResult.audit_key == audit_key
+    ).first()
+
+    if not audit_result:
+        raise HTTPException(status_code=404, detail="Audit not found")
+
+    if audit_result.status != "completed":
+        raise HTTPException(status_code=400, detail="Audit is not yet completed")
+
+    # Send email
+    success = await send_audit_email_async(
+        to_email=email,
+        audit_key=audit_result.audit_key,
+        contract_name=audit_result.contract_name,
+        risk_score=audit_result.risk_score or 0,
+        issues_count=audit_result.issues_count,
+        critical_count=audit_result.critical_count,
+        high_count=audit_result.high_count,
+        status="completed"
+    )
+
+    if success:
+        logger.info(f"[AUDIT_EMAIL] Resent completion email to {email} for audit {audit_key[:20]}...")
+        return {"success": True, "message": f"Email sent to {email}"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to send email. Check email configuration.")
 
 
 @app.websocket("/ws/job/{job_id}")
@@ -6623,15 +7534,20 @@ async def websocket_job_status(websocket: WebSocket, job_id: str):
 async def audit_contract(
     file: UploadFile = File(...),
     contract_address: str = Query(None),
-    username: str = Query(None),
     db: Session = Depends(get_db),
     request: Request = None,
-    _from_queue: bool = False
+    _from_queue: bool = False,
+    _queue_username: str = None,  # Internal param for queue processor only
+    _job_id: str = None  # Internal param for job tracking
 ):
+    """
+    Main audit endpoint. Security: Uses authenticated session only.
+    Queue processor passes username via _queue_username internal param.
+    """
     # Skip CSRF for queue-originated requests (no request object)
     if not _from_queue:
         await verify_csrf_token(request)
-    
+
     # Handle request=None for queue-originated requests
     if request is not None:
         session_username = request.session.get("username")
@@ -6641,11 +7557,15 @@ async def audit_contract(
         session_username = None
         userinfo = None
         session_email = None
-    
-    logger.debug(f"Audit request: Query username={username}, Session username={session_username}, Session email={session_email}, from_queue={_from_queue}")
-    
-    # Resolve effective username
-    effective_username = username or session_username or session_email or "guest"
+
+    # Security: Only use session auth or internal queue username (no query param)
+    # _queue_username is only set by internal queue processor
+    if _from_queue and _queue_username:
+        effective_username = _queue_username
+    else:
+        effective_username = session_username or session_email or "guest"
+
+    logger.debug(f"Audit request: Session username={session_username}, effective={effective_username}, from_queue={_from_queue}")
     user = None
     
     if effective_username != "guest":
@@ -6748,7 +7668,7 @@ async def audit_contract(
         raise
     except Exception as e:
         logger.error(f"File read failed for {effective_username}: {e}")
-        raise HTTPException(status_code=400, detail=f"File read failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Failed to read uploaded file")
     
     # Tier & usage checks (DO NOT increment here - only count successful audits)
     try:
@@ -7691,8 +8611,8 @@ For Enterprise tier, also include: "proof_of_concept", "references"
                 # Just log the error and continue
                 try:
                     db.rollback()
-                except:
-                    pass
+                except Exception as rollback_error:
+                    logger.debug(f"Rollback failed (expected if no transaction): {rollback_error}")
         else:
             logger.debug("[GAMIFICATION] Guest user - stats not tracked")
         
@@ -7818,10 +8738,10 @@ async def process_one_queued_job():
             result = await audit_contract(
                 file=file_obj,
                 contract_address=job.contract_address,
-                username=job.username,
                 db=queue_db,
                 request=None,
-                _from_queue=True
+                _from_queue=True,
+                _queue_username=job.username
             )
         finally:
             queue_db.close()
@@ -7913,7 +8833,7 @@ async def debug_my_stats(
         raise
     except Exception as e:
         logger.error(f"[DEBUG_STATS] Error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch stats: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch stats")
 
 # ============================================================================
 # NEW: Admin endpoint for tier migration
@@ -7948,7 +8868,8 @@ async def migrate_tiers(request: Request, db: Session = Depends(get_db), admin_k
         }
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Migration failed: {str(e)}")
+        logger.error(f"[MIGRATION] Error: {e}")
+        raise HTTPException(status_code=500, detail="Migration failed")
 @app.get("/debug/echidna-env")
 async def debug_echidna_env(admin_key: str = Query(None)):
     """Check Echidna installation and environment - requires admin key."""
