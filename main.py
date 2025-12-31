@@ -132,11 +132,63 @@ from jinja2 import Environment, FileSystemLoader
 from compliance_checker import get_compliance_analysis, ComplianceChecker
 
 # ============================================================================
-# PHASE 1: IN-MEMORY AUDIT QUEUE SYSTEM
+# RATE LIMITING - Prevents abuse and DoS attacks
 # ============================================================================
 from dataclasses import dataclass, field
 from typing import Optional
 from enum import Enum
+from collections import defaultdict
+import time as time_module
+
+class RateLimiter:
+    """Simple in-memory rate limiter using sliding window."""
+
+    def __init__(self):
+        self.requests: dict[str, list[float]] = defaultdict(list)
+        self.lock = asyncio.Lock()
+
+    async def is_allowed(self, key: str, max_requests: int, window_seconds: int) -> bool:
+        """Check if request is allowed under rate limit."""
+        async with self.lock:
+            now = time_module.time()
+            window_start = now - window_seconds
+
+            # Clean old requests outside window
+            self.requests[key] = [t for t in self.requests[key] if t > window_start]
+
+            if len(self.requests[key]) >= max_requests:
+                return False
+
+            self.requests[key].append(now)
+            return True
+
+    async def get_retry_after(self, key: str, window_seconds: int) -> int:
+        """Get seconds until next request is allowed."""
+        async with self.lock:
+            if not self.requests[key]:
+                return 0
+            oldest = min(self.requests[key])
+            return max(0, int(window_seconds - (time_module.time() - oldest)))
+
+# Global rate limiter instance
+rate_limiter = RateLimiter()
+
+# Rate limit configuration
+RATE_LIMITS = {
+    "audit_submit": {"max_requests": 10, "window_seconds": 60},  # 10 audits per minute
+    "audit_submit_guest": {"max_requests": 3, "window_seconds": 60},  # 3 for guests
+    "api_call": {"max_requests": 100, "window_seconds": 60},  # 100 API calls per minute
+    "push": {"max_requests": 5, "window_seconds": 60},  # 5 push notifications per minute
+    "overage": {"max_requests": 10, "window_seconds": 60},  # 10 overage checks per minute
+}
+
+# Queue limits
+MAX_QUEUE_SIZE = 1000  # Maximum jobs in queue
+MAX_JOBS_PER_USER = 10  # Maximum concurrent jobs per user
+
+# ============================================================================
+# PHASE 1: IN-MEMORY AUDIT QUEUE SYSTEM
+# ============================================================================
 
 class AuditStatus(str, Enum):
     QUEUED = "queued"
@@ -190,16 +242,32 @@ class AuditQueue:
         self._counter = 0  # Monotonic counter for tie-breaking
         logger.info(f"[QUEUE] AuditQueue initialized with max_concurrent={max_concurrent} (PRIORITY ENABLED)")
     
-    async def submit(self, username: str, file_content: bytes, 
+    async def submit(self, username: str, file_content: bytes,
                      filename: str, tier: str, contract_address: Optional[str] = None) -> AuditJob:
-        """Submit a new audit job to the priority queue."""
+        """Submit a new audit job to the priority queue with limits enforcement."""
         async with self.lock:
+            # Security: Enforce queue depth limit to prevent memory exhaustion
+            if len(self.queue) >= MAX_QUEUE_SIZE:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Queue is full ({MAX_QUEUE_SIZE} jobs). Please try again later."
+                )
+
+            # Security: Enforce per-user job limit
+            user_jobs = sum(1 for j in self.jobs.values()
+                           if j.username == username and j.status in [AuditStatus.QUEUED, AuditStatus.PROCESSING])
+            if user_jobs >= MAX_JOBS_PER_USER:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Too many pending audits ({MAX_JOBS_PER_USER} max). Please wait for current audits to complete."
+                )
+
             self._counter += 1
             counter = self._counter
-            
+
             # Calculate position based on priority
             priority = self.TIER_PRIORITY.get(tier, 3)  # Default to free tier priority
-            
+
             job = AuditJob(
                 job_id=str(uuid.uuid4()),
                 username=username,
@@ -209,14 +277,14 @@ class AuditQueue:
                 contract_address=contract_address,
                 position=0  # Will be calculated dynamically
             )
-            
+
             self.jobs[job.job_id] = job
             heapq.heappush(self.queue, (priority, counter, job))
-            
+
             # Calculate actual position (how many jobs ahead with higher/equal priority)
             position = self._calculate_position(job.job_id, priority, counter)
             job.position = position
-        
+
         logger.info(f"[QUEUE] Job {job.job_id[:8]}... submitted for {username} (tier={tier}, priority={priority}), position {position}, queue size: {len(self.queue)}")
         return job
     
@@ -428,17 +496,24 @@ app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=["*"])
 
 # CRITICAL: Session middleware for Auth0
 _secret_key = os.getenv("APP_SECRET_KEY")
+_environment = os.getenv("ENVIRONMENT", "development")
+
 if not _secret_key:
-    _secret_key = secrets.token_urlsafe(32)
-    logger.warning("APP_SECRET_KEY not set; using generated temporary secret (not for production)")
+    if _environment == "production":
+        # SECURITY: In production, APP_SECRET_KEY is mandatory
+        logger.critical("FATAL: APP_SECRET_KEY not set in production environment!")
+        raise RuntimeError("APP_SECRET_KEY environment variable is required in production")
+    else:
+        _secret_key = secrets.token_urlsafe(32)
+        logger.warning("APP_SECRET_KEY not set; using generated temporary secret (development only)")
 
 app.add_middleware(
     SessionMiddleware,
     secret_key=_secret_key,
     session_cookie="session",
-    max_age=14 * 24 * 60 * 60,  # 2 weeks
+    max_age=4 * 60 * 60,  # 4 hours (reduced from 2 weeks for security)
     same_site="lax",
-    https_only=os.getenv("ENVIRONMENT") == "production"  # Only True when explicitly set to production
+    https_only=_environment == "production"
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -3623,8 +3698,8 @@ class UsageTracker:
             
             return self.count
         except Exception as e:
-            logger.error(f"Reset usage error for {username or 'anonymous'}: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Failed to reset usage: {str(e)}")
+            logger.error(f"Reset usage error for {username or 'anonymous'}: {e}")
+            raise HTTPException(status_code=500, detail="Failed to reset usage")
     
     def set_tier(self, tier: str, has_diamond: bool = False, username: Optional[str] = None, db: Optional[Session] = None):
         # Support both old and new tier names
@@ -4778,14 +4853,52 @@ async def ws_alerts(websocket: WebSocket):
 
 # /overage for pre-calc
 @app.post("/overage")
-async def overage(file_size: int = Body(...)):
+async def overage(request: Request, file_size: int = Body(...)):
+    """Calculate overage cost. Rate limited and requires authentication."""
+    # Get client IP for rate limiting
+    client_ip = request.client.host if request.client else "unknown"
+
+    # Rate limit check
+    limit = RATE_LIMITS["overage"]
+    if not await rate_limiter.is_allowed(f"overage:{client_ip}", limit["max_requests"], limit["window_seconds"]):
+        retry_after = await rate_limiter.get_retry_after(f"overage:{client_ip}", limit["window_seconds"])
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)}
+        )
+
+    # Input validation
+    if file_size < 0 or file_size > 1024 * 1024 * 1024:  # Max 1GB
+        raise HTTPException(status_code=400, detail="Invalid file size")
+
     cost = usage_tracker.calculate_diamond_overage(file_size) / 100
     return {"cost": cost}
 
-# /push for mobile
+# /push for mobile - requires authentication
 @app.post("/push")
-async def push(msg: str = Body(...)):
-    logger.info(f"Push sent: {msg}")
+async def push(request: Request, msg: str = Body(...)):
+    """Push notification endpoint. Requires authentication and rate limited."""
+    # Require authentication
+    session_username = request.session.get("username")
+    if not session_username:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Rate limit check
+    limit = RATE_LIMITS["push"]
+    if not await rate_limiter.is_allowed(f"push:{session_username}", limit["max_requests"], limit["window_seconds"]):
+        retry_after = await rate_limiter.get_retry_after(f"push:{session_username}", limit["window_seconds"])
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)}
+        )
+
+    # Input validation - limit message size
+    if len(msg) > 1000:
+        raise HTTPException(status_code=400, detail="Message too long (max 1000 characters)")
+
+    logger.info(f"Push sent by {session_username}: {msg[:100]}...")
     return {"message": "Push sent"}
 
 # API key verifier
@@ -4939,7 +5052,8 @@ async def read_ui(
             request.session["csrf_token"] = secrets.token_urlsafe(32)
         
         session_username = request.session.get("username")
-        logger.debug(f"UI request, session_id={session_id}, tier={tier}, has_diamond={has_diamond}, temp_id={temp_id}, username={username}, session_username={session_username}, upgrade={upgrade}, message={message}, session: {request.session}")
+        # Security: Don't log session object - contains sensitive auth data
+        logger.debug(f"UI request: tier={tier}, has_diamond={has_diamond}, session_username={session_username}")
         
         if session_id:
             effective_username = username or session_username
@@ -5017,7 +5131,7 @@ async def queue_monitor(request: Request):
 @app.get("/auth", response_class=HTMLResponse)
 async def read_auth(request: Request):
     try:
-        logger.debug(f"Auth page accessed, session: {request.session}")
+        logger.debug(f"Auth page accessed")
         with open("templates/auth.html", "r", encoding="utf-8") as f:
             html_content = f.read()
         logger.info(f"Loading auth from: {os.path.abspath('templates/auth.html')}")
@@ -5118,7 +5232,7 @@ async def get_tier(request: Request, db: Session = Depends(get_db)) -> dict[str,
 @app.post("/set-tier/{username}/{tier}")
 async def set_tier(username: str, tier: str, request: Request, has_diamond: bool = Query(False), db: Session = Depends(get_db)):
     await verify_csrf_token(request)
-    logger.debug(f"Set-tier request for {username}, tier: {tier}, has_diamond: {has_diamond}, session: {request.session}")
+    logger.debug(f"Set-tier request for {username}, tier: {tier}, has_diamond: {has_diamond}")
     
     user = db.query(User).filter(User.username == username).first()
     if not user:
@@ -5199,7 +5313,7 @@ async def set_tier(username: str, tier: str, request: Request, has_diamond: bool
             metadata={"username": username, "tier": tier, "has_diamond": str(has_diamond).lower()}
         )
         
-        logger.info(f"Redirecting {username} to Stripe checkout for {tier} tier, has_diamond: {has_diamond}, session: {request.session}")
+        logger.info(f"Redirecting {username} to Stripe checkout for {tier} tier, has_diamond: {has_diamond}")
         logger.debug(f"Success URL: {session.url}, params: tier={tier}, has_diamond={has_diamond}, username={username}")
         
         if session.subscription:
@@ -5425,7 +5539,7 @@ async def complete_tier_checkout(
 async def webhook(request: Request, db: Session = Depends(get_db)):
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
-    logger.debug(f"Webhook received, payload: {payload[:100]}, sig_header: {sig_header}, session: {request.session}")
+    logger.debug(f"Webhook received, payload: {payload[:100]}, sig_header: {sig_header}")
     
     if not STRIPE_API_KEY or not STRIPE_WEBHOOK_SECRET:
         logger.error("Stripe webhook processing failed: STRIPE_API_KEY or STRIPE_WEBHOOK_SECRET not set")
@@ -6935,7 +7049,7 @@ async def submit_audit_to_queue(
     This allows users to start an audit, leave the page, and return later.
 
     Security: Uses authenticated session only - no username query param bypass.
-    Unauthenticated users can still submit as "guest".
+    Unauthenticated users can still submit as "guest" with stricter rate limits.
 
     Parameters:
         file: The Solidity contract file
@@ -6952,6 +7066,19 @@ async def submit_audit_to_queue(
 
     # Use session auth or fall back to guest (no query param override)
     effective_username = session_username or session_email or "guest"
+
+    # Rate limiting - stricter for guests
+    client_ip = request.client.host if request.client else "unknown"
+    rate_key = f"audit:{effective_username}" if effective_username != "guest" else f"audit:guest:{client_ip}"
+    limit_config = RATE_LIMITS["audit_submit"] if effective_username != "guest" else RATE_LIMITS["audit_submit_guest"]
+
+    if not await rate_limiter.is_allowed(rate_key, limit_config["max_requests"], limit_config["window_seconds"]):
+        retry_after = await rate_limiter.get_retry_after(rate_key, limit_config["window_seconds"])
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)}
+        )
 
     # Get user and tier
     user = None
@@ -7459,7 +7586,7 @@ async def audit_contract(
         raise
     except Exception as e:
         logger.error(f"File read failed for {effective_username}: {e}")
-        raise HTTPException(status_code=400, detail=f"File read failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Failed to read uploaded file")
     
     # Tier & usage checks (DO NOT increment here - only count successful audits)
     try:
@@ -8624,7 +8751,7 @@ async def debug_my_stats(
         raise
     except Exception as e:
         logger.error(f"[DEBUG_STATS] Error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch stats: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch stats")
 
 # ============================================================================
 # NEW: Admin endpoint for tier migration
@@ -8659,7 +8786,8 @@ async def migrate_tiers(request: Request, db: Session = Depends(get_db), admin_k
         }
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Migration failed: {str(e)}")
+        logger.error(f"[MIGRATION] Error: {e}")
+        raise HTTPException(status_code=500, detail="Migration failed")
 @app.get("/debug/echidna-env")
 async def debug_echidna_env(admin_key: str = Query(None)):
     """Check Echidna installation and environment - requires admin key."""
