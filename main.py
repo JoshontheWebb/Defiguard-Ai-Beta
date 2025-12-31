@@ -6112,18 +6112,35 @@ async def complete_diamond_audit(
             return RedirectResponse(url="/ui?upgrade=error&message=Session%20mismatch")
 
         if session.payment_status == "paid":
-            temp_path = os.path.join(DATA_DIR, "temp_files", f"{temp_id}.sol")
-            if not os.path.exists(temp_path):
+            # Security: Validate temp_id is a valid UUID to prevent path traversal
+            try:
+                uuid.UUID(temp_id)  # Raises ValueError if not valid UUID
+            except ValueError:
+                logger.warning(f"Invalid temp_id format attempted by {session_username}: {temp_id[:50]}")
+                raise HTTPException(status_code=400, detail="Invalid temp_id format")
+
+            # Use basename to strip any directory components
+            safe_temp_id = os.path.basename(temp_id)
+            temp_path = os.path.join(DATA_DIR, "temp_files", f"{safe_temp_id}.sol")
+
+            # Verify resolved path is within temp_files directory (prevent symlink attacks)
+            real_path = os.path.realpath(temp_path)
+            allowed_dir = os.path.realpath(os.path.join(DATA_DIR, "temp_files"))
+            if not real_path.startswith(allowed_dir + os.sep):
+                logger.warning(f"Path traversal attempt by {session_username}: {temp_id}")
+                raise HTTPException(status_code=403, detail="Access denied")
+
+            if not os.path.exists(real_path):
                 raise HTTPException(status_code=404, detail="Temporary file not found")
 
-            file_size = os.path.getsize(temp_path)
-            with open(temp_path, "rb") as f:
+            file_size = os.path.getsize(real_path)
+            with open(real_path, "rb") as f:
                 file = UploadFile(filename="temp.sol", file=f, size=file_size)
                 _result: dict[str, Any] | None = await audit_contract(
                     file=file, contract_address=None, db=db, request=request
                 )
 
-            os.unlink(temp_path)
+            os.unlink(real_path)
             logger.info(f"Diamond audit completed for {session_username} after payment")
             return RedirectResponse(url="/ui?upgrade=success")
         else:
@@ -6136,16 +6153,41 @@ async def complete_diamond_audit(
         return RedirectResponse(url="/ui?upgrade=error&message=Processing%20error")
 
 @app.get("/api/audit")
-async def api_audit(username: str, api_key: str, db: Session = Depends(get_db)):
+async def api_audit(
+    api_key: str = Header(..., alias="X-API-Key"),
+    db: Session = Depends(get_db)
+):
+    """
+    API audit endpoint for Pro/Enterprise users.
+    Security: Uses header-based API key authentication with new APIKey table.
+    """
     try:
-        user = db.query(User).filter(User.username == username).first()
-        if not user or user.api_key != api_key or user.tier not in ["pro", "enterprise"]:
-            raise HTTPException(status_code=403, detail="API access requires Pro/Enterprise tier and valid API key")
-        
-        logger.info(f"API audit endpoint accessed by {username}")
-        return {"message": "API audit endpoint (Pro/Enterprise tier)"}
+        # Check new APIKey table (supports multiple keys per user)
+        api_key_obj = db.query(APIKey).filter(
+            APIKey.key == api_key,
+            APIKey.is_active == True
+        ).first()
+
+        if api_key_obj:
+            user = db.query(User).filter(User.id == api_key_obj.user_id).first()
+            if user and user.tier in ["pro", "enterprise"]:
+                # Update last_used_at for tracking
+                api_key_obj.last_used_at = datetime.now()
+                db.commit()
+                logger.info(f"API audit endpoint accessed by {user.username} via APIKey")
+                return {"message": "API audit endpoint (Pro/Enterprise tier)", "user": user.username}
+
+        # Fallback: check legacy user.api_key field for backward compatibility
+        user = db.query(User).filter(User.api_key == api_key).first()
+        if user and user.tier in ["pro", "enterprise"]:
+            logger.info(f"API audit endpoint accessed by {user.username} via legacy api_key")
+            return {"message": "API audit endpoint (Pro/Enterprise tier)", "user": user.username}
+
+        raise HTTPException(status_code=403, detail="API access requires Pro/Enterprise tier and valid API key")
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"API audit error for {username}: {str(e)}")
+        logger.error(f"API audit error: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/api/ws-token")
@@ -7358,13 +7400,25 @@ async def submit_audit_to_queue(
 
 
 @app.get("/audit/status/{job_id}")
-async def get_audit_status(job_id: str) -> dict:
-    """Get the current status of a queued audit job."""
-    status = await audit_queue.get_status(job_id)
-    
-    if status.get("status") == "not_found":
+async def get_audit_status(job_id: str, request: Request) -> dict:
+    """Get the current status of a queued audit job. Security: Only job owner can check status."""
+    # Security: Verify ownership to prevent IDOR
+    session_username = request.session.get("username")
+    userinfo = request.session.get("userinfo")
+    session_email = userinfo.get("email") if userinfo else None
+
+    job = audit_queue.jobs.get(job_id)
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
+    # Verify the job belongs to the requesting user (check username or email)
+    if job.username not in [session_username, session_email, "guest"]:
+        # Allow guest jobs to be checked by anyone (they're anonymous anyway)
+        if job.username != "guest":
+            logger.warning(f"IDOR attempt: {session_username} tried to access job {job_id} owned by {job.username}")
+            raise HTTPException(status_code=403, detail="Access denied")
+
+    status = await audit_queue.get_status(job_id)
     return status
 
 
