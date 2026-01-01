@@ -2343,7 +2343,7 @@ document.addEventListener("DOMContentLoaded", () => {
               "Slither + Mythril + Claude AI",
               "Echidna fuzzing engine",
               "On-chain data analysis",
-              "API access (3 keys)",
+              "API access (5 keys)",
               "Priority queue & support"
             );
           } else if (tier === "starter") {
