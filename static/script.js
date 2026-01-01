@@ -1990,26 +1990,63 @@ document.addEventListener("DOMContentLoaded", () => {
 
         // NEW: Direct success from backend (no session_id needed)
         if (upgradeStatus === "success") {
-          usageWarning.textContent =
-            message || `Tier upgrade to ${tier} completed`;
-          usageWarning.classList.add("success");
           console.log(
-            `[DEBUG] Direct upgrade success: tier=${tier}, time=${new Date().toISOString()}`
+            `[PAYMENT] ✅ Upgrade success detected: tier=${tier}, time=${new Date().toISOString()}`
           );
+
+          // Show immediate success feedback
+          usageWarning.textContent = message || `🎉 Tier upgrade to ${tier} completed!`;
+          usageWarning.classList.remove("error", "info");
+          usageWarning.classList.add("success");
+          usageWarning.style.display = "block";
+
+          // Clean URL immediately for good UX
+          window.history.replaceState({}, document.title, "/ui");
+
+          // Small delay to ensure backend DB transaction is fully committed
+          // This prevents race conditions where tier isn't updated yet
+          await new Promise(resolve => setTimeout(resolve, 300));
+
+          // Fetch fresh tier data to update UI
+          console.log("[PAYMENT] Refreshing tier data after upgrade...");
+          await fetchTierData();
+          await updateAuthStatus();
+
+          // Force sidebar refresh to show new tier
+          const sidebarTierName = document.getElementById("sidebar-tier-name");
+          if (sidebarTierName && tier) {
+            const tierNameCap = tier.charAt(0).toUpperCase() + tier.slice(1);
+            sidebarTierName.textContent = tierNameCap;
+          }
+
+          console.log("[PAYMENT] ✅ UI fully refreshed with new tier");
+          return;
+        }
+
+        // Handle upgrade cancellation (user closed Stripe checkout)
+        if (upgradeStatus === "cancel") {
+          console.log(`[PAYMENT] Upgrade cancelled by user, time=${new Date().toISOString()}`);
+          usageWarning.textContent = "Upgrade cancelled. You can try again anytime.";
+          usageWarning.classList.remove("success", "error");
+          usageWarning.classList.add("info");
+          usageWarning.style.display = "block";
           window.history.replaceState({}, document.title, "/ui");
           await fetchTierData();
           await updateAuthStatus();
           return;
         }
 
-        // NEW: Direct failure
+        // Handle upgrade failure
         if (upgradeStatus === "failed" || upgradeStatus === "error") {
-          usageWarning.textContent = message || "Tier upgrade failed";
+          console.log(`[PAYMENT] ❌ Upgrade failed: message=${message}, time=${new Date().toISOString()}`);
+          usageWarning.textContent = message || "Tier upgrade failed. Please try again or contact support.";
+          usageWarning.classList.remove("success", "info");
           usageWarning.classList.add("error");
-          console.log(
-            `[DEBUG] Direct upgrade failed: message=${message}, time=${new Date().toISOString()}`
-          );
+          usageWarning.style.display = "block";
           window.history.replaceState({}, document.title, "/ui");
+          // Still fetch tier data so UI is in sync
+          await fetchTierData();
+          await updateAuthStatus();
           return;
         }
 
@@ -2064,16 +2101,30 @@ document.addEventListener("DOMContentLoaded", () => {
               );
             }
             localStorage.setItem("username", username);
-            usageWarning.textContent = `Successfully completed ${
-              tempId ? "Enterprise audit" : "tier upgrade"
-            }`;
+
+            // Show immediate success feedback
+            const successMsg = tempId ? "Enterprise audit completed!" : "🎉 Tier upgrade completed!";
+            usageWarning.textContent = successMsg;
+            usageWarning.classList.remove("error", "info");
             usageWarning.classList.add("success");
+            usageWarning.style.display = "block";
+
             console.log(
-              `[DEBUG] Post-payment completed: endpoint=${endpoint}, time=${new Date().toISOString()}`
+              `[PAYMENT] ✅ Post-payment completed: endpoint=${endpoint}, time=${new Date().toISOString()}`
             );
+
+            // Clean URL immediately
+            window.history.replaceState({}, document.title, "/ui");
+
+            // Small delay to ensure DB is fully committed
+            await new Promise(resolve => setTimeout(resolve, 300));
+
+            // Refresh all UI data
+            console.log("[PAYMENT] Refreshing tier data after checkout completion...");
             await fetchTierData();
             await updateAuthStatus();
-            window.history.replaceState({}, document.title, "/ui");
+
+            console.log("[PAYMENT] ✅ UI fully refreshed");
           } catch (error) {
             console.error(
               `[ERROR] Post-payment redirect error: ${
@@ -4968,18 +5019,30 @@ Key: ${data.api_key}
         checkLegalAcceptance();
       }, 1000);
 
-      // Initial tier data fetch
-      await fetchTierData(); 
-      await updateAuthStatus();
-      
-      // ← NEW: Calm, efficient auth+tier refresh every 30 seconds (no more spam)
+      // ═══════════════════════════════════════════════════════════════════════
+      // CRITICAL FIX: Handle post-payment redirect FIRST, before fetching tier
+      // This ensures users see their upgraded tier immediately after Stripe payment
+      // ═══════════════════════════════════════════════════════════════════════
+      const urlParams = new URLSearchParams(window.location.search);
+      const hasPaymentRedirect = urlParams.has("upgrade") || urlParams.has("session_id");
+
+      if (hasPaymentRedirect) {
+        // User is returning from Stripe - handle payment completion FIRST
+        debugLog("[PAYMENT] Post-payment redirect detected, handling before tier fetch");
+        await handlePostPaymentRedirect();
+        // handlePostPaymentRedirect already calls fetchTierData() and updateAuthStatus()
+      } else {
+        // Normal page load - fetch tier data normally
+        await fetchTierData();
+        await updateAuthStatus();
+      }
+
+      // Calm, efficient auth+tier refresh every 30 seconds (no spam)
       if (window.authTierInterval) clearInterval(window.authTierInterval);
       window.authTierInterval = setInterval(async () => {
         await updateAuthStatus();
         await fetchTierData();
       }, 30000);
-      
-      handlePostPaymentRedirect();
     } // Closing brace for waitForDOM callback
   ); // Closing parenthesis for waitForDOM function call
 
