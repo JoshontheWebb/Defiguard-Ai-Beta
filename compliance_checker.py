@@ -154,7 +154,16 @@ class ComplianceChecker:
         }
     
     def analyze_mica_compliance(self, code: str, contract_type: str) -> Dict[str, Any]:
-        """Check MiCA compliance based on contract type."""
+        """
+        Check MiCA compliance based on contract type.
+
+        Args:
+            code: Solidity source code
+            contract_type: Type of contract (e.g., 'defi', 'token', 'nft')
+
+        Returns:
+            Dict containing compliance status, violations, and recommendations
+        """
         results = {
             "compliant": True,
             "violations": [],
@@ -185,7 +194,16 @@ class ComplianceChecker:
         return results
     
     def analyze_sec_compliance(self, code: str, token_features: Dict[str, bool]) -> Dict[str, Any]:
-        """Analyze SEC compliance (Howey Test + FIT21)."""
+        """
+        Analyze SEC compliance (Howey Test + FIT21).
+
+        Args:
+            code: Solidity source code
+            token_features: Dict of detected token features
+
+        Returns:
+            Dict containing security classification, Howey factors, and recommendations
+        """
         results = {
             "is_security": False,
             "howey_factors": [],
@@ -215,7 +233,15 @@ class ComplianceChecker:
         return results
     
     def scan_attack_vectors(self, code: str) -> List[Dict[str, Any]]:
-        """Scan for known attack patterns."""
+        """
+        Scan for known attack patterns in smart contract code.
+
+        Args:
+            code: Solidity source code
+
+        Returns:
+            List of detected attack vectors with severity and required checks
+        """
         findings = []
         
         for vector_name, vector_data in self.attack_vectors.items():

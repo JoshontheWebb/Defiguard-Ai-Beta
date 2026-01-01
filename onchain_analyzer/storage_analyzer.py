@@ -165,8 +165,8 @@ class StorageAnalyzer:
                     pending = contract.functions.pendingOwner().call()
                     if pending and pending != "0x" + "0" * 40:
                         result["pending_owner"] = pending
-                except:
-                    pass
+                except Exception:
+                    pass  # pendingOwner() may not exist on all contracts
 
                 return result
 
@@ -295,8 +295,8 @@ class StorageAnalyzer:
                 result["has_access_control"] = True
                 result["roles_detected"].append("DEFAULT_ADMIN_ROLE")
 
-            except:
-                # Contract doesn't have AccessControl
+            except Exception:
+                # Contract doesn't have AccessControl interface
                 return result
 
             # Try to identify role holders by checking common roles
@@ -308,8 +308,8 @@ class StorageAnalyzer:
                     if role_admin:
                         result["roles_detected"].append(role_name)
 
-                except:
-                    pass
+                except Exception:
+                    pass  # Role may not exist in this contract
 
         except Exception as e:
             logger.debug(f"Access control check failed: {e}")
@@ -331,16 +331,16 @@ class StorageAnalyzer:
                 data = self.w3.eth.get_storage_at(address, i)
                 if data != b'\x00' * 32:
                     slots[f"slot_{i}"] = data.hex()
-            except:
-                pass
+            except Exception:
+                pass  # Storage read may fail for various RPC reasons
 
         # Read EIP-1967 slots
         try:
             impl_data = self.w3.eth.get_storage_at(address, int(EIP1967_ADMIN_SLOT, 16))
             if impl_data != b'\x00' * 32:
                 slots["eip1967_admin"] = impl_data.hex()
-        except:
-            pass
+        except Exception:
+            pass  # EIP-1967 slot may not exist
 
         return slots
 
