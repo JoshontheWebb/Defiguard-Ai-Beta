@@ -6150,8 +6150,9 @@ async def complete_tier_checkout(
             request.session["user_id"] = user.id
             request.session["username"] = user.username
             logger.info(f"Session re-established for {username} after successful Stripe payment")
-        
-        return RedirectResponse(url="/ui?upgrade=success&message=Tier%20upgrade%20completed")
+
+        # Include tier in redirect so frontend can show it immediately
+        return RedirectResponse(url=f"/ui?upgrade=success&tier={urllib.parse.quote(normalized_tier)}&message=Tier%20upgrade%20completed")
     
     except Exception as e:
         logger.error(f"Complete-tier-checkout error: {str(e)}")

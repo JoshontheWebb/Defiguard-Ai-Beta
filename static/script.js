@@ -2052,11 +2052,13 @@ document.addEventListener("DOMContentLoaded", () => {
             `[PAYMENT] ✅ Upgrade success detected: tier=${tier}, time=${new Date().toISOString()}`
           );
 
-          // Show immediate success feedback
-          usageWarning.textContent = message || `🎉 Tier upgrade to ${tier} completed!`;
-          usageWarning.classList.remove("error", "info");
-          usageWarning.classList.add("success");
-          usageWarning.style.display = "block";
+          // Show immediate success feedback (with null check)
+          if (usageWarning) {
+            usageWarning.textContent = message || `🎉 Tier upgrade completed!`;
+            usageWarning.classList.remove("error", "info");
+            usageWarning.classList.add("success");
+            usageWarning.style.display = "block";
+          }
 
           // Clean URL immediately for good UX
           window.history.replaceState({}, document.title, "/ui");
@@ -2067,14 +2069,20 @@ document.addEventListener("DOMContentLoaded", () => {
 
           // Fetch fresh tier data to update UI
           console.log("[PAYMENT] Refreshing tier data after upgrade...");
-          await fetchTierData();
-          await updateAuthStatus();
+          try {
+            await fetchTierData();
+            await updateAuthStatus();
 
-          // Force sidebar refresh to show new tier
-          const sidebarTierName = document.getElementById("sidebar-tier-name");
-          if (sidebarTierName && tier) {
-            const tierNameCap = tier.charAt(0).toUpperCase() + tier.slice(1);
-            sidebarTierName.textContent = tierNameCap;
+            // If tier was provided in URL, update sidebar immediately
+            if (tier) {
+              const sidebarTierNameEl = document.getElementById("sidebar-tier-name");
+              if (sidebarTierNameEl) {
+                const tierNameCap = tier.charAt(0).toUpperCase() + tier.slice(1);
+                sidebarTierNameEl.textContent = tierNameCap;
+              }
+            }
+          } catch (fetchErr) {
+            console.error("[PAYMENT] Error refreshing tier data:", fetchErr);
           }
 
           console.log("[PAYMENT] ✅ UI fully refreshed with new tier");
@@ -2084,27 +2092,39 @@ document.addEventListener("DOMContentLoaded", () => {
         // Handle upgrade cancellation (user closed Stripe checkout)
         if (upgradeStatus === "cancel") {
           console.log(`[PAYMENT] Upgrade cancelled by user, time=${new Date().toISOString()}`);
-          usageWarning.textContent = "Upgrade cancelled. You can try again anytime.";
-          usageWarning.classList.remove("success", "error");
-          usageWarning.classList.add("info");
-          usageWarning.style.display = "block";
+          if (usageWarning) {
+            usageWarning.textContent = "Upgrade cancelled. You can try again anytime.";
+            usageWarning.classList.remove("success", "error");
+            usageWarning.classList.add("info");
+            usageWarning.style.display = "block";
+          }
           window.history.replaceState({}, document.title, "/ui");
-          await fetchTierData();
-          await updateAuthStatus();
+          try {
+            await fetchTierData();
+            await updateAuthStatus();
+          } catch (e) {
+            console.error("[PAYMENT] Error refreshing after cancel:", e);
+          }
           return;
         }
 
         // Handle upgrade failure
         if (upgradeStatus === "failed" || upgradeStatus === "error") {
           console.log(`[PAYMENT] ❌ Upgrade failed: message=${message}, time=${new Date().toISOString()}`);
-          usageWarning.textContent = message || "Tier upgrade failed. Please try again or contact support.";
-          usageWarning.classList.remove("success", "info");
-          usageWarning.classList.add("error");
-          usageWarning.style.display = "block";
+          if (usageWarning) {
+            usageWarning.textContent = message || "Tier upgrade failed. Please try again or contact support.";
+            usageWarning.classList.remove("success", "info");
+            usageWarning.classList.add("error");
+            usageWarning.style.display = "block";
+          }
           window.history.replaceState({}, document.title, "/ui");
           // Still fetch tier data so UI is in sync
-          await fetchTierData();
-          await updateAuthStatus();
+          try {
+            await fetchTierData();
+            await updateAuthStatus();
+          } catch (e) {
+            console.error("[PAYMENT] Error refreshing after failure:", e);
+          }
           return;
         }
 
@@ -2133,9 +2153,10 @@ document.addEventListener("DOMContentLoaded", () => {
               console.error(
                 `[ERROR] Invalid post-payment redirect: missing tier or temp_id, time=${new Date().toISOString()}`
               );
-              usageWarning.textContent =
-                "Error: Invalid payment redirect parameters";
-              usageWarning.classList.add("error");
+              if (usageWarning) {
+                usageWarning.textContent = "Error: Invalid payment redirect parameters";
+                usageWarning.classList.add("error");
+              }
               return;
             }
             console.log(
@@ -2162,10 +2183,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
             // Show immediate success feedback
             const successMsg = tempId ? "Enterprise audit completed!" : "🎉 Tier upgrade completed!";
-            usageWarning.textContent = successMsg;
-            usageWarning.classList.remove("error", "info");
-            usageWarning.classList.add("success");
-            usageWarning.style.display = "block";
+            if (usageWarning) {
+              usageWarning.textContent = successMsg;
+              usageWarning.classList.remove("error", "info");
+              usageWarning.classList.add("success");
+              usageWarning.style.display = "block";
+            }
 
             console.log(
               `[PAYMENT] ✅ Post-payment completed: endpoint=${endpoint}, time=${new Date().toISOString()}`
@@ -2179,8 +2202,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
             // Refresh all UI data
             console.log("[PAYMENT] Refreshing tier data after checkout completion...");
-            await fetchTierData();
-            await updateAuthStatus();
+            try {
+              await fetchTierData();
+              await updateAuthStatus();
+            } catch (refreshErr) {
+              console.error("[PAYMENT] Error refreshing after checkout:", refreshErr);
+            }
 
             console.log("[PAYMENT] ✅ UI fully refreshed");
           } catch (error) {
@@ -2189,10 +2216,12 @@ document.addEventListener("DOMContentLoaded", () => {
                 error.message
               }, endpoint=${endpoint}, time=${new Date().toISOString()}`
             );
-            usageWarning.textContent = `Error completing ${
-              tempId ? "Enterprise audit" : "tier upgrade"
-            }: ${error.message}`;
-            usageWarning.classList.add("error");
+            if (usageWarning) {
+              usageWarning.textContent = `Error completing ${
+                tempId ? "Enterprise audit" : "tier upgrade"
+              }: ${error.message}`;
+              usageWarning.classList.add("error");
+            }
             if (
               error.message.includes("User not found") ||
               error.message.includes("Please login")
@@ -5081,25 +5110,34 @@ Key: ${data.api_key}
       // CRITICAL FIX: Handle post-payment redirect FIRST, before fetching tier
       // This ensures users see their upgraded tier immediately after Stripe payment
       // ═══════════════════════════════════════════════════════════════════════
-      const urlParams = new URLSearchParams(window.location.search);
-      const hasPaymentRedirect = urlParams.has("upgrade") || urlParams.has("session_id");
+      try {
+        const urlParams = new URLSearchParams(window.location.search);
+        const hasPaymentRedirect = urlParams.has("upgrade") || urlParams.has("session_id");
 
-      if (hasPaymentRedirect) {
-        // User is returning from Stripe - handle payment completion FIRST
-        debugLog("[PAYMENT] Post-payment redirect detected, handling before tier fetch");
-        await handlePostPaymentRedirect();
-        // handlePostPaymentRedirect already calls fetchTierData() and updateAuthStatus()
-      } else {
-        // Normal page load - fetch tier data normally
-        await fetchTierData();
-        await updateAuthStatus();
+        if (hasPaymentRedirect) {
+          // User is returning from Stripe - handle payment completion FIRST
+          debugLog("[PAYMENT] Post-payment redirect detected, handling before tier fetch");
+          await handlePostPaymentRedirect();
+          // handlePostPaymentRedirect already calls fetchTierData() and updateAuthStatus()
+        } else {
+          // Normal page load - fetch tier data normally
+          await fetchTierData();
+          await updateAuthStatus();
+        }
+      } catch (initErr) {
+        console.error("[INIT] Error during tier/payment initialization:", initErr);
+        // Still continue with rest of initialization
       }
 
       // Calm, efficient auth+tier refresh every 30 seconds (no spam)
       if (window.authTierInterval) clearInterval(window.authTierInterval);
       window.authTierInterval = setInterval(async () => {
-        await updateAuthStatus();
-        await fetchTierData();
+        try {
+          await updateAuthStatus();
+          await fetchTierData();
+        } catch (e) {
+          console.error("[REFRESH] Error during periodic refresh:", e);
+        }
       }, 30000);
     } // Closing brace for waitForDOM callback
   ); // Closing parenthesis for waitForDOM function call
