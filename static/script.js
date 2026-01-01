@@ -239,9 +239,9 @@ window.showAuditKeyRetrievalModal = function() {
 
     document.body.appendChild(modal);
 
-    // Load recent keys from localStorage
+    // Load recent keys from sessionStorage (more secure than localStorage - clears on tab close)
     try {
-        const savedKeys = JSON.parse(localStorage.getItem('auditKeys') || '[]');
+        const savedKeys = JSON.parse(sessionStorage.getItem('auditKeys') || '[]');
         if (savedKeys.length > 0) {
             const recentContainer = document.getElementById('recent-audit-keys');
 
@@ -644,14 +644,14 @@ class AuditQueueTracker {
             document.body.appendChild(notification);
         }
 
-        // Store in localStorage for persistence (only if valid format)
+        // Store in sessionStorage for security (clears on tab close, not vulnerable to XSS persistence)
         try {
-            const savedKeys = JSON.parse(localStorage.getItem('auditKeys') || '[]');
+            const savedKeys = JSON.parse(sessionStorage.getItem('auditKeys') || '[]');
             savedKeys.unshift({ key: auditKey, timestamp: Date.now() });
             // Keep only last 10 keys
-            localStorage.setItem('auditKeys', JSON.stringify(savedKeys.slice(0, 10)));
+            sessionStorage.setItem('auditKeys', JSON.stringify(savedKeys.slice(0, 10)));
         } catch (e) {
-            console.warn('Could not save audit key to localStorage:', e);
+            console.warn('Could not save audit key to sessionStorage:', e);
         }
     }
     
