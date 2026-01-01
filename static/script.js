@@ -1763,7 +1763,12 @@ document.addEventListener("DOMContentLoaded", () => {
       const resp = await fetch('/me', { credentials: 'include' });
       if (resp.ok) {
         const data = await resp.json();
-        return data.logged_in ? { username: data.username, sub: data.sub, provider: data.provider } : null;
+        return data.logged_in ? {
+          username: data.username,
+          sub: data.sub,
+          provider: data.provider,
+          member_since: data.member_since
+        } : null;
       }
     } catch (e) {
       console.debug('[AUTH] Failed to fetch /me');
@@ -4195,9 +4200,17 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             modalTier.className = `badge badge-${tier}`;
           }
           
-          // Member since (you can add actual date from backend)
+          // Member since (from backend)
           if (modalMemberSince) {
-            modalMemberSince.textContent = "December 2024"; // TODO: Get from backend
+            if (user?.member_since) {
+              const memberDate = new Date(user.member_since);
+              modalMemberSince.textContent = memberDate.toLocaleDateString('en-US', {
+                month: 'long',
+                year: 'numeric'
+              });
+            } else {
+              modalMemberSince.textContent = "N/A";
+            }
           }
           
           // Usage statistics

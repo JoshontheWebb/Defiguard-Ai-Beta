@@ -986,6 +986,9 @@ class User(Base):
     
     # NFT minting (for future)
     wallet_address: Mapped[Optional[str]] = mapped_column(String, nullable=True, unique=True)
+
+    # Account tracking
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
    
 # Note: ForeignKey and relationship already imported from sqlalchemy at lines 110-111
 
@@ -1826,13 +1829,21 @@ async def me_endpoint(request: Request, db: Session = Depends(get_db)) -> dict[s
             ui = request.session['userinfo']
             provider = ui.get('identities', [{}])[0].get('provider', 'unknown') if ui.get('identities') else 'unknown'
 
+        # Get member_since date (created_at or fallback to last_reset)
+        member_since = None
+        if hasattr(user, 'created_at') and user.created_at:
+            member_since = user.created_at.isoformat()
+        elif user.last_reset:
+            member_since = user.last_reset.isoformat()
+
         return {
             "sub": user.auth0_sub,
             "email": user.email,
             "username": user.username,
             "provider": user.auth0_sub.split("|")[0] if user.auth0_sub and "|" in user.auth0_sub else "auth0",
             "logged_in": True,
-            "tier": user.tier
+            "tier": user.tier,
+            "member_since": member_since
         }
     except HTTPException:
         raise
@@ -3773,19 +3784,16 @@ class UsageTracker:
                 logger.debug(f"Initialized last_reset for {username} to {lr_str}")
             
             elapsed_days = (current_time - user.last_reset).days
-            
+
+            # Reset usage counter monthly for free tier only
+            # Paid tiers are managed via Stripe webhooks, not time-based downgrade
             if user.tier == "free" and elapsed_days >= 30:
                 self.count = 0
                 user.last_reset = current_time
                 logger.info(f"Reset usage for {username} on free tier after 30 days")
-            elif user.tier in ["beginner", "starter", "pro"] and elapsed_days >= 30:
-                user.tier = "free"
-                user.has_diamond = False
-                self.count = 0
-                user.last_reset = current_time
-                if commit:
-                    db.commit()
-                logger.info(f"Downgraded {username} to free tier due to non-payment")
+            # NOTE: Paid tier downgrades are handled via Stripe webhook (invoice.payment_failed)
+            # We do NOT auto-downgrade subscribers based on elapsed time - this punishes users
+            # who take breaks but maintain active subscriptions
             
             tier_name = getattr(user, "tier", "free") or "free"
             has_diamond_flag = bool(getattr(user, "has_diamond", False))
@@ -5391,7 +5399,9 @@ async def get_tier(request: Request, db: Session = Depends(get_db)) -> dict[str,
 
     feature_flags = usage_tracker.feature_flags.get(flags_tier, usage_tracker.feature_flags["free"])
     api_key = user.api_key if user.tier in ["pro", "enterprise"] or has_diamond else None
-    audit_count = usage_tracker.count
+
+    # Get per-user audit count from database (not global counter)
+    audit_count = user.total_audits if hasattr(user, 'total_audits') else 0
     
     # Map audit limits
     audit_limit_map = {
@@ -6220,15 +6230,22 @@ async def complete_diamond_audit(
             if not os.path.exists(real_path):
                 raise HTTPException(status_code=404, detail="Temporary file not found")
 
-            file_size = os.path.getsize(real_path)
-            with open(real_path, "rb") as f:
-                file = UploadFile(filename="temp.sol", file=f, size=file_size)
-                _result: dict[str, Any] | None = await audit_contract(
-                    file=file, contract_address=None, db=db, request=request
-                )
-
-            os.unlink(real_path)
-            logger.info(f"Diamond audit completed for {session_username} after payment")
+            # Process audit with guaranteed temp file cleanup
+            try:
+                file_size = os.path.getsize(real_path)
+                with open(real_path, "rb") as f:
+                    file = UploadFile(filename="temp.sol", file=f, size=file_size)
+                    _result: dict[str, Any] | None = await audit_contract(
+                        file=file, contract_address=None, db=db, request=request
+                    )
+                logger.info(f"Diamond audit completed for {session_username} after payment")
+            finally:
+                # Always clean up temp file, even if audit fails
+                if os.path.exists(real_path):
+                    try:
+                        os.unlink(real_path)
+                    except Exception as cleanup_err:
+                        logger.warning(f"Failed to cleanup temp file {real_path}: {cleanup_err}")
             return RedirectResponse(url="/ui?upgrade=success")
         else:
             logger.error(f"Payment not completed for {session_username}, session_id={session_id}")
