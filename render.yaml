@@ -46,18 +46,55 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.13.4"
-      # Add your other env vars here with sync: false for secrets
+      - key: ENVIRONMENT
+        value: "production"
+      # AI API Keys (at least one required)
+      - key: ANTHROPIC_API_KEY
+        sync: false
       - key: GROK_API_KEY
+        sync: false
+      # Auth0 Configuration (required)
+      - key: AUTH0_DOMAIN
         sync: false
       - key: AUTH0_CLIENT_ID
         sync: false
       - key: AUTH0_CLIENT_SECRET
         sync: false
-      - key: AUTH0_DOMAIN
+      # Stripe Configuration (required)
+      - key: STRIPE_API_KEY
         sync: false
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_PUBLISHABLE_KEY
         sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      # Stripe Price IDs
+      - key: STRIPE_PRICE_PRO
+        sync: false
+      - key: STRIPE_PRICE_STARTER
+        sync: false
+      - key: STRIPE_PRICE_ENTERPRISE
+        sync: false
+      - key: STRIPE_PRICE_BEGINNER
+        sync: false
+      - key: STRIPE_PRICE_DIAMOND
+        sync: false
+      - key: STRIPE_METERED_PRICE_DIAMOND
+        sync: false
+      # Blockchain Configuration (required)
+      - key: INFURA_PROJECT_ID
+        sync: false
       - key: WEB3_PROVIDER_URL
+        sync: false
+      # Database (required)
+      - key: DATABASE_URL
+        sync: false
+      # Redis (required)
+      - key: REDIS_URL
+        sync: false
+      # Security (required)
+      - key: APP_SECRET_KEY
+        sync: false
+      - key: ADMIN_KEY
         sync: false

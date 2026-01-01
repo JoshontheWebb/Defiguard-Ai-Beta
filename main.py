@@ -1532,7 +1532,6 @@ async def lifespan(app: FastAPI):
     print("=" * 80)
     
     required_env_vars = [
-        "GROK_API_KEY",
         "INFURA_PROJECT_ID",
         "STRIPE_API_KEY",
         "STRIPE_WEBHOOK_SECRET",
@@ -1540,13 +1539,19 @@ async def lifespan(app: FastAPI):
         "AUTH0_CLIENT_ID",
         "AUTH0_CLIENT_SECRET",
         "APP_SECRET_KEY",
-        "REDIS_URL"
+        "REDIS_URL",
+        "DATABASE_URL"
     ]
-    
+
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
     if missing_vars:
         logger.error(f"Missing critical environment variables: {', '.join(missing_vars)}")
         raise RuntimeError(f"Missing critical environment variables: {', '.join(missing_vars)}")
+
+    # Require at least one AI API key (ANTHROPIC preferred, GROK as fallback)
+    if not os.getenv("ANTHROPIC_API_KEY") and not os.getenv("GROK_API_KEY"):
+        logger.error("No AI API key configured - requires ANTHROPIC_API_KEY or GROK_API_KEY")
+        raise RuntimeError("No AI API key configured - requires ANTHROPIC_API_KEY or GROK_API_KEY")
     
     # Log Stripe price IDs
     for var in ["STRIPE_PRICE_PRO", "STRIPE_PRICE_STARTER", "STRIPE_PRICE_ENTERPRISE", 
@@ -1719,7 +1724,7 @@ async def callback(request: Request):
         logger.info(f"[CALLBACK] Cached auth_provider={provider} for {user.username}")
         
         response = RedirectResponse(url="/ui")
-        response.set_cookie("username", str(user.username), httponly=False, secure=True, samesite="lax", max_age=2592000)
+        response.set_cookie("username", str(user.username), httponly=True, secure=True, samesite="lax", max_age=2592000)
         logger.info(f"Auth0 login successful: {user.username}")
         return response
         
@@ -5177,11 +5182,15 @@ async def read_ui(
             
             if temp_id:
                 logger.info(f"Processing post-payment redirect for Diamond audit, username={effective_username}, session_id={session_id}, temp_id={temp_id}")
-                return RedirectResponse(url=f"/complete-diamond-audit?session_id={session_id}&temp_id={temp_id}&username={effective_username}")
-            
+                # URL-encode username to prevent parameter injection
+                safe_username = urllib.parse.quote(effective_username, safe='')
+                return RedirectResponse(url=f"/complete-diamond-audit?session_id={session_id}&temp_id={temp_id}&username={safe_username}")
+
             if tier:
                 logger.info(f"Processing post-payment redirect for tier upgrade, username={effective_username}, session_id={session_id}, tier={tier}, has_diamond={has_diamond}")
-                return RedirectResponse(url=f"/complete-tier-checkout?session_id={session_id}&tier={tier}&has_diamond={has_diamond}&username={effective_username}")
+                # URL-encode username to prevent parameter injection
+                safe_username = urllib.parse.quote(effective_username, safe='')
+                return RedirectResponse(url=f"/complete-tier-checkout?session_id={session_id}&tier={tier}&has_diamond={has_diamond}&username={safe_username}")
         
         template = jinja_env.get_template("index.html")
         userinfo = request.session.get("userinfo", {})
@@ -5557,7 +5566,9 @@ async def create_tier_checkout(
         line_items.append({"price": STRIPE_PRICE_DIAMOND, "quantity": 1})
     
     base_url = f"{request.base_url}".rstrip("/")
-    success_url = f"{base_url}/complete-tier-checkout?session_id={{CHECKOUT_SESSION_ID}}&tier={tier}&has_diamond={has_diamond}&username={effective_username}"
+    # URL-encode username to prevent parameter injection
+    safe_username = urllib.parse.quote(effective_username, safe='')
+    success_url = f"{base_url}/complete-tier-checkout?session_id={{CHECKOUT_SESSION_ID}}&tier={tier}&has_diamond={has_diamond}&username={safe_username}"
     cancel_url = f"{base_url}/ui?upgrade=cancel"
     
     try:
@@ -5793,14 +5804,19 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
 @app.websocket("/ws-audit-log")
 async def websocket_audit_log(websocket: WebSocket, token: str = Query(None)):
     # Security: Validate token to prevent unauthorized subscription to other users' audit logs
-    effective_username = "guest"
-    if token:
-        validated_username = verify_ws_token(token, _secret_key)
-        if validated_username:
-            effective_username = validated_username
-        else:
-            logger.warning(f"[WS_AUDIT] Invalid token attempted: {token[:20]}...")
+    # Reject connection BEFORE accept() if token is invalid
+    if not token:
+        logger.warning("[WS_AUDIT] Connection rejected: No token provided")
+        await websocket.close(code=4001, reason="Authentication required")
+        return
 
+    validated_username = verify_ws_token(token, _secret_key)
+    if not validated_username:
+        logger.warning(f"[WS_AUDIT] Connection rejected: Invalid token {token[:20]}...")
+        await websocket.close(code=4003, reason="Invalid authentication token")
+        return
+
+    effective_username = validated_username
     await websocket.accept()
     active_audit_websockets[effective_username] = websocket
     logger.info(f"[WS_AUDIT] ✅ Connected: '{effective_username}' (total connections: {len(active_audit_websockets)})")
@@ -7610,19 +7626,32 @@ async def resend_audit_email(
 
 
 @app.websocket("/ws/job/{job_id}")
-async def websocket_job_status(websocket: WebSocket, job_id: str):
+async def websocket_job_status(websocket: WebSocket, job_id: str, token: str = Query(None)):
     """
     WebSocket endpoint for real-time job status updates.
     Client connects here after submitting an audit to receive live updates.
+    Requires valid authentication token.
     """
+    # Security: Validate token before accepting connection
+    if not token:
+        logger.warning(f"[WS_JOB] Connection rejected: No token provided for job {job_id[:8]}...")
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+
+    validated_username = verify_ws_token(token, _secret_key)
+    if not validated_username:
+        logger.warning(f"[WS_JOB] Connection rejected: Invalid token for job {job_id[:8]}...")
+        await websocket.close(code=4003, reason="Invalid authentication token")
+        return
+
     await websocket.accept()
-    
+
     # Register this WebSocket for the job
     if job_id not in active_job_websockets:
         active_job_websockets[job_id] = []
     active_job_websockets[job_id].append(websocket)
-    
-    logger.debug(f"[WS_JOB] Client connected for job {job_id[:8]}...")
+
+    logger.debug(f"[WS_JOB] Client {validated_username} connected for job {job_id[:8]}...")
     
     try:
         # Send initial status
@@ -8976,7 +9005,8 @@ async def migrate_tiers(request: Request, db: Session = Depends(get_db), admin_k
     Database migration endpoint to rename old tiers to new names.
     ADMIN ONLY - requires admin_key from environment.
     """
-    if admin_key != os.getenv("ADMIN_KEY"):
+    expected_key = os.getenv("ADMIN_KEY", "")
+    if not admin_key or not expected_key or not secrets.compare_digest(admin_key, expected_key):
         raise HTTPException(status_code=403, detail="Admin access required")
     
     try:
