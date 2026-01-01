@@ -119,6 +119,7 @@ from pydantic import BaseModel, Field, field_validator
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 import requests
+import httpx  # Async HTTP client for non-blocking requests
 import subprocess
 import asyncio
 import hmac
@@ -581,14 +582,38 @@ async def terms_page():
     """Serve the terms of service page."""
     return FileResponse("static/terms-of-service.html", media_type="text/html")
 
+# === CORS CONFIGURATION ===
+# Production origins only - localhost origins controlled by ENVIRONMENT
+def get_cors_origins() -> list[str]:
+    """Get CORS origins based on environment."""
+    # Production origins (always allowed)
+    origins = [
+        "https://defiguard-ai-beta.onrender.com",
+    ]
+
+    # Development origins (only in non-production)
+    environment = os.getenv("ENVIRONMENT", "development").lower()
+    if environment in ("development", "dev", "local", "test"):
+        origins.extend([
+            "http://127.0.0.1:8000",
+            "http://localhost:8000",
+            "http://127.0.0.1:3000",
+            "http://localhost:3000",
+        ])
+        logger.info("[CORS] Development mode: localhost origins enabled")
+    else:
+        logger.info("[CORS] Production mode: localhost origins disabled")
+
+    # Allow additional origins from environment variable (comma-separated)
+    extra_origins = os.getenv("CORS_EXTRA_ORIGINS", "")
+    if extra_origins:
+        origins.extend([o.strip() for o in extra_origins.split(",") if o.strip()])
+
+    return origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:8000",
-        "http://localhost:8000",
-        "https://defiguard-ai-beta.onrender.com",
-        # Add additional origins via environment variable if needed
-    ],
+    allow_origins=get_cors_origins(),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["Authorization", "Content-Type", "X-CSRFToken", "Accept"],
@@ -601,13 +626,19 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add security headers including CSP to all responses."""
 
     # Content Security Policy - restricts resource loading sources
+    # Security notes:
+    # - 'unsafe-inline' required for inline scripts in templates (WalletConnect, queue monitor)
+    #   TODO: Implement nonce-based CSP to remove 'unsafe-inline' entirely
+    # - 'unsafe-eval' REMOVED - verified no code uses eval(), new Function(), or string setTimeout
+    # - esm.sh added for WalletConnect ES module imports
     CSP_POLICY = "; ".join([
         "default-src 'self'",
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://www.googletagmanager.com https://js.stripe.com",
+        # Script sources - 'unsafe-eval' removed (code verified safe)
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://www.googletagmanager.com https://js.stripe.com https://esm.sh",
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com",
         "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com data:",
         "img-src 'self' data: https: blob:",
-        "connect-src 'self' wss: ws: https://api.stripe.com https://*.infura.io https://*.walletconnect.com https://*.auth0.com",
+        "connect-src 'self' wss: ws: https://api.stripe.com https://*.infura.io https://*.walletconnect.com https://*.auth0.com https://esm.sh",
         "frame-src 'self' https://js.stripe.com https://verify.walletconnect.com",
         "object-src 'none'",
         "base-uri 'self'",
@@ -682,61 +713,108 @@ async def certora_job_poller():
     """
     Background task that periodically polls pending Certora jobs.
     Updates job status in database when verification completes.
+
+    Performance optimized:
+    - Uses asyncio.to_thread() for blocking database/HTTP calls
+    - Fetches all job results concurrently using asyncio.gather()
     """
     POLL_INTERVAL = 60  # Check every 60 seconds
     logger.info("[CERTORA] Background job poller started")
+
+    async def fetch_job_result(runner, job_url: str) -> tuple[str, dict]:
+        """Fetch job result in thread pool to avoid blocking event loop."""
+        try:
+            result = await asyncio.to_thread(runner._fetch_job_results, job_url)
+            return (job_url, result)
+        except Exception as e:
+            logger.warning(f"[CERTORA] Error fetching {job_url}: {e}")
+            return (job_url, {"status": "running", "error": str(e)})
+
+    def get_pending_jobs():
+        """Synchronous database query - run in thread pool."""
+        db = SessionLocal()
+        try:
+            jobs = db.query(CertoraJob).filter(
+                CertoraJob.status.in_(["pending", "running"])
+            ).all()
+            # Detach from session for async use - extract needed data
+            return [(j.id, j.job_id, j.job_url, j.status) for j in jobs]
+        finally:
+            db.close()
+
+    def update_job_status(job_id: int, updates: dict):
+        """Synchronous database update - run in thread pool."""
+        db = SessionLocal()
+        try:
+            job = db.query(CertoraJob).filter(CertoraJob.id == job_id).first()
+            if job:
+                for key, value in updates.items():
+                    setattr(job, key, value)
+                db.commit()
+        finally:
+            db.close()
 
     while True:
         try:
             await asyncio.sleep(POLL_INTERVAL)
 
-            # Get all pending/running jobs
-            db = SessionLocal()
-            try:
-                pending_jobs = db.query(CertoraJob).filter(
-                    CertoraJob.status.in_(["pending", "running"])
-                ).all()
+            # Get pending jobs (non-blocking via thread pool)
+            pending_jobs = await asyncio.to_thread(get_pending_jobs)
 
-                if not pending_jobs:
-                    continue
+            if not pending_jobs:
+                continue
 
-                logger.info(f"[CERTORA] Polling {len(pending_jobs)} pending jobs...")
+            logger.info(f"[CERTORA] Polling {len(pending_jobs)} pending jobs concurrently...")
 
-                from certora import CertoraRunner
-                runner = CertoraRunner()
+            from certora import CertoraRunner
+            runner = CertoraRunner()
 
-                for job in pending_jobs:
-                    try:
-                        result = runner._fetch_job_results(job.job_url)
-                        status = result.get("status", "running")
+            # Fetch all job results concurrently (major performance improvement)
+            fetch_tasks = [
+                fetch_job_result(runner, job_url)
+                for (_, _, job_url, _) in pending_jobs
+            ]
+            results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
-                        if status in ["verified", "issues_found"]:
-                            # Job completed!
-                            job.status = "completed"
-                            job.completed_at = datetime.now()
-                            job.rules_verified = result.get("rules_verified", 0)
-                            job.rules_violated = result.get("rules_violated", 0)
-                            job.results_json = json.dumps(result)
-                            db.commit()
-                            logger.info(f"[CERTORA] Job {job.job_id} completed: {job.rules_verified} verified, {job.rules_violated} violated")
+            # Map results by job_url
+            results_map = {}
+            for r in results:
+                if isinstance(r, tuple):
+                    job_url, result = r
+                    results_map[job_url] = result
 
-                        elif status == "error":
-                            job.status = "error"
-                            job.results_json = json.dumps(result)
-                            db.commit()
-                            logger.warning(f"[CERTORA] Job {job.job_id} failed: {result.get('error', 'Unknown error')}")
+            # Update database (batch updates via thread pool)
+            update_tasks = []
+            for (db_id, job_id, job_url, current_status) in pending_jobs:
+                result = results_map.get(job_url, {"status": "running"})
+                status = result.get("status", "running")
 
-                        else:
-                            # Still running - update status
-                            if job.status != "running":
-                                job.status = "running"
-                                db.commit()
+                if status in ["verified", "issues_found"]:
+                    updates = {
+                        "status": "completed",
+                        "completed_at": datetime.now(),
+                        "rules_verified": result.get("rules_verified", 0),
+                        "rules_violated": result.get("rules_violated", 0),
+                        "results_json": json.dumps(result)
+                    }
+                    update_tasks.append(asyncio.to_thread(update_job_status, db_id, updates))
+                    logger.info(f"[CERTORA] Job {job_id} completed: {result.get('rules_verified', 0)} verified, {result.get('rules_violated', 0)} violated")
 
-                    except Exception as e:
-                        logger.warning(f"[CERTORA] Error polling job {job.job_id}: {e}")
+                elif status == "error":
+                    updates = {
+                        "status": "error",
+                        "results_json": json.dumps(result)
+                    }
+                    update_tasks.append(asyncio.to_thread(update_job_status, db_id, updates))
+                    logger.warning(f"[CERTORA] Job {job_id} failed: {result.get('error', 'Unknown error')}")
 
-            finally:
-                db.close()
+                elif current_status != "running":
+                    updates = {"status": "running"}
+                    update_tasks.append(asyncio.to_thread(update_job_status, db_id, updates))
+
+            # Execute all database updates concurrently
+            if update_tasks:
+                await asyncio.gather(*update_tasks, return_exceptions=True)
 
         except Exception as e:
             logger.error(f"[CERTORA] Background poller error: {e}")
@@ -1416,7 +1494,10 @@ async def get_authenticated_user(request: Request, db: Session = Depends(get_db)
                 token = request.session.get("id_token")
                 if token:
                     jwks_url = f"https://{os.getenv('AUTH0_DOMAIN')}/.well-known/jwks.json"
-                    jwks = requests.get(jwks_url).json()
+                    # Use async httpx instead of blocking requests.get()
+                    async with httpx.AsyncClient() as client:
+                        jwks_response = await client.get(jwks_url, timeout=10.0)
+                        jwks = jwks_response.json()
                     unverified_header = jwt.get_unverified_header(token)
                     rsa_key = next((k for k in jwks['keys'] if k['kid'] == unverified_header['kid']), None)
                     if rsa_key:
@@ -2124,8 +2205,6 @@ async def get_wallet_contracts(
             return {"contracts": [], "message": "Etherscan API not configured"}
 
         # Fetch transactions from Etherscan to find contract creations
-        import httpx
-
         async with httpx.AsyncClient() as client:
             # Get normal transactions (contract creations have 'to' = empty)
             response = await client.get(
@@ -2233,8 +2312,6 @@ async def get_contract_source(
 
         if not ETHERSCAN_API_KEY:
             raise HTTPException(status_code=503, detail="Etherscan API not configured")
-
-        import httpx
 
         async with httpx.AsyncClient() as client:
             response = await client.get(
