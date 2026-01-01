@@ -65,13 +65,13 @@ import secrets
 from tempfile import NamedTemporaryFile
 from typing import Optional, Callable, Awaitable, Any, cast
 from fastapi import FastAPI, File, UploadFile, Request, Query, HTTPException, Depends, Response, Header, WebSocket, Body
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response as StarletteResponse
 from starlette.websockets import WebSocketState
 from authlib.integrations.starlette_client import OAuth
 from starlette.middleware.sessions import SessionMiddleware
-from urllib.parse import quote_plus, urlencode
+from urllib.parse import quote_plus, urlencode, urlparse, parse_qs
 from fastapi.middleware.cors import CORSMiddleware
 # Note: Web3 already imported at line 19 for early client initialization
 import stripe
@@ -574,13 +574,11 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.get("/privacy")
 async def privacy_page():
     """Serve the privacy policy page."""
-    from fastapi.responses import FileResponse
     return FileResponse("static/privacy-policy.html", media_type="text/html")
 
 @app.get("/terms")
 async def terms_page():
     """Serve the terms of service page."""
-    from fastapi.responses import FileResponse
     return FileResponse("static/terms-of-service.html", media_type="text/html")
 
 app.add_middleware(
@@ -757,7 +755,6 @@ async def debug_files(admin_key: str = Query(None)):
     expected_key = os.getenv("ADMIN_KEY")
     if not expected_key or not admin_key or not secrets.compare_digest(admin_key, expected_key):
         raise HTTPException(status_code=403, detail="Admin access required")
-    import os
     files = os.listdir("templates") if os.path.exists("templates") else "NO templates folder"
     cwd = os.getcwd()
     return {
@@ -780,7 +777,6 @@ async def login(request: Request, screen_hint: Optional[str] = None):
         response = await oauth.auth0.authorize_redirect(request, redirect_uri)
 
         if screen_hint:
-            from urllib.parse import urlparse, parse_qs, urlencode
             location = response.headers["Location"]
             parsed = urlparse(location)
             params = parse_qs(parsed.query)
@@ -1787,8 +1783,8 @@ async def regenerate_api_key(
                 detail="API key regeneration is only available for Pro and Enterprise tiers"
             )
         
-        # Generate new API key
-        new_api_key = str(uuid.uuid4())
+        # Generate new API key (cryptographically secure)
+        new_api_key = secrets.token_urlsafe(32)
         
         # Update user's API key in database
         user.api_key = new_api_key
@@ -1899,8 +1895,8 @@ async def create_api_key(
                 detail="Pro tier is limited to 5 active API keys. Upgrade to Enterprise for unlimited keys."
             )
         
-        # Generate new API key
-        new_key = str(uuid.uuid4())
+        # Generate new API key (cryptographically secure)
+        new_key = secrets.token_urlsafe(32)
         
         # Create APIKey record
         api_key_obj = APIKey(
@@ -5075,8 +5071,6 @@ async def debug_log(admin_key: str = Query(None)):
     logger.warning("Test WARNING log")
     logger.error("Test ERROR log")
     return {"message": "Debug logs written to debug.log and console"}
-
-from fastapi.responses import FileResponse
 
 @app.get("/static/{file_path:path}")
 async def serve_static(file_path: str):
