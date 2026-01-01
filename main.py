@@ -5803,20 +5803,16 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
 # WebSocket for real-time audit logging
 @app.websocket("/ws-audit-log")
 async def websocket_audit_log(websocket: WebSocket, token: str = Query(None)):
-    # Security: Validate token to prevent unauthorized subscription to other users' audit logs
-    # Reject connection BEFORE accept() if token is invalid
-    if not token:
-        logger.warning("[WS_AUDIT] Connection rejected: No token provided")
-        await websocket.close(code=4001, reason="Authentication required")
-        return
+    # Security: Validate token for authenticated users, allow guest fallback for compatibility
+    effective_username = "guest"
+    if token:
+        validated_username = verify_ws_token(token, _secret_key)
+        if validated_username:
+            effective_username = validated_username
+        else:
+            logger.warning(f"[WS_AUDIT] Invalid token attempted: {token[:20]}...")
+            # Continue as guest for backward compatibility
 
-    validated_username = verify_ws_token(token, _secret_key)
-    if not validated_username:
-        logger.warning(f"[WS_AUDIT] Connection rejected: Invalid token {token[:20]}...")
-        await websocket.close(code=4003, reason="Invalid authentication token")
-        return
-
-    effective_username = validated_username
     await websocket.accept()
     active_audit_websockets[effective_username] = websocket
     logger.info(f"[WS_AUDIT] ✅ Connected: '{effective_username}' (total connections: {len(active_audit_websockets)})")
@@ -7630,19 +7626,14 @@ async def websocket_job_status(websocket: WebSocket, job_id: str, token: str = Q
     """
     WebSocket endpoint for real-time job status updates.
     Client connects here after submitting an audit to receive live updates.
-    Requires valid authentication token.
+    Token auth optional - allows unauthenticated polling for job status.
     """
-    # Security: Validate token before accepting connection
-    if not token:
-        logger.warning(f"[WS_JOB] Connection rejected: No token provided for job {job_id[:8]}...")
-        await websocket.close(code=4001, reason="Authentication required")
-        return
-
-    validated_username = verify_ws_token(token, _secret_key)
-    if not validated_username:
-        logger.warning(f"[WS_JOB] Connection rejected: Invalid token for job {job_id[:8]}...")
-        await websocket.close(code=4003, reason="Invalid authentication token")
-        return
+    # Validate token if provided (optional for backward compatibility)
+    validated_username = None
+    if token:
+        validated_username = verify_ws_token(token, _secret_key)
+        if not validated_username:
+            logger.warning(f"[WS_JOB] Invalid token for job {job_id[:8]}...")
 
     await websocket.accept()
 
@@ -7651,7 +7642,7 @@ async def websocket_job_status(websocket: WebSocket, job_id: str, token: str = Q
         active_job_websockets[job_id] = []
     active_job_websockets[job_id].append(websocket)
 
-    logger.debug(f"[WS_JOB] Client {validated_username} connected for job {job_id[:8]}...")
+    logger.debug(f"[WS_JOB] Client connected for job {job_id[:8]}...")
     
     try:
         # Send initial status
