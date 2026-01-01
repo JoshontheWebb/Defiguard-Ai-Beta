@@ -516,10 +516,15 @@ class AuditQueueTracker {
         this.jobId = null;
         this.auditKey = null;
         this.ws = null;
+        this.wsToken = null;
         this.onUpdate = null;
         this.onComplete = null;
         this.onError = null;
         this.pollInterval = null;
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 5;
+        this.reconnectDelay = 1000; // Start with 1 second
+        this.isCompleted = false; // Track if job finished
     }
 
     async submitAudit(formData, csrfToken) {
@@ -547,11 +552,14 @@ class AuditQueueTracker {
                 this.showAuditKey(this.auditKey);
             }
 
-            // Start WebSocket connection for real-time updates
-            this.connectWebSocket();
+            // Start WebSocket connection for real-time updates (async, with auth token)
+            await this.connectWebSocket();
 
-            // Fallback polling in case WebSocket fails
-            this.startPolling();
+            // Fallback polling in case WebSocket fails (started inside connectWebSocket if needed)
+            // Only start polling if WebSocket didn't connect
+            if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                this.startPolling();
+            }
 
             return data;
         } catch (error) {
@@ -655,14 +663,35 @@ class AuditQueueTracker {
         }
     }
     
-    connectWebSocket() {
+    async connectWebSocket() {
         if (!this.jobId) return;
 
         // Clean up existing connection first
         this.disconnectWebSocket();
 
+        // Get WebSocket authentication token
+        let wsToken = "";
+        try {
+            const tokenResponse = await fetch("/api/ws-token", { credentials: 'include' });
+            if (tokenResponse.ok) {
+                const tokenData = await tokenResponse.json();
+                wsToken = tokenData.token || "";
+            }
+        } catch (e) {
+            log('QUEUE_WS', 'Failed to get WS token, will use polling fallback');
+        }
+
+        if (!wsToken) {
+            log('QUEUE_WS', 'No WS token available, using polling');
+            this.startPolling();
+            return;
+        }
+
+        // Store token for reconnection
+        this.wsToken = wsToken;
+
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${wsProtocol}//${window.location.host}/ws/job/${this.jobId}`;
+        const wsUrl = `${wsProtocol}//${window.location.host}/ws/job/${this.jobId}?token=${encodeURIComponent(wsToken)}`;
 
         try {
             this.ws = new WebSocket(wsUrl);
@@ -670,6 +699,8 @@ class AuditQueueTracker {
 
             this.ws.onopen = () => {
                 log('QUEUE_WS', 'Connected to job status WebSocket');
+                // Reset reconnection state on successful connection
+                this.reconnectAttempts = 0;
                 // Stop polling since WebSocket is working
                 this.stopPolling();
             };
@@ -684,13 +715,36 @@ class AuditQueueTracker {
             };
 
             this.ws.onerror = (error) => {
-                log('QUEUE_WS', 'WebSocket error, falling back to polling');
-                this.startPolling();
+                log('QUEUE_WS', 'WebSocket error');
+                // Don't immediately fall back to polling - let onclose handle reconnection
             };
 
-            this.ws.onclose = () => {
-                log('QUEUE_WS', 'WebSocket closed');
+            this.ws.onclose = (event) => {
+                log('QUEUE_WS', `WebSocket closed (code=${event.code})`);
                 ResourceManager.removeWebSocket(this.ws);
+                this.ws = null;
+
+                // Don't reconnect if job is completed or we've exceeded max attempts
+                if (this.isCompleted) {
+                    log('QUEUE_WS', 'Job completed, no reconnection needed');
+                    return;
+                }
+
+                // Reconnect with exponential backoff
+                if (this.reconnectAttempts < this.maxReconnectAttempts) {
+                    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts);
+                    this.reconnectAttempts++;
+                    log('QUEUE_WS', `Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+
+                    setTimeout(async () => {
+                        if (!this.isCompleted && this.jobId) {
+                            await this.connectWebSocket();
+                        }
+                    }, delay);
+                } else {
+                    log('QUEUE_WS', 'Max reconnection attempts reached, falling back to polling');
+                    this.startPolling();
+                }
             };
 
             // Keep-alive ping every 25 seconds - track with ResourceManager
@@ -758,6 +812,7 @@ class AuditQueueTracker {
                 this.showProcessing(data);
                 break;
             case 'completed':
+                this.isCompleted = true; // Prevent reconnection attempts
                 this.stopPolling();
                 this.disconnect();
                 if (this.onComplete) {
@@ -765,6 +820,7 @@ class AuditQueueTracker {
                 }
                 break;
             case 'failed':
+                this.isCompleted = true; // Prevent reconnection attempts
                 this.stopPolling();
                 this.disconnect();
                 if (this.onError) {
@@ -845,12 +901,14 @@ class AuditQueueTracker {
         if (!queueUI) return;
         
         const phases = {
+            'starting': { icon: '🚀', label: 'Starting Audit...', progress: 5 },
             'slither': { icon: '🔍', label: 'Running Slither Analysis', progress: 10 },
-            'mythril': { icon: '🧠', label: 'Running Mythril Symbolic Analysis', progress: 25 },
-            'echidna': { icon: '🧪', label: 'Running Echidna Fuzzing', progress: 40 },
+            'mythril': { icon: '🧠', label: 'Running Mythril Symbolic Analysis', progress: 30 },
+            'echidna': { icon: '🧪', label: 'Running Echidna Fuzzing', progress: 50 },
             'certora': { icon: '🔒', label: 'Running Formal Verification', progress: 55 },
-            'grok': { icon: '🤖', label: 'Claude AI Analysis & Report Generation', progress: 65 },
-            'finalizing': { icon: '✨', label: 'Finalizing Report', progress: 90 },
+            'ai_analysis': { icon: '🤖', label: 'Claude AI Analysis & Report Generation', progress: 70 },
+            'grok': { icon: '🤖', label: 'Claude AI Analysis & Report Generation', progress: 70 }, // Legacy alias
+            'finalizing': { icon: '✨', label: 'Finalizing Report', progress: 95 },
             'complete': { icon: '✅', label: 'Complete!', progress: 100 }
         };
         

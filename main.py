@@ -4238,8 +4238,8 @@ def filter_issues_for_free_tier(report: dict[str, Any], tier: str) -> dict[str, 
 # =============================================================================
 
 # Logo path for PDF branding (used for all tiers except white-label Enterprise)
-PDF_LOGO_PATH = os.path.join(STATIC_DIR, "images", "defiguard-logo.png")
-PDF_LOGO_SMALL_PATH = os.path.join(STATIC_DIR, "images", "DeFiguard Logo 127 x127.png")
+PDF_LOGO_PATH = os.path.join("static", "images", "defiguard-logo.png")
+PDF_LOGO_SMALL_PATH = os.path.join("static", "images", "DeFiguard Logo 127 x127.png")
 
 # Professional color palette for PDFs
 PDF_COLORS = {
