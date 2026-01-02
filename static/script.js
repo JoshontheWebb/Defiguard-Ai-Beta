@@ -2,12 +2,109 @@
 // GLOBAL DEBUG HELPER – controlled via DEBUG_MODE flag
 // Set to false for production to silence debug logs
 // ---------------------------------------------------------------------
-const DEBUG_MODE = false;  // Set to true for development debugging
+const DEBUG_MODE = true;  // TEMPORARILY ENABLED FOR DEBUGGING
 const log = (label, ...args) => {
     if (DEBUG_MODE) console.log(`[${label}]`, ...args, `time=${new Date().toISOString()}`);
 };
 // Debug wrapper for console.log calls - only logs in debug mode
 const debugLog = (...args) => { if (DEBUG_MODE) console.log(...args); };
+
+// ---------------------------------------------------------------------
+// ADVANCED DEBUG TRACER - Comprehensive function tracing for debugging
+// This helps identify exactly where UI initialization fails
+// ---------------------------------------------------------------------
+const DebugTracer = {
+    enabled: true,
+    traces: [],
+    startTime: Date.now(),
+
+    // Log function entry with timing
+    enter(funcName, context = {}) {
+        const entry = {
+            type: 'ENTER',
+            func: funcName,
+            time: Date.now() - this.startTime,
+            timestamp: new Date().toISOString(),
+            context: JSON.stringify(context).substring(0, 200)
+        };
+        this.traces.push(entry);
+        if (this.enabled) {
+            console.log(`%c▶ ENTER ${funcName}`, 'color: #00ff00; font-weight: bold',
+                `+${entry.time}ms`, context);
+        }
+        return entry.time;
+    },
+
+    // Log function exit with timing
+    exit(funcName, startTime, result = null) {
+        const duration = (Date.now() - this.startTime) - startTime;
+        const entry = {
+            type: 'EXIT',
+            func: funcName,
+            time: Date.now() - this.startTime,
+            duration: duration,
+            timestamp: new Date().toISOString()
+        };
+        this.traces.push(entry);
+        if (this.enabled) {
+            const color = duration > 500 ? '#ff0000' : duration > 100 ? '#ffaa00' : '#00ff00';
+            console.log(`%c◀ EXIT ${funcName}`, `color: ${color}; font-weight: bold`,
+                `took ${duration}ms`, result ? `result: ${JSON.stringify(result).substring(0, 100)}` : '');
+        }
+    },
+
+    // Log an error with stack trace
+    error(funcName, error) {
+        const entry = {
+            type: 'ERROR',
+            func: funcName,
+            time: Date.now() - this.startTime,
+            error: error.message,
+            stack: error.stack
+        };
+        this.traces.push(entry);
+        console.error(`%c✖ ERROR in ${funcName}`, 'color: #ff0000; font-weight: bold', error);
+    },
+
+    // Log element availability check
+    checkElements(elements) {
+        const results = {};
+        for (const [name, el] of Object.entries(elements)) {
+            results[name] = el ? '✓' : '✗ MISSING';
+        }
+        console.log('%c🔍 Element Check:', 'color: #00aaff; font-weight: bold', results);
+
+        // Log any missing elements as warnings
+        const missing = Object.entries(results).filter(([_, v]) => v.includes('MISSING'));
+        if (missing.length > 0) {
+            console.warn('%c⚠ MISSING ELEMENTS:', 'color: #ffaa00; font-weight: bold',
+                missing.map(([k]) => k).join(', '));
+        }
+        return results;
+    },
+
+    // Log state snapshot
+    snapshot(label, state) {
+        console.log(`%c📷 SNAPSHOT [${label}]`, 'color: #aa00ff; font-weight: bold', state);
+    },
+
+    // Generate debug report
+    report() {
+        console.log('%c═══════════════ DEBUG REPORT ═══════════════', 'color: #ff00ff; font-weight: bold');
+        console.log('Total traces:', this.traces.length);
+        console.log('Errors:', this.traces.filter(t => t.type === 'ERROR').length);
+
+        // Find slow operations (> 500ms)
+        const slow = this.traces.filter(t => t.type === 'EXIT' && t.duration > 500);
+        if (slow.length > 0) {
+            console.warn('%c⏱ SLOW OPERATIONS:', 'color: #ff0000', slow.map(s => `${s.func}: ${s.duration}ms`));
+        }
+
+        // Log full trace
+        console.table(this.traces);
+        return this.traces;
+    }
+};
 
 // ---------------------------------------------------------------------
 // RESOURCE CLEANUP MANAGER - Prevents memory leaks from intervals/WebSockets
@@ -1900,6 +1997,8 @@ document.addEventListener("DOMContentLoaded", () => {
       certoraUploadInput: "#certora-upload-input"
     },
     async (els) => {
+      const _waitForDOMStart = DebugTracer.enter('waitForDOM_callback', { url: window.location.href });
+
       const {
         auditForm, loading, resultsDiv, riskScoreSpan, issuesBody, predictionsList,
         recommendationsList, fuzzingList, remediationRoadmap, usageWarning, sidebarTierName,
@@ -1909,27 +2008,61 @@ document.addEventListener("DOMContentLoaded", () => {
         hamburger, sidebar, mainContent, logoutSidebar, authStatus, auditLog
       } = els;
 
+      // DEBUG: Check critical element availability
+      DebugTracer.checkElements({
+        hamburger, sidebar, mainContent, authStatus, usageWarning,
+        sidebarTierName, sidebarTierUsage, auditForm, logoutSidebar
+      });
+
+      // DEBUG: Snapshot URL state for post-payment detection
+      const urlParams = new URLSearchParams(window.location.search);
+      DebugTracer.snapshot('URL_PARAMS', {
+        upgrade: urlParams.get('upgrade'),
+        session_id: urlParams.get('session_id'),
+        tier: urlParams.get('tier'),
+        message: urlParams.get('message'),
+        fullSearch: window.location.search
+      });
+
       // =====================================================
       // HAMBURGER MENU - Initialize FIRST before async operations
       // This ensures navigation works even if other init fails
       // =====================================================
+      const _hamburgerStart = DebugTracer.enter('hamburger_init');
       try {
         if (hamburger && sidebar && mainContent) {
-          hamburger.addEventListener("click", () => {
-            sidebar.classList.toggle("open");
-            hamburger.classList.toggle("open");
-            document.body.classList.toggle('sidebar-open');
-            mainContent.style.marginLeft = sidebar.classList.contains("open") ? "270px" : "";
-          });
-          hamburger.setAttribute("tabindex", "0");
-          hamburger.addEventListener("keydown", (e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              hamburger.click();
-            }
-          });
+          // Check if event listeners are already attached (prevent duplicates)
+          if (!hamburger._debugInitialized) {
+            hamburger.addEventListener("click", () => {
+              DebugTracer.snapshot('hamburger_click', {
+                sidebarOpen: sidebar.classList.contains('open'),
+                hamburgerOpen: hamburger.classList.contains('open')
+              });
+              sidebar.classList.toggle("open");
+              hamburger.classList.toggle("open");
+              document.body.classList.toggle('sidebar-open');
+              mainContent.style.marginLeft = sidebar.classList.contains("open") ? "270px" : "";
+            });
+            hamburger.setAttribute("tabindex", "0");
+            hamburger.addEventListener("keydown", (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                hamburger.click();
+              }
+            });
+            hamburger._debugInitialized = true;
+            DebugTracer.exit('hamburger_init', _hamburgerStart, { success: true });
+          } else {
+            DebugTracer.exit('hamburger_init', _hamburgerStart, { skipped: 'already_initialized' });
+          }
           debugLog('[INIT] Hamburger menu initialized');
         } else {
+          DebugTracer.exit('hamburger_init', _hamburgerStart, {
+            failed: true,
+            hamburger: !!hamburger,
+            sidebar: !!sidebar,
+            mainContent: !!mainContent
+          });
           console.warn('[INIT] Hamburger elements missing:', {
             hamburger: !!hamburger,
             sidebar: !!sidebar,
@@ -1937,6 +2070,7 @@ document.addEventListener("DOMContentLoaded", () => {
           });
         }
       } catch (e) {
+        DebugTracer.error('hamburger_init', e);
         console.error('[INIT] Hamburger init error:', e);
       }
 
@@ -1989,25 +2123,35 @@ document.addEventListener("DOMContentLoaded", () => {
 
       // Section6: Authentication – instantly show real username + provider
       const updateAuthStatus = async () => {
-        const user = await fetchUsername();  // Returns { username, sub, provider } from /me
-        console.log(
-          `[DEBUG] updateAuthStatus: user=${JSON.stringify(user) || 'null'}, time=${new Date().toISOString()}`
-        );
-        if (!authStatus) {
-          console.error("[ERROR] #auth-status not found in DOM");
-          return;
-        }
-        if (user && user.username) {
-          const displayProvider = user.provider && user.provider !== "unknown"
-            ? user.provider
-            : (user.sub?.includes('|') ? user.sub.split('|')[0] : "auth0");
-          authStatus.innerHTML = `Signed in as <strong>${escapeHtml(user.username)}</strong> <small>(${escapeHtml(displayProvider)})</small>`;
-          localStorage.setItem('userSub', user.sub);
-          if (sidebar) sidebar.classList.add("logged-in");
-        } else {
-          authStatus.innerHTML = '<a href="/auth">Sign In / Create Account</a>';
-          localStorage.removeItem('userSub');
-          if (sidebar) sidebar.classList.remove("logged-in");
+        const _authStart = DebugTracer.enter('updateAuthStatus');
+        try {
+          const user = await fetchUsername();  // Returns { username, sub, provider } from /me
+          DebugTracer.snapshot('updateAuthStatus_user', { user: user?.username || 'null' });
+          console.log(
+            `[DEBUG] updateAuthStatus: user=${JSON.stringify(user) || 'null'}, time=${new Date().toISOString()}`
+          );
+          if (!authStatus) {
+            console.error("[ERROR] #auth-status not found in DOM");
+            DebugTracer.exit('updateAuthStatus', _authStart, { error: 'authStatus_element_missing' });
+            return;
+          }
+          if (user && user.username) {
+            const displayProvider = user.provider && user.provider !== "unknown"
+              ? user.provider
+              : (user.sub?.includes('|') ? user.sub.split('|')[0] : "auth0");
+            authStatus.innerHTML = `Signed in as <strong>${escapeHtml(user.username)}</strong> <small>(${escapeHtml(displayProvider)})</small>`;
+            localStorage.setItem('userSub', user.sub);
+            if (sidebar) sidebar.classList.add("logged-in");
+            DebugTracer.exit('updateAuthStatus', _authStart, { loggedIn: true, user: user.username });
+          } else {
+            authStatus.innerHTML = '<a href="/auth">Sign In / Create Account</a>';
+            localStorage.removeItem('userSub');
+            if (sidebar) sidebar.classList.remove("logged-in");
+            DebugTracer.exit('updateAuthStatus', _authStart, { loggedIn: false });
+          }
+        } catch (err) {
+          DebugTracer.error('updateAuthStatus', err);
+          DebugTracer.exit('updateAuthStatus', _authStart, { error: err.message });
         }
       };
 
@@ -2038,6 +2182,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
       // Section7: Payment Handling
       const handlePostPaymentRedirect = async () => {
+        const _paymentStart = DebugTracer.enter('handlePostPaymentRedirect');
         const urlParams = new URLSearchParams(window.location.search);
         const sessionId = urlParams.get("session_id");
         const tier = urlParams.get("tier");
@@ -2046,12 +2191,18 @@ document.addEventListener("DOMContentLoaded", () => {
           urlParams.get("username") || localStorage.getItem("username");
         const upgradeStatus = urlParams.get("upgrade");
         const message = urlParams.get("message");
+
+        DebugTracer.snapshot('payment_params', {
+          sessionId, tier, tempId, username, upgradeStatus, message
+        });
+
         console.log(
           `[DEBUG] Handling post-payment redirect: session_id=${sessionId}, tier=${tier}, temp_id=${tempId}, username=${username}, upgrade=${upgradeStatus}, message=${message}, time=${new Date().toISOString()}`
         );
 
         // NEW: Direct success from backend (no session_id needed)
         if (upgradeStatus === "success") {
+          DebugTracer.snapshot('payment_branch', { branch: 'success' });
           console.log(
             `[PAYMENT] ✅ Upgrade success detected: tier=${tier}, time=${new Date().toISOString()}`
           );
@@ -2090,11 +2241,13 @@ document.addEventListener("DOMContentLoaded", () => {
           }
 
           console.log("[PAYMENT] ✅ UI fully refreshed with new tier");
+          DebugTracer.exit('handlePostPaymentRedirect', _paymentStart, { result: 'success' });
           return;
         }
 
         // Handle upgrade cancellation (user closed Stripe checkout)
         if (upgradeStatus === "cancel") {
+          DebugTracer.snapshot('payment_branch', { branch: 'cancel' });
           console.log(`[PAYMENT] Upgrade cancelled by user, time=${new Date().toISOString()}`);
           if (usageWarning) {
             usageWarning.textContent = "Upgrade cancelled. You can try again anytime.";
@@ -2108,12 +2261,15 @@ document.addEventListener("DOMContentLoaded", () => {
             await updateAuthStatus();
           } catch (e) {
             console.error("[PAYMENT] Error refreshing after cancel:", e);
+            DebugTracer.error('handlePostPaymentRedirect_cancel', e);
           }
+          DebugTracer.exit('handlePostPaymentRedirect', _paymentStart, { result: 'cancel' });
           return;
         }
 
         // Handle upgrade failure
         if (upgradeStatus === "failed" || upgradeStatus === "error") {
+          DebugTracer.snapshot('payment_branch', { branch: 'failed' });
           console.log(`[PAYMENT] ❌ Upgrade failed: message=${message}, time=${new Date().toISOString()}`);
           if (usageWarning) {
             usageWarning.textContent = message || "Tier upgrade failed. Please try again or contact support.";
@@ -2128,12 +2284,15 @@ document.addEventListener("DOMContentLoaded", () => {
             await updateAuthStatus();
           } catch (e) {
             console.error("[PAYMENT] Error refreshing after failure:", e);
+            DebugTracer.error('handlePostPaymentRedirect_failed', e);
           }
+          DebugTracer.exit('handlePostPaymentRedirect', _paymentStart, { result: 'failed' });
           return;
         }
 
         // ORIGINAL: Legacy flow with session_id (Enterprise pending or old tier)
         if (sessionId && username) {
+          DebugTracer.snapshot('payment_branch', { branch: 'legacy_session', sessionId, username });
           try {
             let endpoint = "";
             let query = "";
@@ -2214,7 +2373,9 @@ document.addEventListener("DOMContentLoaded", () => {
             }
 
             console.log("[PAYMENT] ✅ UI fully refreshed");
+            DebugTracer.exit('handlePostPaymentRedirect', _paymentStart, { result: 'legacy_success' });
           } catch (error) {
+            DebugTracer.error('handlePostPaymentRedirect_legacy', error);
             console.error(
               `[ERROR] Post-payment redirect error: ${
                 error.message
@@ -2233,13 +2394,18 @@ document.addEventListener("DOMContentLoaded", () => {
               console.log(
                 `[DEBUG] Redirecting to /auth due to user not found, time=${new Date().toISOString()}`
               );
+              DebugTracer.exit('handlePostPaymentRedirect', _paymentStart, { result: 'redirect_to_auth' });
               window.location.href = "/auth?redirect_reason=post_payment";
+              return;
             }
+            DebugTracer.exit('handlePostPaymentRedirect', _paymentStart, { result: 'legacy_error' });
           }
         } else {
+          DebugTracer.snapshot('payment_branch', { branch: 'no_params' });
           console.warn(
             `[DEBUG] No post-payment redirect params found: session_id=${sessionId}, username=${username}, time=${new Date().toISOString()}`
           );
+          DebugTracer.exit('handlePostPaymentRedirect', _paymentStart, { result: 'no_params' });
         }
       };
 
@@ -2369,8 +2535,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
       // Section9: Tier Management
       const fetchTierData = async () => {
+        const _tierStart = DebugTracer.enter('fetchTierData');
         try {
           const user = await fetchUsername();
+          DebugTracer.snapshot('fetchTierData_user', { user: user?.username || 'null' });
           const username = user?.username || "";
           const url = username
             ? `/tier?username=${encodeURIComponent(username)}`
@@ -2606,10 +2774,15 @@ document.addEventListener("DOMContentLoaded", () => {
           if (prioritySupport) prioritySupport.style.display =
             feature_flags.priority_support ? "block" : "none";
           debugLog(`[DEBUG] Tier data fetched: tier=${tier}, auditCount=${auditCount}, auditLimit=${auditLimit}, time=${new Date().toISOString()}`);
+          DebugTracer.exit('fetchTierData', _tierStart, { tier, auditCount, auditLimit });
         } catch (error) {
+          DebugTracer.error('fetchTierData', error);
           console.error("Tier fetch error:", error);
-          usageWarning.textContent = `Error fetching tier data: ${error.message}`;
-          usageWarning.classList.add("error");
+          if (usageWarning) {
+            usageWarning.textContent = `Error fetching tier data: ${error.message}`;
+            usageWarning.classList.add("error");
+          }
+          DebugTracer.exit('fetchTierData', _tierStart, { error: error.message });
         }
       };
 
@@ -5138,22 +5311,34 @@ Key: ${data.api_key}
       // CRITICAL FIX: Handle post-payment redirect FIRST, before fetching tier
       // This ensures users see their upgraded tier immediately after Stripe payment
       // ═══════════════════════════════════════════════════════════════════════
+      const _initPaymentStart = DebugTracer.enter('init_payment_or_tier');
       try {
         const urlParams = new URLSearchParams(window.location.search);
         const hasPaymentRedirect = urlParams.has("upgrade") || urlParams.has("session_id");
 
+        DebugTracer.snapshot('init_decision', {
+          hasPaymentRedirect,
+          upgrade: urlParams.get("upgrade"),
+          session_id: urlParams.get("session_id")
+        });
+
         if (hasPaymentRedirect) {
           // User is returning from Stripe - handle payment completion FIRST
           debugLog("[PAYMENT] Post-payment redirect detected, handling before tier fetch");
+          DebugTracer.snapshot('init_path', { path: 'payment_redirect' });
           await handlePostPaymentRedirect();
           // handlePostPaymentRedirect already calls fetchTierData() and updateAuthStatus()
         } else {
           // Normal page load - fetch tier data normally
+          DebugTracer.snapshot('init_path', { path: 'normal_load' });
           await fetchTierData();
           await updateAuthStatus();
         }
+        DebugTracer.exit('init_payment_or_tier', _initPaymentStart, { success: true });
       } catch (initErr) {
+        DebugTracer.error('init_payment_or_tier', initErr);
         console.error("[INIT] Error during tier/payment initialization:", initErr);
+        DebugTracer.exit('init_payment_or_tier', _initPaymentStart, { error: initErr.message });
         // Still continue with rest of initialization
       }
 
@@ -5167,6 +5352,38 @@ Key: ${data.api_key}
           console.error("[REFRESH] Error during periodic refresh:", e);
         }
       }, 30000);
+
+      // DEBUG: Exit the main callback and generate report
+      DebugTracer.exit('waitForDOM_callback', _waitForDOMStart, { complete: true });
+
+      // Generate debug report after small delay to ensure all async operations complete
+      setTimeout(() => {
+        console.log('%c════════════════════════════════════════════════════════════', 'color: #ff00ff');
+        console.log('%c🔍 UI INITIALIZATION DEBUG REPORT', 'color: #ff00ff; font-weight: bold; font-size: 14px');
+        console.log('%c════════════════════════════════════════════════════════════', 'color: #ff00ff');
+
+        // Check hamburger state
+        const hamburgerEl = document.getElementById('hamburger');
+        const sidebarEl = document.getElementById('sidebar');
+        console.log('%c📱 HAMBURGER STATE:', 'color: #00aaff; font-weight: bold', {
+          hamburgerExists: !!hamburgerEl,
+          hamburgerInitialized: hamburgerEl?._debugInitialized || false,
+          hamburgerClickable: hamburgerEl ? typeof hamburgerEl.onclick === 'function' || hamburgerEl._debugInitialized : false,
+          sidebarExists: !!sidebarEl,
+          sidebarHasOpenClass: sidebarEl?.classList.contains('open') || false
+        });
+
+        // Test hamburger click
+        if (hamburgerEl) {
+          console.log('%c🧪 Hamburger element found, event listeners attached:', 'color: #00ff00',
+            hamburgerEl._debugInitialized ? 'YES' : 'NO');
+        } else {
+          console.error('%c❌ CRITICAL: Hamburger element NOT FOUND in DOM!', 'color: #ff0000; font-weight: bold');
+        }
+
+        DebugTracer.report();
+      }, 2000);
+
     } // Closing brace for waitForDOM callback
   ); // Closing parenthesis for waitForDOM function call
 
