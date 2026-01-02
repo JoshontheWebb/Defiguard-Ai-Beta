@@ -3059,8 +3059,8 @@ document.addEventListener("DOMContentLoaded", () => {
                         
                         ${issue.line_number ? `
                           <div class="detail-section">
-                            <strong>📍 Location:</strong> 
-                            Line ${issue.line_number}${issue.function_name ? ` in <code>${issue.function_name}()</code>` : ''}
+                            <strong>📍 Location:</strong>
+                            Line ${escapeHtml(String(issue.line_number))}${issue.function_name ? ` in <code>${escapeHtml(issue.function_name)}()</code>` : ''}
                           </div>
                         ` : ''}
                         
@@ -3074,13 +3074,13 @@ document.addEventListener("DOMContentLoaded", () => {
                         ${issue.exploit_scenario ? `
                           <div class="detail-section exploit-scenario">
                             <strong>⚠️ Exploit Scenario:</strong>
-                            <p>${issue.exploit_scenario}</p>
+                            <p>${escapeHtml(issue.exploit_scenario)}</p>
                           </div>
                         ` : ''}
-                        
+
                         ${issue.estimated_impact ? `
                           <div class="detail-section impact-estimate">
-                            <strong>💰 Estimated Impact:</strong> ${issue.estimated_impact}
+                            <strong>💰 Estimated Impact:</strong> ${escapeHtml(issue.estimated_impact)}
                           </div>
                         ` : ''}
                         
@@ -3097,7 +3097,7 @@ document.addEventListener("DOMContentLoaded", () => {
                                 <pre><code>${escapeHtml(issue.code_fix.after)}</code></pre>
                               </div>
                             </div>
-                            ${issue.code_fix.explanation ? `<p class="fix-explanation">${issue.code_fix.explanation}</p>` : ''}
+                            ${issue.code_fix.explanation ? `<p class="fix-explanation">${escapeHtml(issue.code_fix.explanation)}</p>` : ''}
                           </div>
                         ` : ''}
                         
@@ -3106,10 +3106,10 @@ document.addEventListener("DOMContentLoaded", () => {
                             <strong>🔄 Alternative Fixes:</strong>
                             ${issue.alternatives.map((alt, altIndex) => `
                               <div class="alternative-item">
-                                <strong>Option ${altIndex + 1}: ${alt.approach}</strong>
-                                <p><strong>Pros:</strong> ${alt.pros}</p>
-                                <p><strong>Cons:</strong> ${alt.cons}</p>
-                                <p><strong>Gas Impact:</strong> ${alt.gas_impact}</p>
+                                <strong>Option ${altIndex + 1}: ${escapeHtml(alt.approach || '')}</strong>
+                                <p><strong>Pros:</strong> ${escapeHtml(alt.pros || '')}</p>
+                                <p><strong>Cons:</strong> ${escapeHtml(alt.cons || '')}</p>
+                                <p><strong>Gas Impact:</strong> ${escapeHtml(alt.gas_impact || '')}</p>
                               </div>
                             `).join('')}
                           </div>
@@ -3126,9 +3126,12 @@ document.addEventListener("DOMContentLoaded", () => {
                           <div class="detail-section references">
                             <strong>📚 References:</strong>
                             <ul>
-                              ${issue.references.map(ref => `
-                                <li><a href="${ref.url}" target="_blank" rel="noopener">${ref.title}</a></li>
-                              `).join('')}
+                              ${issue.references.map(ref => {
+                                // Security: Validate URL to prevent javascript: XSS
+                                const safeUrl = (ref.url && (ref.url.startsWith('https://') || ref.url.startsWith('http://')))
+                                  ? escapeHtml(ref.url) : '#';
+                                return `<li><a href="${safeUrl}" target="_blank" rel="noopener">${escapeHtml(ref.title || 'Reference')}</a></li>`;
+                              }).join('')}
                             </ul>
                           </div>
                         ` : ''}
@@ -3311,16 +3314,16 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
   let modalContent = `
     <section>
       <h3>📝 Description</h3>
-      <p>${issue.description}</p>
+      <p>${escapeHtml(issue.description || 'No description available')}</p>
     </section>
   `;
-  
+
   if (issue.line_number || issue.function_name) {
     modalContent += `
       <section>
         <h3>📍 Location</h3>
-        <p><strong>Line:</strong> ${issue.line_number || 'N/A'}</p>
-        ${issue.function_name ? `<p><strong>Function:</strong> <code>${issue.function_name}</code></p>` : ''}
+        <p><strong>Line:</strong> ${escapeHtml(String(issue.line_number || 'N/A'))}</p>
+        ${issue.function_name ? `<p><strong>Function:</strong> <code>${escapeHtml(issue.function_name)}</code></p>` : ''}
       </section>
     `;
   }
@@ -3338,16 +3341,16 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
     modalContent += `
       <section>
         <h3>⚠️ Exploit Scenario</h3>
-        <p>${issue.exploit_scenario}</p>
+        <p>${escapeHtml(issue.exploit_scenario)}</p>
       </section>
     `;
   }
-  
+
   if (issue.estimated_impact) {
     modalContent += `
       <section>
         <h3>💰 Estimated Impact</h3>
-        <p>${issue.estimated_impact}</p>
+        <p>${escapeHtml(issue.estimated_impact)}</p>
       </section>
     `;
   }
@@ -3366,21 +3369,21 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             <pre><code>${escapeHtml(issue.code_fix.after)}</code></pre>
           </div>
         </div>
-        ${issue.code_fix.explanation ? `<p style="margin-top: var(--space-4); color: var(--text-secondary);">${issue.code_fix.explanation}</p>` : ''}
+        ${issue.code_fix.explanation ? `<p style="margin-top: var(--space-4); color: var(--text-secondary);">${escapeHtml(issue.code_fix.explanation)}</p>` : ''}
       </section>
     `;
   }
-  
+
   if (issue.alternatives && issue.alternatives.length > 0) {
     modalContent += `
       <section>
         <h3>🔄 Alternative Fixes</h3>
         ${issue.alternatives.map((alt, altIndex) => `
           <div class="alternative-fix">
-            <h4>Option ${altIndex + 1}: ${alt.approach}</h4>
-            <p><strong>Pros:</strong> ${alt.pros}</p>
-            <p><strong>Cons:</strong> ${alt.cons}</p>
-            <p><strong>Gas Impact:</strong> <code>${alt.gas_impact}</code></p>
+            <h4>Option ${altIndex + 1}: ${escapeHtml(alt.approach || '')}</h4>
+            <p><strong>Pros:</strong> ${escapeHtml(alt.pros || '')}</p>
+            <p><strong>Cons:</strong> ${escapeHtml(alt.cons || '')}</p>
+            <p><strong>Gas Impact:</strong> <code>${escapeHtml(alt.gas_impact || '')}</code></p>
           </div>
         `).join('')}
       </section>
@@ -3401,9 +3404,12 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
       <section>
         <h3>📚 References</h3>
         <ul>
-          ${issue.references.map(ref => `
-            <li><a href="${ref.url}" target="_blank" rel="noopener">${ref.title}</a></li>
-          `).join('')}
+          ${issue.references.map(ref => {
+            // Security: Validate URL to prevent javascript: XSS
+            const safeUrl = (ref.url && (ref.url.startsWith('https://') || ref.url.startsWith('http://')))
+              ? escapeHtml(ref.url) : '#';
+            return `<li><a href="${safeUrl}" target="_blank" rel="noopener">${escapeHtml(ref.title || 'Reference')}</a></li>`;
+          }).join('')}
         </ul>
       </section>
     `;
@@ -3418,9 +3424,9 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
   
   debugLog(`[DEBUG] Modal opened for issue ${index}`);
 };
-        predictionsList.innerHTML = report.predictions.length === 0 
+        predictionsList.innerHTML = report.predictions.length === 0
           ? "<li>No predictions available.</li>"
-          : report.predictions.map(p => `<li tabindex="0">Scenario: ${p.scenario} | Impact: ${p.impact}</li>`).join('');
+          : report.predictions.map(p => `<li tabindex="0">Scenario: ${escapeHtml(p.scenario || 'N/A')} | Impact: ${escapeHtml(p.impact || 'N/A')}</li>`).join('');
           
         // RECOMMENDATIONS - Categorized by urgency
         if (report.recommendations && typeof report.recommendations === 'object') {
@@ -3429,28 +3435,28 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           
           if (report.recommendations.immediate && report.recommendations.immediate.length > 0) {
             recHtml += '<h4 class="rec-category critical">🚨 Immediate (Fix Before Deploy)</h4><ul>';
-            recHtml += report.recommendations.immediate.map(r => `<li tabindex="0">${r}</li>`).join('');
+            recHtml += report.recommendations.immediate.map(r => `<li tabindex="0">${escapeHtml(r)}</li>`).join('');
             recHtml += '</ul>';
           }
-          
+
           if (report.recommendations.short_term && report.recommendations.short_term.length > 0) {
             recHtml += '<h4 class="rec-category warning">⚠️ Short-Term (Next 7 Days)</h4><ul>';
-            recHtml += report.recommendations.short_term.map(r => `<li tabindex="0">${r}</li>`).join('');
+            recHtml += report.recommendations.short_term.map(r => `<li tabindex="0">${escapeHtml(r)}</li>`).join('');
             recHtml += '</ul>';
           }
-          
+
           if (report.recommendations.long_term && report.recommendations.long_term.length > 0) {
             recHtml += '<h4 class="rec-category info">💡 Long-Term (Future Improvements)</h4><ul>';
-            recHtml += report.recommendations.long_term.map(r => `<li tabindex="0">${r}</li>`).join('');
+            recHtml += report.recommendations.long_term.map(r => `<li tabindex="0">${escapeHtml(r)}</li>`).join('');
             recHtml += '</ul>';
           }
-          
+
           recommendationsList.innerHTML = recHtml || '<li>No recommendations available.</li>';
         } else if (Array.isArray(report.recommendations)) {
           // Legacy format - array of strings
-          recommendationsList.innerHTML = report.recommendations.length === 0 
+          recommendationsList.innerHTML = report.recommendations.length === 0
             ? "<li>No recommendations available.</li>"
-            : report.recommendations.map(r => `<li tabindex="0">${r}</li>`).join('');
+            : report.recommendations.map(r => `<li tabindex="0">${escapeHtml(r)}</li>`).join('');
         } else {
           recommendationsList.innerHTML = '<li>No recommendations available.</li>';
         }

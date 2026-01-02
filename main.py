@@ -5481,7 +5481,10 @@ async def overage(request: Request, file_size: int = Body(...)):
 # /push for mobile - requires authentication
 @app.post("/push")
 async def push(request: Request, msg: str = Body(...)):
-    """Push notification endpoint. Requires authentication and rate limited."""
+    """Push notification endpoint. Requires authentication, CSRF, and rate limited."""
+    # Security: Verify CSRF token
+    await verify_csrf_token(request)
+
     # Require authentication
     session_username = request.session.get("username")
     if not session_username:
@@ -6005,10 +6008,12 @@ async def create_tier_checkout(
     
     session_username = request.session.get("username")
     logger.debug(f"/create-tier-checkout called – body: {tier_request}, session_username: {session_username}")
-    
-    effective_username = tier_request.username or session_username
-    if not effective_username:
+
+    # Security: Only use session username - ignore any username from request body
+    # This prevents privilege escalation where an attacker could create checkout sessions for other users
+    if not session_username:
         raise HTTPException(status_code=401, detail="Login required")
+    effective_username = session_username
     
     user = db.query(User).filter(User.username == effective_username).first()
     if not user:
@@ -6066,7 +6071,7 @@ async def create_tier_checkout(
             metadata={
                 "username": effective_username,
                 "tier": tier,
-                "has_diamond": str(has_diamond),
+                "has_diamond": "true" if has_diamond else "false",  # JSON-compatible boolean
                 "user_id": str(user.id)
             }
         )
@@ -6283,7 +6288,9 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
     
     except Exception as e:
         logger.error(f"Webhook processing error for event {event['id']}: {str(e)}")
-        return Response(status_code=500, content="Webhook processing failed")
+        # Return 200 to acknowledge receipt - Stripe will retry infinitely on 500s
+        # Log the error but don't cause retry storms
+        return Response(status_code=200, content="Webhook acknowledged (processing error logged)")
 
 # WebSocket for real-time audit logging
 @app.websocket("/ws-audit-log")
@@ -7057,6 +7064,9 @@ async def poll_certora_job(
     Poll for Certora job results.
     This is called by the frontend or background task to update job status.
     """
+    # Security: Verify CSRF token
+    await verify_csrf_token(request)
+
     user = await get_authenticated_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -7174,6 +7184,9 @@ async def dismiss_certora_notifications(
     """
     Mark Certora job notifications as dismissed (user has seen them).
     """
+    # Security: Verify CSRF token
+    await verify_csrf_token(request)
+
     user = await get_authenticated_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -8067,15 +8080,24 @@ async def list_user_audits(
 @app.post("/api/audit/resend-email/{audit_key}")
 async def resend_audit_email(
     audit_key: str,
+    request: Request,
     email: str = Query(..., description="Email address to send notification to"),
     db: Session = Depends(get_db)
 ) -> dict:
     """
     Resend completion email for a completed audit.
 
-    Requires the audit key and a valid email address.
-    Only works for completed audits.
+    Requires authentication, the audit key, and a valid email address.
+    Only works for completed audits owned by the authenticated user.
     """
+    # Security: Require authentication
+    session_username = request.session.get("username")
+    if not session_username:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Security: Verify CSRF token
+    await verify_csrf_token(request)
+
     # Validate audit key format and length
     if not audit_key or not audit_key.startswith("dga_") or len(audit_key) > 64:
         raise HTTPException(status_code=400, detail="Invalid audit key format")
@@ -8084,12 +8106,22 @@ async def resend_audit_email(
     if not validate_email(email):
         raise HTTPException(status_code=400, detail="Invalid email format")
 
+    # Get user for ownership verification
+    user = db.query(User).filter(User.username == session_username).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
     audit_result = db.query(AuditResult).filter(
         AuditResult.audit_key == audit_key
     ).first()
 
     if not audit_result:
         raise HTTPException(status_code=404, detail="Audit not found")
+
+    # Security: Verify user owns this audit
+    if audit_result.user_id != user.id:
+        logger.warning(f"[AUDIT_EMAIL] User {session_username} attempted to resend email for audit owned by user_id {audit_result.user_id}")
+        raise HTTPException(status_code=403, detail="Not authorized to access this audit")
 
     if audit_result.status != "completed":
         raise HTTPException(status_code=400, detail="Audit is not yet completed")
@@ -8118,14 +8150,26 @@ async def websocket_job_status(websocket: WebSocket, job_id: str, token: str = Q
     """
     WebSocket endpoint for real-time job status updates.
     Client connects here after submitting an audit to receive live updates.
-    Token auth optional - allows unauthenticated polling for job status.
+    Requires valid authentication token AND job ownership.
     """
-    # Validate token if provided (optional for backward compatibility)
-    validated_username = None
-    if token:
-        validated_username = verify_ws_token(token, _secret_key)
-        if not validated_username:
-            logger.warning(f"[WS_JOB] Invalid token for job {job_id[:8]}...")
+    # Security: Validate token before accepting connection
+    if not token:
+        logger.warning(f"[WS_JOB] Connection rejected: No token provided for job {job_id[:8]}...")
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+
+    validated_username = verify_ws_token(token, _secret_key)
+    if not validated_username:
+        logger.warning(f"[WS_JOB] Connection rejected: Invalid token for job {job_id[:8]}...")
+        await websocket.close(code=4003, reason="Invalid authentication token")
+        return
+
+    # Security: Verify job ownership - user can only connect to their own jobs
+    job = audit_queue.jobs.get(job_id)
+    if job and job.username != validated_username:
+        logger.warning(f"[WS_JOB] Authorization denied: User {validated_username} attempted to access job owned by {job.username}")
+        await websocket.close(code=4003, reason="Not authorized to access this job")
+        return
 
     await websocket.accept()
 
@@ -8134,7 +8178,7 @@ async def websocket_job_status(websocket: WebSocket, job_id: str, token: str = Q
         active_job_websockets[job_id] = []
     active_job_websockets[job_id].append(websocket)
 
-    logger.debug(f"[WS_JOB] Client connected for job {job_id[:8]}...")
+    logger.debug(f"[WS_JOB] Client {validated_username} connected for job {job_id[:8]}...")
     
     try:
         # Send initial status
