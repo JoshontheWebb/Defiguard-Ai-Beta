@@ -1954,34 +1954,38 @@ document.addEventListener("DOMContentLoaded", () => {
       };
 
       // WebSocket audit log (single instance) - tracked by ResourceManager for cleanup
-      // Security: Fetch signed token from server instead of passing username directly
+      // Security: Only connect if we have a valid token (server requires authentication)
       let wsToken = "";
       try {
-        const tokenResponse = await fetch("/api/ws-token");
+        const tokenResponse = await fetch("/api/ws-token", { credentials: 'include' });
         if (tokenResponse.ok) {
           const tokenData = await tokenResponse.json();
           wsToken = tokenData.token || "";
         }
       } catch (e) {
-        console.log("[AUDIT] Could not fetch WS token, connecting as guest");
+        debugLog("[AUDIT] Could not fetch WS token - user may not be logged in");
       }
-      const wsUrl = wsToken
-        ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws-audit-log?token=${encodeURIComponent(wsToken)}`
-        : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws-audit-log`;
-      const auditLogWs = new WebSocket(wsUrl);
-      ResourceManager.addWebSocket(auditLogWs);
-      auditLogWs.onopen = () => logMessage("Connected to audit log");
-      auditLogWs.onmessage = (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          if (data.type === "audit_log") logMessage(data.message);
-        } catch (_) {}
-      };
-      auditLogWs.onerror = () => logMessage("WebSocket error");
-      auditLogWs.onclose = () => {
-        logMessage("Disconnected from audit log");
-        ResourceManager.removeWebSocket(auditLogWs);
-      };
+
+      // Only attempt WebSocket connection if we have a valid token
+      if (wsToken) {
+        const wsUrl = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws-audit-log?token=${encodeURIComponent(wsToken)}`;
+        const auditLogWs = new WebSocket(wsUrl);
+        ResourceManager.addWebSocket(auditLogWs);
+        auditLogWs.onopen = () => logMessage("Connected to audit log");
+        auditLogWs.onmessage = (e) => {
+          try {
+            const data = JSON.parse(e.data);
+            if (data.type === "audit_log") logMessage(data.message);
+          } catch (_) {}
+        };
+        auditLogWs.onerror = () => logMessage("WebSocket error");
+        auditLogWs.onclose = () => {
+          logMessage("Disconnected from audit log");
+          ResourceManager.removeWebSocket(auditLogWs);
+        };
+      } else {
+        debugLog("[AUDIT] Skipping WebSocket connection - no auth token available");
+      }
 
       // Section6: Authentication – instantly show real username + provider
       const updateAuthStatus = async () => {
@@ -1994,16 +1998,16 @@ document.addEventListener("DOMContentLoaded", () => {
           return;
         }
         if (user && user.username) {
-          const displayProvider = user.provider && user.provider !== "unknown" 
-            ? user.provider 
+          const displayProvider = user.provider && user.provider !== "unknown"
+            ? user.provider
             : (user.sub?.includes('|') ? user.sub.split('|')[0] : "auth0");
           authStatus.innerHTML = `Signed in as <strong>${escapeHtml(user.username)}</strong> <small>(${escapeHtml(displayProvider)})</small>`;
           localStorage.setItem('userSub', user.sub);
-          sidebar.classList.add("logged-in");
+          if (sidebar) sidebar.classList.add("logged-in");
         } else {
           authStatus.innerHTML = '<a href="/auth">Sign In / Create Account</a>';
           localStorage.removeItem('userSub');
-          sidebar.classList.remove("logged-in");
+          if (sidebar) sidebar.classList.remove("logged-in");
         }
       };
 
@@ -2393,22 +2397,24 @@ document.addEventListener("DOMContentLoaded", () => {
           // ✅ Handle logged out state
           if (data.tier === "logged_out" || data.logged_in === false) {
             debugLog("[DEBUG] User is logged out, showing logged-out UI");
-            
-            // Update sidebar to show "Not Signed In"
-            sidebarTierName.textContent = "Not Signed In";
-            sidebarTierUsage.textContent = "—";
-            sidebarTierFeatures.innerHTML = '<div class="feature-item">Sign in to access features</div>';
-            
-            // Update main tier description
-            tierDescription.textContent = "Sign in to start auditing smart contracts";
-            sizeLimit.textContent = "Max file size: N/A";
-            features.textContent = "Features: Sign in required";
-            
-            // Show warning message
-            usageWarning.textContent = "Please sign in to audit smart contracts";
-            usageWarning.classList.remove("error", "success");
-            usageWarning.classList.add("info");
-            usageWarning.style.display = "block";
+
+            // Update sidebar to show "Not Signed In" (with null checks)
+            if (sidebarTierName) sidebarTierName.textContent = "Not Signed In";
+            if (sidebarTierUsage) sidebarTierUsage.textContent = "—";
+            if (sidebarTierFeatures) sidebarTierFeatures.innerHTML = '<div class="feature-item">Sign in to access features</div>';
+
+            // Update main tier description (with null checks)
+            if (tierDescription) tierDescription.textContent = "Sign in to start auditing smart contracts";
+            if (sizeLimit) sizeLimit.textContent = "Max file size: N/A";
+            if (features) features.textContent = "Features: Sign in required";
+
+            // Show warning message (with null checks)
+            if (usageWarning) {
+              usageWarning.textContent = "Please sign in to audit smart contracts";
+              usageWarning.classList.remove("error", "success");
+              usageWarning.classList.add("info");
+              usageWarning.style.display = "block";
+            }
             
             // Disable audit button
             const auditButton = document.querySelector("#audit-submit") || auditForm?.querySelector('button[type="submit"]');
@@ -2444,14 +2450,16 @@ document.addEventListener("DOMContentLoaded", () => {
           if (tierIconEl) {
             tierIconEl.textContent = tierIcons[tier] || "💎";
           }
-          
-          sidebarTierName.textContent = tierNameCap;
-          
-          if (audit_limit === 9999 || size_limit === "Unlimited") {
-            sidebarTierUsage.textContent = "Unlimited audits";
-          } else {
-            const remaining = auditLimit - auditCount;
-            sidebarTierUsage.textContent = `${remaining} audits remaining (${auditCount}/${auditLimit} used)`;
+
+          if (sidebarTierName) sidebarTierName.textContent = tierNameCap;
+
+          if (sidebarTierUsage) {
+            if (audit_limit === 9999 || size_limit === "Unlimited") {
+              sidebarTierUsage.textContent = "Unlimited audits";
+            } else {
+              const remaining = auditLimit - auditCount;
+              sidebarTierUsage.textContent = `${remaining} audits remaining (${auditCount}/${auditLimit} used)`;
+            }
           }
           
           // Build features list for sidebar - Premium tier descriptions
@@ -2502,38 +2510,46 @@ document.addEventListener("DOMContentLoaded", () => {
             );
           }
 
-          sidebarTierFeatures.innerHTML = featuresList
-            .map(f => `<div class="feature-item">✓ ${f}</div>`)
-            .join("");
+          if (sidebarTierFeatures) {
+            sidebarTierFeatures.innerHTML = featuresList
+              .map(f => `<div class="feature-item">✓ ${f}</div>`)
+              .join("");
+          }
 
           // Update main tier description with professional copy
-          tierDescription.textContent = `${displayName} Plan: ${
-            tier === "enterprise"
-              ? "Protocol-grade security with Slither, Mythril & Echidna. Formal Verification coming soon. White-label reports, unlimited API, dedicated support."
-              : tier === "pro"
-              ? "Unlimited audits with full security stack. Fuzzing, on-chain analysis, API access, priority support."
-              : tier === "starter"
-              ? `25 audits/month with AI-powered analysis & compliance scoring. (${auditCount}/${auditLimit} used)`
-              : `Trial plan: 1 audit/month with basic analysis. (${auditCount}/${auditLimit} used)`
-          }`;
-          
-          sizeLimit.textContent = `Max file size: ${size_limit}`;
-          features.textContent = `Features: ${featuresList.join(", ")}`;
-          usageWarning.textContent =
-            tier === "free" || tier === "starter"
-              ? `${
-                  tier.charAt(0).toUpperCase() + tier.slice(1)
-                } tier: ${auditCount}/${auditLimit} audits remaining`
-              : "";
-          usageWarning.classList.remove("error");
-          upgradeLink.style.display = tier !== "enterprise" ? "inline-block" : "none";
+          if (tierDescription) {
+            tierDescription.textContent = `${displayName} Plan: ${
+              tier === "enterprise"
+                ? "Protocol-grade security with Slither, Mythril & Echidna. Formal Verification coming soon. White-label reports, unlimited API, dedicated support."
+                : tier === "pro"
+                ? "Unlimited audits with full security stack. Fuzzing, on-chain analysis, API access, priority support."
+                : tier === "starter"
+                ? `25 audits/month with AI-powered analysis & compliance scoring. (${auditCount}/${auditLimit} used)`
+                : `Trial plan: 1 audit/month with basic analysis. (${auditCount}/${auditLimit} used)`
+            }`;
+          }
+
+          if (sizeLimit) sizeLimit.textContent = `Max file size: ${size_limit}`;
+          if (features) features.textContent = `Features: ${featuresList.join(", ")}`;
+
+          if (usageWarning) {
+            usageWarning.textContent =
+              tier === "free" || tier === "starter"
+                ? `${tier.charAt(0).toUpperCase() + tier.slice(1)} tier: ${auditCount}/${auditLimit} audits remaining`
+                : "";
+            usageWarning.classList.remove("error");
+          }
+
+          if (upgradeLink) upgradeLink.style.display = tier !== "enterprise" ? "inline-block" : "none";
+
           maxFileSize =
             size_limit === "Unlimited"
               ? Infinity
               : parseFloat(size_limit.replace("MB", "")) * 1024 * 1024;
-          document.querySelector(
-            "#file-help"
-          ).textContent = `Max size: ${size_limit}. Ensure code is valid Solidity.`;
+
+          const fileHelpEl = document.querySelector("#file-help");
+          if (fileHelpEl) fileHelpEl.textContent = `Max size: ${size_limit}. Ensure code is valid Solidity.`;
+
           document
             .querySelectorAll(".pro-enterprise-only")
             .forEach(
@@ -2541,11 +2557,17 @@ document.addEventListener("DOMContentLoaded", () => {
                 (el.style.display =
                   tier === "pro" || tier === "enterprise" ? "block" : "none")
             );
-          customReportInput.style.display =
-            tier === "pro" || tier === "enterprise" ? "block" : "none";
-          downloadReportButton.style.display = feature_flags.reports
-            ? "block"
-            : "none";
+
+          if (customReportInput) {
+            customReportInput.style.display =
+              tier === "pro" || tier === "enterprise" ? "block" : "none";
+          }
+
+          if (downloadReportButton) {
+            downloadReportButton.style.display = feature_flags.reports
+              ? "block"
+              : "none";
+          }
           
           // PDF download button (Starter/Pro/Enterprise)
           if (pdfDownloadButton) {
