@@ -154,10 +154,24 @@ class CertoraRunner:
             job_url = self._extract_job_url(result.stdout)
 
             if not job_url:
-                # No job URL means submission failed
+                # No job URL means submission failed - log full details for debugging
                 logger.warning(f"CertoraRunner: No job URL found in output")
+                logger.warning(f"CertoraRunner: Return code: {result.returncode}")
+                if result.stdout:
+                    # Log stdout in chunks to see everything
+                    stdout_preview = result.stdout[:2000].replace('\n', ' | ')
+                    logger.warning(f"CertoraRunner: STDOUT preview: {stdout_preview}")
                 if result.stderr:
-                    logger.warning(f"CertoraRunner: stderr: {result.stderr[:1000]}")
+                    stderr_preview = result.stderr[:2000].replace('\n', ' | ')
+                    logger.warning(f"CertoraRunner: STDERR preview: {stderr_preview}")
+                # Log if there are any common error patterns
+                combined = (result.stdout or '') + (result.stderr or '')
+                if 'error' in combined.lower():
+                    logger.error(f"CertoraRunner: Detected error in output")
+                if 'compilation' in combined.lower():
+                    logger.error(f"CertoraRunner: Compilation issue detected")
+                if 'spec' in combined.lower() and 'error' in combined.lower():
+                    logger.error(f"CertoraRunner: CVL spec error detected")
                 return self._parse_output(result.stdout, result.stderr, result.returncode)
 
             logger.info(f"CertoraRunner: Job submitted successfully: {job_url}")

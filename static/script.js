@@ -247,6 +247,7 @@ window.retrieveAuditByKey = async function(auditKey) {
     }
 
     try {
+        ToastNotification.show('Retrieving audit...', 'info');
         const response = await fetch(`/audit/retrieve/${auditKey}`);
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
@@ -254,19 +255,40 @@ window.retrieveAuditByKey = async function(auditKey) {
         }
 
         const data = await response.json();
-        debugLog('[AUDIT_RETRIEVE]', data);
+        console.log('[AUDIT_RETRIEVE] Retrieved data:', data);
 
         // Display results based on status
         if (data.status === 'completed' && data.report) {
-            // Render the full report
-            window.renderAuditResults(data.report);
-            ToastNotification.show('Audit results loaded!', 'success');
+            // Build the same structure that handleAuditResponse expects
+            const auditData = {
+                report: data.report,
+                risk_score: data.risk_score || data.report.risk_score,
+                tier: data.user_tier,
+                audit_key: data.audit_key,
+                pdf_url: data.pdf_url
+            };
+
+            console.log('[AUDIT_RETRIEVE] Calling handleAuditResponse with:', auditData);
+
+            // Use a custom event to trigger the audit response handler
+            // This ensures handleAuditResponse (defined inside DOMContentLoaded) can receive it
+            window.dispatchEvent(new CustomEvent('retrievedAuditComplete', { detail: auditData }));
+
+            ToastNotification.show('Audit results loaded successfully!', 'success');
+
+            // Scroll to results section
+            const resultsSection = document.querySelector('.results-section');
+            if (resultsSection) {
+                resultsSection.scrollIntoView({ behavior: 'smooth' });
+            }
         } else if (data.status === 'processing') {
             ToastNotification.show(`Audit in progress: ${data.current_phase || 'analyzing'}...`, 'info');
         } else if (data.status === 'queued') {
             ToastNotification.show(`Audit queued at position ${data.queue_position || '?'}`, 'info');
         } else if (data.status === 'failed') {
             ToastNotification.show(`Audit failed: ${data.error || 'Unknown error'}`, 'error');
+        } else {
+            ToastNotification.show(`Audit status: ${data.status}`, 'info');
         }
 
         return data;
@@ -4193,6 +4215,13 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
         }
         logMessage(`Audit complete – risk score ${report.risk_score}`);
       };
+
+      // Listen for retrieved audit results (from Access Key retrieval) to populate UI
+      // This bridges the retrieveAuditByKey function (global) with handleAuditResponse (local)
+      window.addEventListener('retrievedAuditComplete', (event) => {
+        debugLog('[AUDIT_RETRIEVE] Received retrievedAuditComplete event:', event.detail);
+        handleAuditResponse(event.detail);
+      });
 
       const handleSubmit = (e) => {
         e.preventDefault();
