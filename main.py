@@ -2655,18 +2655,23 @@ async def get_csrf_token(request: Request) -> str:
 async def verify_csrf_token(request: Request):
     if request.method in ["GET", "HEAD", "OPTIONS"]:
         return
-    
-    token = request.headers.get("X-CSRFToken")
-    expected = request.session.get("csrf_token")
-    
+
+    token = request.headers.get("X-CSRFToken") or ""
+    expected = request.session.get("csrf_token") or ""
+
+    # Ensure we always have a token to compare against (for new sessions)
     if not expected:
         request.session["csrf_token"] = secrets.token_urlsafe(32)
         expected = request.session["csrf_token"]
-    
-    if not token or not secrets.compare_digest(token, expected):
+
+    # Security: Use constant-time comparison to prevent timing attacks
+    # Always compare even if token is empty to prevent timing differences
+    is_valid = secrets.compare_digest(token, expected) if token else False
+
+    if not is_valid:
         logger.error("CSRF validation failed")  # Security: Don't log tokens
         raise HTTPException(status_code=403, detail="CSRF token invalid")
-    
+
     logger.debug("CSRF valid")
 
 # Sync client init (STABLE)

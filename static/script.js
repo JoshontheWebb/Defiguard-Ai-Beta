@@ -5057,8 +5057,27 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
         handleAuditResponse(event.detail);
       });
 
+      // Flag to prevent double submission
+      let isSubmitting = false;
+
       const handleSubmit = (e) => {
         e.preventDefault();
+
+        // Prevent double submission
+        if (isSubmitting) {
+          debugLog('[AUDIT] Submission already in progress, ignoring duplicate click');
+          return;
+        }
+        isSubmitting = true;
+
+        // Disable submit button visually
+        const submitBtn = auditForm.querySelector('button[type="submit"]');
+        if (submitBtn) {
+          submitBtn.disabled = true;
+          submitBtn.dataset.originalText = submitBtn.textContent;
+          submitBtn.textContent = 'Submitting...';
+        }
+
         withCsrfToken(async (token) => {
           // Use LoadingManager for auto-timeout safety
           LoadingManager.show(loading, 10 * 60 * 1000); // 10 min timeout for audits
@@ -5259,6 +5278,14 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             LoadingManager.hide(loading);
             usageWarning.textContent = err.message || "Audit error";
             usageWarning.classList.add("error");
+          } finally {
+            // Reset submission state
+            isSubmitting = false;
+            const submitBtn = auditForm?.querySelector('button[type="submit"]');
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.textContent = submitBtn.dataset.originalText || 'Audit';
+            }
           }
         });
       };
