@@ -384,21 +384,67 @@ class CertoraRunner:
                 })
                 with urllib.request.urlopen(req, timeout=30) as response:
                     html = response.read().decode()
+                    html_len = len(html)
 
                     # Look for status indicators in the HTML
                     html_lower = html.lower()
 
-                    # Check for completion indicators
-                    if "verification succeeded" in html_lower or "all rules verified" in html_lower:
-                        logger.info("CertoraRunner: HTML indicates verification succeeded")
-                        return self._parse_html_results(html)
-                    elif "verification failed" in html_lower or "violated" in html_lower:
-                        logger.info("CertoraRunner: HTML indicates violations found")
-                        return self._parse_html_results(html)
-                    elif "running" in html_lower or "in progress" in html_lower or "pending" in html_lower:
+                    # Debug: Log key status indicators found
+                    status_keywords = {
+                        "verified": "verified" in html_lower,
+                        "passed": "passed" in html_lower,
+                        "succeeded": "succeeded" in html_lower,
+                        "complete": "complete" in html_lower,
+                        "done": "done" in html_lower,
+                        "finished": "finished" in html_lower,
+                        "violated": "violated" in html_lower,
+                        "failed": "failed" in html_lower,
+                        "running": "running" in html_lower,
+                        "pending": "pending" in html_lower,
+                        "in progress": "in progress" in html_lower,
+                        "queued": "queued" in html_lower,
+                    }
+                    found_keywords = [k for k, v in status_keywords.items() if v]
+                    logger.info(f"CertoraRunner: HTML length={html_len}, keywords found: {found_keywords}")
+
+                    # Check for explicit running/pending indicators FIRST
+                    is_running = (
+                        "running" in html_lower or
+                        "in progress" in html_lower or
+                        "pending" in html_lower or
+                        "queued" in html_lower or
+                        "waiting" in html_lower
+                    )
+
+                    # Check for completion indicators (success)
+                    is_complete_success = (
+                        "verification succeeded" in html_lower or
+                        "all rules verified" in html_lower or
+                        "verified" in html_lower and not is_running or
+                        "passed" in html_lower and not is_running or
+                        ("complete" in html_lower or "done" in html_lower or "finished" in html_lower) and not is_running
+                    )
+
+                    # Check for completion with issues
+                    is_complete_failed = (
+                        "verification failed" in html_lower or
+                        "violated" in html_lower or
+                        ("failed" in html_lower and not is_running)
+                    )
+
+                    # Check for compilation error
+                    is_compilation_error = "error" in html_lower and "compilation" in html_lower
+
+                    if is_running and not is_complete_success and not is_complete_failed:
                         logger.info("CertoraRunner: HTML indicates job still running")
                         return {"status": "running"}
-                    elif "error" in html_lower and "compilation" in html_lower:
+                    elif is_complete_success:
+                        logger.info("CertoraRunner: HTML indicates verification succeeded")
+                        return self._parse_html_results(html)
+                    elif is_complete_failed:
+                        logger.info("CertoraRunner: HTML indicates violations found")
+                        return self._parse_html_results(html)
+                    elif is_compilation_error:
                         logger.info("CertoraRunner: HTML indicates compilation error")
                         return {
                             "success": False,
@@ -408,6 +454,12 @@ class CertoraRunner:
                             "rules_violated": 0,
                             "violations": []
                         }
+
+                    # If page has content but no running indicators, check if it looks like a results page
+                    if html_len > 1000 and not is_running:
+                        # Long page with no running indicator - likely complete
+                        logger.info(f"CertoraRunner: Large page ({html_len} chars) with no running indicators - assuming complete")
+                        return self._parse_html_results(html)
 
                     # If we got the page but can't determine status, assume still running
                     logger.info("CertoraRunner: Got HTML but couldn't determine status, assuming running")
