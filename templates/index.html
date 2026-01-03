@@ -245,18 +245,19 @@
                     </small>
                 </div>
 
-                <!-- API Key Assignment (Pro/Enterprise) -->
+                <!-- Project Key Assignment (Pro/Enterprise) -->
                 <div class="form-group pro-enterprise-only api-key-selector-group" style="display: none;">
                     <label for="api_key_select">
-                        Assign to API Key (Optional)
+                        Assign to Project Key (Optional)
                         <span class="badge">Pro/Enterprise</span>
+                        <span class="tooltip-trigger" title="Project Keys help you organize audits by client or project. Each key can only audit one file but you can re-audit the same file multiple times.">ⓘ</span>
                     </label>
                     <select id="api_key_select" name="api_key_id" aria-describedby="api-key-help">
                         <option value="">-- No Assignment (Personal) --</option>
                         <!-- Options populated dynamically via JS -->
                     </select>
                     <small id="api-key-help">
-                        Organize audits by project or client.
+                        Organize audits by project or client. Each project key = one file.
                         <a href="#" id="create-key-from-audit" style="color: var(--accent-teal);">Create new key</a>
                     </small>
                 </div>
@@ -284,7 +285,7 @@
                         🚀 Analyze Contract
                     </button>
                     <button type="button" id="retrieve-previous-audit" class="btn btn-secondary" style="min-width: 180px;" onclick="window.showAuditKeyRetrievalModal()">
-                        🔑 Retrieve Previous Audit
+                        🔑 Retrieve by Access Key
                     </button>
                 </div>
             </form>
@@ -402,7 +403,7 @@
                                 ✓ Formal Verification (Coming Soon)<br>
                                 ✓ Multi-AI consensus<br>
                                 ✓ White-label reports<br>
-                                ✓ Unlimited API keys<br>
+                                ✓ Unlimited project keys<br>
                                 ✓ Dedicated support<br>
                                 <span class="pricing-limit">Unlimited</span>
                             </td>
@@ -947,59 +948,63 @@
                 </div>
             </div>
             
-            <!-- API Key Management (Pro/Enterprise only) -->
+            <!-- Project Key Management (Pro/Enterprise only) -->
             <div class="settings-section" id="modal-api-section" style="display: none;">
-                <h3>🔑 API Key Management</h3>
-                
+                <h3>📁 Project Key Management</h3>
+                <p style="font-size: var(--text-sm); color: var(--text-tertiary); margin: 0 0 var(--space-4) 0;">
+                    Project Keys help you organize audits by client or project. Each key is tied to one file.
+                    <span class="tooltip-trigger" title="Project Keys are different from Access Keys. Project Keys organize your audits, while Access Keys let you retrieve specific audit results.">ⓘ What's the difference?</span>
+                </p>
+
                 <!-- Tier limit info -->
                 <div class="api-key-limit-info" style="margin-bottom: var(--space-4); padding: var(--space-3); background: var(--glass-bg); border-radius: var(--radius-md); font-size: var(--text-sm); color: var(--text-tertiary);">
                     <span id="api-key-count-display">Loading...</span>
                 </div>
-                
-                <!-- API Keys Table -->
+
+                <!-- Project Keys Table -->
                 <div class="api-keys-table-container" style="margin-bottom: var(--space-6);">
                     <table class="api-keys-table" style="width: 100%; border-collapse: collapse;">
                         <thead>
                             <tr style="border-bottom: 1px solid var(--glass-border);">
-                                <th style="padding: var(--space-3); text-align: left; font-size: var(--text-sm); color: var(--text-tertiary);">Label</th>
+                                <th style="padding: var(--space-3); text-align: left; font-size: var(--text-sm); color: var(--text-tertiary);">Project Label</th>
                                 <th style="padding: var(--space-3); text-align: left; font-size: var(--text-sm); color: var(--text-tertiary);">Key</th>
                                 <th style="padding: var(--space-3); text-align: left; font-size: var(--text-sm); color: var(--text-tertiary);">Created</th>
-                                <th style="padding: var(--space-3); text-align: left; font-size: var(--text-sm); color: var(--text-tertiary);">Last Used</th>
+                                <th style="padding: var(--space-3); text-align: left; font-size: var(--text-sm); color: var(--text-tertiary);">Audits</th>
                                 <th style="padding: var(--space-3); text-align: right; font-size: var(--text-sm); color: var(--text-tertiary);">Actions</th>
                             </tr>
                         </thead>
                         <tbody id="api-keys-table-body">
                             <tr>
                                 <td colspan="5" style="padding: var(--space-6); text-align: center; color: var(--text-tertiary);">
-                                    Loading API keys...
+                                    Loading project keys...
                                 </td>
                             </tr>
                         </tbody>
                     </table>
                 </div>
-                
+
                 <!-- Create New Key Button -->
                 <button id="create-api-key" class="btn" style="width: 100%;">
-                    ➕ Create New API Key
+                    ➕ Create New Project Key
                 </button>
-                
+
                 <small class="text-tertiary" style="display: block; margin-top: var(--space-4);">
-                    Keep your API keys secure. Don't share them publicly. Each key can be used independently for different projects or environments.
+                    Keep your project keys secure. Each key organizes audits for one file/project. Use different keys for different clients or contracts.
                 </small>
             </div>
             
-            <!-- Create API Key Modal (nested) -->
+            <!-- Create Project Key Modal (nested) -->
             <div class="modal-backdrop" id="create-key-modal-backdrop" style="display: none; z-index: calc(var(--z-modal) + 1);"></div>
             <div class="modal" id="create-key-modal" style="display: none; z-index: calc(var(--z-modal) + 2); max-width: 500px;">
                 <button class="modal-close" id="create-key-modal-close">×</button>
                 <div class="modal-header">
-                    <h3 class="modal-title">Create New API Key</h3>
+                    <h3 class="modal-title">Create New Project Key</h3>
                 </div>
                 <div class="modal-body">
                     <div class="form-group">
-                        <label for="new-key-label">Key Label</label>
-                        <input type="text" id="new-key-label" placeholder="e.g., Production, Development, CI/CD" style="width: 100%; padding: var(--space-3); background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-md); color: var(--text-primary);">
-                        <small class="text-tertiary">Give this key a descriptive name to remember where it's used.</small>
+                        <label for="new-key-label">Project/Client Name</label>
+                        <input type="text" id="new-key-label" placeholder="e.g., Uniswap Audit, Client ABC, TokenX" style="width: 100%; padding: var(--space-3); background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-md); color: var(--text-primary);">
+                        <small class="text-tertiary">Name this key after the project or client. Each key can only audit one file.</small>
                     </div>
                     <div style="display: flex; gap: var(--space-3); margin-top: var(--space-6);">
                         <button id="create-key-confirm" class="btn" style="flex: 1;">Create Key</button>
@@ -1014,28 +1019,32 @@
 
                 <div class="audit-history-info" style="margin-bottom: var(--space-4); padding: var(--space-3); background: var(--glass-bg); border-radius: var(--radius-md); font-size: var(--text-sm); color: var(--text-tertiary);">
                     <p style="margin: 0 0 8px 0;">
-                        <strong>Background Audits</strong> - Start an audit, leave the page, and retrieve results anytime with your audit key.
+                        <strong>Background Audits</strong> - Start an audit, leave the page, and retrieve results anytime with your <strong>Access Key</strong> (starts with <code>dga_</code>).
                     </p>
                     <p style="margin: 0; color: var(--accent-teal);">
                         📧 Pro/Enterprise users receive email notifications when audits complete.
                     </p>
                 </div>
 
-                <!-- Retrieve by Key -->
+                <!-- Retrieve by Access Key -->
                 <div class="audit-retrieve-section" style="border: 2px dashed var(--glass-border); border-radius: var(--radius-lg); padding: var(--space-6); text-align: center; background: var(--glass-bg); margin-bottom: var(--space-4);">
                     <div style="margin-bottom: var(--space-3);">
                         <span style="font-size: 2rem;">🔑</span>
                     </div>
                     <p style="margin: 0 0 12px 0; color: var(--text-secondary);">
-                        Have an audit key? Retrieve your results:
+                        Have an <strong>Access Key</strong>? Retrieve your audit results:
                     </p>
                     <div style="display: flex; gap: var(--space-2); max-width: 400px; margin: 0 auto;">
                         <input type="text" id="settings-audit-key-input" placeholder="dga_..."
-                               style="flex: 1; font-family: 'JetBrains Mono', monospace; padding: var(--space-3); background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-md); color: var(--text-primary);">
+                               style="flex: 1; font-family: 'JetBrains Mono', monospace; padding: var(--space-3); background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-md); color: var(--text-primary);"
+                               aria-label="Access Key">
                         <button id="settings-retrieve-btn" class="btn" style="min-width: 120px;">
                             🔍 Retrieve
                         </button>
                     </div>
+                    <small style="display: block; margin-top: var(--space-3); color: var(--text-tertiary);">
+                        Access Keys are provided when you submit an audit. They look like: <code>dga_abc123...</code>
+                    </small>
                 </div>
 
                 <!-- Recent Audits List -->

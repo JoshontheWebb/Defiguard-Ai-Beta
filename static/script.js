@@ -205,10 +205,12 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ---------------------------------------------------------------------
-// AUDIT KEY HELPERS - For persistent audit access
+// ACCESS KEY HELPERS - For persistent audit retrieval
+// Access Keys (dga_xxx) are unique identifiers for retrieving specific audit results
+// Different from Project Keys which organize audits by client/project
 // ---------------------------------------------------------------------
 
-// Copy audit key to clipboard
+// Copy access key to clipboard
 window.copyAuditKey = async function(auditKey) {
     try {
         await navigator.clipboard.writeText(auditKey);
@@ -223,9 +225,9 @@ window.copyAuditKey = async function(auditKey) {
                 copyBtn.style.color = '';
             }, 2000);
         }
-        ToastNotification.show('Audit key copied to clipboard!', 'success');
+        ToastNotification.show('Access key copied to clipboard!', 'success');
     } catch (err) {
-        console.error('Failed to copy audit key:', err);
+        console.error('Failed to copy access key:', err);
         // Fallback for older browsers
         const textArea = document.createElement('textarea');
         textArea.value = auditKey;
@@ -233,14 +235,14 @@ window.copyAuditKey = async function(auditKey) {
         textArea.select();
         document.execCommand('copy');
         document.body.removeChild(textArea);
-        ToastNotification.show('Audit key copied!', 'success');
+        ToastNotification.show('Access key copied!', 'success');
     }
 };
 
-// Retrieve audit results by key
+// Retrieve audit results by access key
 window.retrieveAuditByKey = async function(auditKey) {
     if (!auditKey || !auditKey.startsWith('dga_')) {
-        ToastNotification.show('Invalid audit key format. Keys start with "dga_"', 'error');
+        ToastNotification.show('Invalid access key format. Keys start with "dga_"', 'error');
         return null;
     }
 
@@ -297,7 +299,7 @@ window.renderAuditResults = function(report) {
     window.dispatchEvent(new CustomEvent('auditComplete', { detail: report }));
 };
 
-// Show the audit key retrieval modal
+// Show the access key retrieval modal
 window.showAuditKeyRetrievalModal = function() {
     // Check if modal already exists
     let modal = document.getElementById('audit-key-modal');
@@ -318,10 +320,11 @@ window.showAuditKeyRetrievalModal = function() {
             </div>
             <div class="modal-body">
                 <p style="color: var(--text-secondary); margin-bottom: var(--space-4);">
-                    Enter your audit access key to retrieve results from a previous audit.
+                    Enter your <strong>Access Key</strong> to retrieve results from a previous audit.
+                    Access keys start with <code>dga_</code> and are provided when you submit an audit.
                 </p>
                 <div class="form-group">
-                    <label for="retrieve-audit-key">Audit Key</label>
+                    <label for="retrieve-audit-key">Access Key</label>
                     <input type="text" id="retrieve-audit-key" placeholder="dga_..."
                            style="font-family: monospace; width: 100%;">
                 </div>
@@ -666,13 +669,13 @@ class AuditQueueTracker {
     }
 
     showAuditKey(auditKey) {
-        // Validate audit key format for security
+        // Validate access key format for security
         if (typeof auditKey !== 'string' || !auditKey.startsWith('dga_') || auditKey.length > 64) {
-            console.error('Invalid audit key format');
+            console.error('Invalid access key format');
             return;
         }
 
-        // Create and show the audit key notification
+        // Create and show the access key notification
         const existingNotif = document.getElementById('audit-key-notification');
         if (existingNotif) existingNotif.remove();
 
@@ -693,7 +696,7 @@ class AuditQueueTracker {
         icon.textContent = '🔑';
 
         const title = document.createElement('h4');
-        title.textContent = 'Your Audit Access Key';
+        title.textContent = 'Your Access Key';
 
         const closeBtn = document.createElement('button');
         closeBtn.className = 'audit-key-close';
@@ -710,7 +713,7 @@ class AuditQueueTracker {
 
         const info = document.createElement('p');
         info.className = 'audit-key-info';
-        info.textContent = 'Save this key to access your results anytime, even after leaving this page:';
+        info.textContent = 'Save this Access Key to retrieve your audit results anytime:';
 
         const keyValue = document.createElement('div');
         keyValue.className = 'audit-key-value';
@@ -4235,7 +4238,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             if (!response.ok) {
               const errorData = await response.json().catch(() => ({}));
 
-              // Handle 409 Conflict - One File Per Key Policy
+              // Handle 409 Conflict - One File Per Project Key Policy
               if (response.status === 409 && errorData.detail?.error === 'one_file_per_key') {
                 loading.classList.remove("show");
                 const detail = errorData.detail;
@@ -4243,22 +4246,22 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
                 // Show informative error with action options
                 const errorHtml = `
                   <div class="one-file-per-key-error" style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 16px; margin: 16px 0;">
-                    <h4 style="color: #856404; margin: 0 0 12px 0;">📁 API Key Already Assigned</h4>
+                    <h4 style="color: #856404; margin: 0 0 12px 0;">📁 Project Key Already Assigned</h4>
                     <p style="color: #856404; margin: 0 0 12px 0;">
-                      The API key "<strong>${escapeHtml(detail.api_key_label || 'Selected Key')}</strong>" is already assigned to:
+                      The project key "<strong>${escapeHtml(detail.api_key_label || 'Selected Key')}</strong>" is already assigned to:
                       <strong>${escapeHtml(detail.existing_file || 'another file')}</strong>
                     </p>
                     <p style="color: #856404; margin: 0 0 16px 0;">
-                      Each API key can only audit <strong>one file</strong>. You can:
+                      Each project key can only audit <strong>one file</strong>. You can:
                     </p>
                     <div style="display: flex; gap: 12px; flex-wrap: wrap;">
                       <button onclick="document.getElementById('api_key_select').value=''; this.closest('.one-file-per-key-error').remove();"
                               style="background: #6c757d; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
                         🔄 Remove Key Assignment
                       </button>
-                      <button onclick="window.showApiKeyModal ? window.showApiKeyModal() : alert('Open API Keys in Settings'); this.closest('.one-file-per-key-error').remove();"
+                      <button onclick="window.showApiKeyModal ? window.showApiKeyModal() : alert('Open Project Keys in Settings'); this.closest('.one-file-per-key-error').remove();"
                               style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
-                        ➕ Create New API Key
+                        ➕ Create New Project Key
                       </button>
                       <button onclick="window.retrieveAuditByKey && window.retrieveAuditByKey('${escapeHtml(detail.existing_audit_key || '')}'); this.closest('.one-file-per-key-error').remove();"
                               style="background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
@@ -4736,34 +4739,34 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
         }
       };
 
-      // Load and display all API keys
+      // Load and display all project keys
       const loadApiKeys = async () => {
         try {
           const response = await fetch("/api/keys", {
             credentials: "include"
           });
-          
-          if (!response.ok) throw new Error("Failed to load API keys");
-          
+
+          if (!response.ok) throw new Error("Failed to load project keys");
+
           const data = await response.json();
           const { keys, active_count, max_keys, tier } = data;
-          
+
           // Update count display
           if (apiKeyCountDisplay) {
             if (max_keys === null) {
-              apiKeyCountDisplay.textContent = `Active Keys: ${active_count} (Unlimited - Enterprise)`;
+              apiKeyCountDisplay.textContent = `Active Project Keys: ${active_count} (Unlimited - Enterprise)`;
             } else {
-              apiKeyCountDisplay.textContent = `Active Keys: ${active_count}/${max_keys} (Pro Tier)`;
+              apiKeyCountDisplay.textContent = `Active Project Keys: ${active_count}/${max_keys} (Pro Tier)`;
             }
           }
-          
+
           // Update table
           if (apiKeysTableBody) {
             if (keys.length === 0) {
               apiKeysTableBody.innerHTML = `
                 <tr>
                   <td colspan="6" style="padding: var(--space-6); text-align: center; color: var(--text-tertiary);">
-                    No API keys yet. Create your first key to get started!
+                    No project keys yet. Create your first key to organize audits by client or project!
                   </td>
                 </tr>
               `;
@@ -4822,21 +4825,21 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
                     });
                   } catch (err) {
                     console.error("[ERROR] Failed to revoke:", err);
-                    alert("Failed to revoke API key");
+                    alert("Failed to revoke project key");
                   }
                 });
               });
             }
           }
-          
-          debugLog("[DEBUG] API keys loaded successfully");
+
+          debugLog("[DEBUG] Project keys loaded successfully");
         } catch (error) {
-          console.error("[ERROR] Failed to load API keys:", error);
+          console.error("[ERROR] Failed to load project keys:", error);
           if (apiKeysTableBody) {
             apiKeysTableBody.innerHTML = `
               <tr>
                 <td colspan="5" style="padding: var(--space-6); text-align: center; color: var(--error);">
-                  Failed to load API keys. Please try again.
+                  Failed to load project keys. Please try again.
                 </td>
               </tr>
             `;
@@ -5156,7 +5159,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
         }
       };
 
-      // Show API Key Created Modal - Enterprise-grade copyable key display
+      // Show Project Key Created Modal - Enterprise-grade copyable key display
       const showApiKeyCreatedModal = (label, apiKey) => {
         // Create modal dynamically
         const existingModal = document.getElementById('api-key-created-modal');
@@ -5176,12 +5179,12 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
               box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
             ">
               <div style="text-align: center; margin-bottom: var(--space-6, 24px);">
-                <div style="font-size: 48px; margin-bottom: var(--space-4, 16px);">🔐</div>
+                <div style="font-size: 48px; margin-bottom: var(--space-4, 16px);">📁</div>
                 <h2 style="color: var(--text-primary, #fff); margin: 0 0 8px 0; font-size: var(--text-xl, 20px);">
-                  API Key Created Successfully
+                  Project Key Created Successfully
                 </h2>
                 <p style="color: var(--text-secondary, #a0a0a0); margin: 0; font-size: var(--text-sm, 14px);">
-                  Label: <strong>${escapeHtml(label)}</strong>
+                  Project: <strong>${escapeHtml(label)}</strong>
                 </p>
               </div>
 
@@ -5284,19 +5287,19 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
       createKeyCancel?.addEventListener("click", closeCreateKeyModal);
       createKeyModalBackdrop?.addEventListener("click", closeCreateKeyModal);
 
-      // Confirm Create Key
+      // Confirm Create Project Key
       createKeyConfirm?.addEventListener("click", async () => {
         const label = newKeyLabelInput?.value.trim();
-        
+
         if (!label) {
-          alert("Please enter a label for your API key");
+          alert("Please enter a project/client name for your key");
           return;
         }
-        
+
         try {
           createKeyConfirm.disabled = true;
           createKeyConfirm.textContent = "Creating...";
-          
+
           await withCsrfToken(async (csrfToken) => {
             const response = await fetch("/api/keys/create", {
               method: "POST",
@@ -5307,12 +5310,12 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
               credentials: "include",
               body: JSON.stringify({ label })
             });
-            
+
             if (!response.ok) {
               const error = await response.json();
-              throw new Error(error.detail || "Failed to create API key");
+              throw new Error(error.detail || "Failed to create project key");
             }
-            
+
             const data = await response.json();
 
             closeCreateKeyModal();
@@ -5326,10 +5329,10 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             createKeyConfirm.disabled = false;
             createKeyConfirm.textContent = "Create Key";
           });
-          
+
         } catch (error) {
-          console.error("[ERROR] Failed to create API key:", error);
-          alert(`❌ Failed to create API key: ${error.message}`);
+          console.error("[ERROR] Failed to create project key:", error);
+          alert(`❌ Failed to create project key: ${error.message}`);
           createKeyConfirm.disabled = false;
           createKeyConfirm.textContent = "Create Key";
         }
