@@ -847,7 +847,7 @@ window.retrieveAuditByKey = async function(auditKey) {
 
     try {
         ToastNotification.show('Retrieving audit...', 'info');
-        const response = await fetch(`/audit/retrieve/${auditKey}`);
+        const response = await fetchWithRetry(`/audit/retrieve/${auditKey}`, {}, 3, 1000);
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
             throw new Error(error.detail || 'Failed to retrieve audit');
@@ -1139,9 +1139,7 @@ const CertoraNotificationChecker = {
         this.isChecking = true;
 
         try {
-            const response = await fetch('/api/certora/notifications', {
-                credentials: 'include'
-            });
+            const response = await fetchWithRetry('/api/certora/notifications', {}, 2, 1000);
 
             if (!response.ok) {
                 this.isChecking = false;
@@ -1180,19 +1178,18 @@ const CertoraNotificationChecker = {
 
     async dismissNotifications(jobIds) {
         try {
-            // Get CSRF token
-            const csrfResponse = await fetch('/csrf-token', { credentials: 'include' });
+            // Get CSRF token with retry
+            const csrfResponse = await fetchWithRetry('/csrf-token', {}, 2, 500);
             const { csrf_token } = await csrfResponse.json();
 
-            await fetch('/api/certora/notifications/dismiss', {
+            await fetchWithRetry('/api/certora/notifications/dismiss', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'X-CSRFToken': csrf_token
                 },
-                credentials: 'include',
                 body: JSON.stringify({ job_ids: jobIds })
-            });
+            }, 2, 1000);
         } catch (error) {
             debugLog('[CERTORA_NOTIFY] Error dismissing notifications:', error);
         }
@@ -1250,12 +1247,11 @@ class AuditQueueTracker {
 
     async submitAudit(formData, csrfToken) {
         try {
-            const response = await fetch('/audit/submit', {
+            const response = await fetchWithRetry('/audit/submit', {
                 method: 'POST',
                 headers: { 'X-CSRFToken': csrfToken },
-                body: formData,
-                credentials: 'include'
-            });
+                body: formData
+            }, 2, 2000); // 2 retries with 2s delay for uploads
 
             if (!response.ok) {
                 const errorData = await response.json().catch(() => ({}));
@@ -1393,7 +1389,7 @@ class AuditQueueTracker {
         // Get WebSocket authentication token
         let wsToken = "";
         try {
-            const tokenResponse = await fetch("/api/ws-token", { credentials: 'include' });
+            const tokenResponse = await fetchWithRetry("/api/ws-token", {}, 2, 500);
             if (tokenResponse.ok) {
                 const tokenData = await tokenResponse.json();
                 wsToken = tokenData.token || "";
@@ -2231,10 +2227,9 @@ class WalletManager {
 
     async fetchCsrfToken() {
         try {
-            const response = await fetch(`/csrf-token?_=${Date.now()}`, {
-                method: 'GET',
-                credentials: 'include'
-            });
+            const response = await fetchWithRetry(`/csrf-token?_=${Date.now()}`, {
+                method: 'GET'
+            }, 2, 500);
             if (!response.ok) throw new Error('CSRF fetch failed');
             const data = await response.json();
             return data.csrf_token || null;
@@ -2257,19 +2252,18 @@ class WalletManager {
             }
 
             // Send to backend to verify and save
-            const response = await fetch('/api/wallet/connect', {
+            const response = await fetchWithRetry('/api/wallet/connect', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'X-CSRFToken': csrfToken
                 },
-                credentials: 'include',
                 body: JSON.stringify({
                     address: this.address,
                     message: message,
                     signature: signature
                 })
-            });
+            }, 2, 1000);
 
             if (!response.ok) {
                 const error = await response.json().catch(() => ({}));
@@ -2306,9 +2300,7 @@ class WalletManager {
 
         try {
             // Fetch from backend (which proxies to Etherscan)
-            const response = await fetch(`/api/wallet/contracts?address=${this.address}`, {
-                credentials: 'include'
-            });
+            const response = await fetchWithRetry(`/api/wallet/contracts?address=${this.address}`, {}, 2, 1000);
 
             if (!response.ok) {
                 throw new Error('Failed to fetch contracts');
@@ -2361,9 +2353,7 @@ class WalletManager {
 
         try {
             // Fetch source code from backend
-            const response = await fetch(`/api/wallet/contract-source?address=${contractAddress}`, {
-                credentials: 'include'
-            });
+            const response = await fetchWithRetry(`/api/wallet/contract-source?address=${contractAddress}`, {}, 2, 1000);
 
             if (!response.ok) {
                 const error = await response.json().catch(() => ({}));
@@ -2546,10 +2536,9 @@ document.addEventListener("DOMContentLoaded", () => {
   // Section2: CSRF Token Management – fresh token for every POST (no cache, no stale risk, Stripe always works)
   const fetchCsrfToken = async () => {
     try {
-      const response = await fetch(`/csrf-token?_=${Date.now()}`, {
-        method: "GET",
-        credentials: "include",
-      });
+      const response = await fetchWithRetry(`/csrf-token?_=${Date.now()}`, {
+        method: "GET"
+      }, 2, 500);
       if (!response.ok) throw new Error("CSRF fetch failed");
       const data = await response.json();
       if (!data.csrf_token) throw new Error("Empty token");
@@ -2804,7 +2793,7 @@ document.addEventListener("DOMContentLoaded", () => {
       // This queries /api/user/audits and finds any in-progress audits
       const checkOngoingAudits = async () => {
         try {
-          const response = await fetch('/api/user/audits?limit=5', { credentials: 'include' });
+          const response = await fetchWithRetry('/api/user/audits?limit=5', {}, 2, 1000);
           if (!response.ok) {
             debugLog('[AUDIT] Could not fetch user audits - user may not be logged in');
             return;
@@ -2866,7 +2855,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         const pollAudit = async () => {
           try {
-            const response = await fetch(`/audit/retrieve/${auditKey}`);
+            const response = await fetchWithRetry(`/audit/retrieve/${auditKey}`, {}, 2, 1000);
             if (!response.ok) return;
 
             const data = await response.json();
@@ -2921,7 +2910,7 @@ document.addEventListener("DOMContentLoaded", () => {
       // Security: Only connect if we have a valid token (server requires authentication)
       let wsToken = "";
       try {
-        const tokenResponse = await fetch("/api/ws-token", { credentials: 'include' });
+        const tokenResponse = await fetchWithRetry("/api/ws-token", {}, 2, 500);
         if (tokenResponse.ok) {
           const tokenData = await tokenResponse.json();
           wsToken = tokenData.token || "";
@@ -3152,14 +3141,13 @@ document.addEventListener("DOMContentLoaded", () => {
             console.log(
               `[DEBUG] Fetching ${endpoint}?${query}, time=${new Date().toISOString()}`
             );
-            const response = await fetch(`${endpoint}?${query}`, {
+            const response = await fetchWithRetry(`${endpoint}?${query}`, {
               method: "GET",
               headers: {
                 Accept: "application/json",
                 "Cache-Control": "no-cache",
-              },
-              credentials: "include",
-            });
+              }
+            }, 3, 2000);
             if (!response.ok) {
               const errorData = await response.json().catch(() => ({}));
               throw new Error(
@@ -3254,7 +3242,7 @@ document.addEventListener("DOMContentLoaded", () => {
         try {
           const user = await fetchUsername();
           const username = user?.username || "";
-          const response = await fetch(
+          const response = await fetchWithRetry(
             `/facets/${contractAddress}?username=${encodeURIComponent(
               username
             )}&_=${Date.now()}`,
@@ -3263,9 +3251,8 @@ document.addEventListener("DOMContentLoaded", () => {
               headers: {
                 Accept: "application/json",
                 "Cache-Control": "no-cache",
-              },
-              credentials: "include",
-            }
+              }
+            }, 2, 1000
           );
           if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
@@ -3396,10 +3383,9 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!selector) return;
 
         try {
-          const response = await fetch('/api/keys', {
-            credentials: 'include',
+          const response = await fetchWithRetry('/api/keys', {
             headers: { 'Accept': 'application/json' }
-          });
+          }, 2, 1000);
 
           if (!response.ok) {
             // User might not have API key access yet - hide selector silently
@@ -3772,16 +3758,15 @@ document.addEventListener("DOMContentLoaded", () => {
             console.log(
               `[DEBUG] Sending /create-tier-checkout request with body: ${requestBody}, time=${new Date().toISOString()}`
             );
-            const response = await fetch("/create-tier-checkout", {
+            const response = await fetchWithRetry("/create-tier-checkout", {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
                 "X-CSRFToken": token,
                 Accept: "application/json",
               },
-              credentials: "include",
               body: requestBody,
-            });
+            }, 3, 2000);
             console.log(
               `[DEBUG] /create-tier-checkout response status: ${
                 response.status
@@ -3862,16 +3847,15 @@ document.addEventListener("DOMContentLoaded", () => {
             console.log(
               `[DEBUG] Sending /enterprise-audit request for username=${username}, time=${new Date().toISOString()}`
             );
-            const response = await fetch(
+            const response = await fetchWithRetry(
               `/enterprise-audit?username=${encodeURIComponent(username)}`,
               {
                 method: "POST",
-                headers: { 
+                headers: {
                   "X-CSRFToken": token
                 },
-                body: formData,
-                credentials: "include",
-              }
+                body: formData
+              }, 2, 2000
             );
             console.log(
               `[DEBUG] /enterprise-audit response status: ${
@@ -5109,12 +5093,11 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             }
 
             // Submit to /audit - it will either run immediately or queue
-            const response = await fetch(auditUrl, {
+            const response = await fetchWithRetry(auditUrl, {
               method: 'POST',
               headers: { 'X-CSRFToken': token },
-              body: formData,
-              credentials: 'include'
-            });
+              body: formData
+            }, 2, 3000); // 2 retries with 3s delay for file uploads
             
             if (!response.ok) {
               const errorData = await response.json().catch(() => ({}));
@@ -5364,9 +5347,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           }
 
           debugLog(`[DEBUG] Fetching PDF from: ${fetchUrl}`);
-          const response = await fetch(fetchUrl, {
-            credentials: "include"
-          });
+          const response = await fetchWithRetry(fetchUrl, {}, 3, 1000);
 
           if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
@@ -5436,9 +5417,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           mobilePdfDownload.textContent = "⏳ Downloading...";
           mobilePdfDownload.disabled = true;
 
-          const response = await fetch(fetchUrl, {
-            credentials: "include"
-          });
+          const response = await fetchWithRetry(fetchUrl, {}, 3, 1000);
 
           if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
@@ -5502,14 +5481,13 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             usageWarning.textContent = "Minting NFT reward...";
             usageWarning.classList.remove("error");
             
-            const response = await fetch(`/mint-nft?username=${encodeURIComponent(username)}`, {
+            const response = await fetchWithRetry(`/mint-nft?username=${encodeURIComponent(username)}`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
                 "X-CSRF-Token": token,
-              },
-              credentials: "include",
-            });
+              }
+            }, 2, 2000);
             
             if (!response.ok) {
               const errorData = await response.json().catch(() => ({}));
@@ -5559,10 +5537,9 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           const tierUrl = user?.username 
             ? `/tier?username=${encodeURIComponent(user.username)}`
             : "/tier";
-          const tierResponse = await fetch(tierUrl, {
-            headers: { Accept: "application/json" },
-            credentials: "include"
-          });
+          const tierResponse = await fetchWithRetry(tierUrl, {
+            headers: { Accept: "application/json" }
+          }, 2, 1000);
           
           if (!tierResponse.ok) throw new Error("Failed to fetch tier data");
           
@@ -5648,9 +5625,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
       // Load and display all project keys
       const loadApiKeys = async () => {
         try {
-          const response = await fetch("/api/keys", {
-            credentials: "include"
-          });
+          const response = await fetchWithRetry("/api/keys", {}, 2, 1000);
 
           if (!response.ok) throw new Error("Failed to load project keys");
 
@@ -5718,11 +5693,10 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
 
                   try {
                     await withCsrfToken(async (csrfToken) => {
-                      const response = await fetch(`/api/keys/${keyId}`, {
+                      const response = await fetchWithRetry(`/api/keys/${keyId}`, {
                         method: "DELETE",
-                        headers: { "X-CSRFToken": csrfToken },
-                        credentials: "include"
-                      });
+                        headers: { "X-CSRFToken": csrfToken }
+                      }, 2, 1000);
 
                       if (!response.ok) throw new Error("Failed to revoke key");
 
@@ -5760,9 +5734,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
       // Load and display Certora verification jobs
       const loadCertoraJobs = async () => {
         try {
-          const response = await fetch("/api/certora/jobs", {
-            credentials: "include"
-          });
+          const response = await fetchWithRetry("/api/certora/jobs", {}, 2, 1000);
 
           if (!response.ok) throw new Error("Failed to load Certora jobs");
 
@@ -5865,11 +5837,10 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
 
                   try {
                     await withCsrfToken(async (csrfToken) => {
-                      const response = await fetch(`/api/certora/poll/${jobId}`, {
+                      const response = await fetchWithRetry(`/api/certora/poll/${jobId}`, {
                         method: "POST",
-                        headers: { "X-CSRFToken": csrfToken },
-                        credentials: "include"
-                      });
+                        headers: { "X-CSRFToken": csrfToken }
+                      }, 2, 1000);
 
                       if (!response.ok) throw new Error("Failed to poll job");
 
@@ -5904,11 +5875,10 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
 
                   try {
                     await withCsrfToken(async (csrfToken) => {
-                      const response = await fetch(`/api/certora/job/${jobId}`, {
+                      const response = await fetchWithRetry(`/api/certora/job/${jobId}`, {
                         method: "DELETE",
-                        headers: { "X-CSRFToken": csrfToken },
-                        credentials: "include"
-                      });
+                        headers: { "X-CSRFToken": csrfToken }
+                      }, 2, 1000);
 
                       if (!response.ok) throw new Error("Failed to delete job");
 
@@ -5964,12 +5934,11 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           formData.append('file', file);
 
           await withCsrfToken(async (csrfToken) => {
-            const response = await fetch("/api/certora/start", {
+            const response = await fetchWithRetry("/api/certora/start", {
               method: "POST",
               headers: { "X-CSRFToken": csrfToken },
-              credentials: "include",
               body: formData
-            });
+            }, 2, 2000); // 2 retries with 2s base delay for uploads
 
             if (!response.ok) {
               const error = await response.json();
@@ -6207,15 +6176,14 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           createKeyConfirm.textContent = "Creating...";
 
           await withCsrfToken(async (csrfToken) => {
-            const response = await fetch("/api/keys/create", {
+            const response = await fetchWithRetry("/api/keys/create", {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
                 "X-CSRFToken": csrfToken
               },
-              credentials: "include",
               body: JSON.stringify({ label })
-            });
+            }, 2, 1000);
 
             if (!response.ok) {
               const error = await response.json();
@@ -6339,9 +6307,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
       // Check if user needs to accept legal documents
       const checkLegalAcceptance = async () => {
         try {
-          const response = await fetch("/legal/status", {
-            credentials: "include"
-          });
+          const response = await fetchWithRetry("/legal/status", {}, 2, 1000);
           
           if (!response.ok) {
             console.error("[LEGAL] Failed to check acceptance status");
@@ -6402,18 +6368,17 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           legalAcceptButton.textContent = "Accepting...";
           
           await withCsrfToken(async (csrfToken) => {
-            const response = await fetch("/legal/accept", {
+            const response = await fetchWithRetry("/legal/accept", {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
                 "X-CSRFToken": csrfToken
               },
-              credentials: "include",
               body: JSON.stringify({
                 accepted_terms: acceptTermsCheckbox.checked,
                 accepted_privacy: acceptPrivacyCheckbox.checked
               })
-            });
+            }, 2, 1000);
             
             if (!response.ok) {
               const error = await response.json();
