@@ -1611,22 +1611,40 @@ class AuditQueueTracker {
             }
         }
         
-        // Upgrade prompt for Free/Starter users
+        // Upgrade prompt for Free/Starter users - Psychological triggers: Loss aversion, urgency, social proof
         let upgradeHtml = '';
         if (isFreeTier) {
+            // Calculate potential wait based on position
+            const estimatedWait = data.position > 1 ? Math.ceil(data.position * 2.5) : 1;
             upgradeHtml = `
-                <div class="queue-upgrade-prompt">
-                    <span class="upgrade-icon">⚡</span>
-                    <span>Pro & Enterprise audits are prioritized.</span>
-                    <a href="#tier-select" class="upgrade-link" onclick="document.getElementById('tier-select').scrollIntoView({behavior: 'smooth'})">Upgrade to skip ahead</a>
+                <div class="queue-upgrade-prompt" style="background: linear-gradient(135deg, rgba(231, 76, 60, 0.1), rgba(155, 89, 182, 0.1)); border: 1px solid var(--accent-purple);">
+                    <div style="display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2);">
+                        <span class="upgrade-icon">⏱️</span>
+                        <span style="font-weight: 600; color: var(--text-primary);">Estimated wait: ~${estimatedWait} minutes</span>
+                    </div>
+                    <p style="font-size: var(--text-sm); color: var(--text-secondary); margin: 0 0 var(--space-2) 0;">
+                        <strong style="color: var(--accent-purple);">Team ($199/mo)</strong> and <strong>Enterprise</strong> audits are processed first.
+                        Skip the line and get deeper analysis with Mythril + Echidna fuzzing.
+                    </p>
+                    <a href="#tier-select" class="upgrade-link" style="display: inline-block; padding: 8px 16px; background: var(--accent-purple); color: white; border-radius: 6px; text-decoration: none; font-weight: 600;" onclick="document.getElementById('tier-select').scrollIntoView({behavior: 'smooth'})">
+                        ⚡ Upgrade & Skip Ahead
+                    </a>
                 </div>
             `;
         } else if (isStarterTier) {
             upgradeHtml = `
-                <div class="queue-upgrade-prompt starter">
-                    <span class="upgrade-icon">⚡</span>
-                    <span>Pro & Enterprise audits get priority.</span>
-                    <a href="#tier-select" class="upgrade-link" onclick="document.getElementById('tier-select').scrollIntoView({behavior: 'smooth'})">Upgrade to Pro</a>
+                <div class="queue-upgrade-prompt starter" style="background: linear-gradient(135deg, rgba(52, 152, 219, 0.1), rgba(155, 89, 182, 0.1)); border: 1px solid var(--accent-teal);">
+                    <div style="display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2);">
+                        <span class="upgrade-icon">🔓</span>
+                        <span style="font-weight: 600; color: var(--text-primary);">Unlock Priority Processing</span>
+                    </div>
+                    <p style="font-size: var(--text-sm); color: var(--text-secondary); margin: 0 0 var(--space-2) 0;">
+                        <strong style="color: var(--green);">Team plan</strong> includes priority queue, Mythril deep analysis,
+                        Echidna fuzzing, on-chain detection, and API access for CI/CD integration.
+                    </p>
+                    <a href="#tier-select" class="upgrade-link" style="display: inline-block; padding: 8px 16px; background: var(--green); color: white; border-radius: 6px; text-decoration: none; font-weight: 600;" onclick="document.getElementById('tier-select').scrollIntoView({behavior: 'smooth'})">
+                        🚀 Upgrade to Team - $199/mo
+                    </a>
                 </div>
             `;
         }
@@ -3634,6 +3652,101 @@ document.addEventListener("DOMContentLoaded", () => {
 
           if (upgradeLink) upgradeLink.style.display = tier !== "enterprise" ? "inline-block" : "none";
 
+          // =========================================================================
+          // TIER-AWARE UI CLEANING: Hide irrelevant upgrade prompts for paid users
+          // Psychological principle: Reduce cognitive load, show only relevant options
+          // =========================================================================
+          const pricingTable = document.getElementById("pricing-table");
+          const upgradePrompt = document.querySelector(".upgrade-prompt");
+          const tierSelector = document.getElementById("tier-select");
+          const tierSwitchBtn = document.getElementById("tier-switch");
+
+          // Enterprise users: Hide ALL upgrade prompts (they're at the top!)
+          if (tier === "enterprise") {
+            if (pricingTable) pricingTable.style.display = "none";
+            if (tierSelector) tierSelector.parentElement.style.display = "none";
+            if (tierSwitchBtn) tierSwitchBtn.style.display = "none";
+            // Show appreciation message instead
+            if (upgradePrompt) {
+              upgradePrompt.innerHTML = `
+                <div class="enterprise-appreciation" style="text-align: center; padding: var(--space-6);">
+                  <h3 style="color: var(--accent-purple);">💼 Enterprise Plan Active</h3>
+                  <p style="color: var(--text-secondary); margin-top: var(--space-3);">
+                    You have access to our complete security suite: Slither, Mythril, Echidna,
+                    formal verification, multi-AI consensus, and white-label reports.
+                  </p>
+                  <p style="color: var(--green); font-weight: 600; margin-top: var(--space-2);">
+                    ✓ Priority Queue Position: <strong>1st</strong> | ✓ Unlimited Audits | ✓ Dedicated Support
+                  </p>
+                </div>
+              `;
+            }
+          }
+          // Pro users: Only show Enterprise upgrade (not Developer)
+          else if (tier === "pro") {
+            if (pricingTable) {
+              // Hide Free and Developer rows, only show Enterprise
+              const rows = pricingTable.querySelectorAll("tbody tr");
+              rows.forEach((row, idx) => {
+                // Keep only Enterprise row (last one)
+                row.style.display = idx === 3 ? "table-row" : "none";
+              });
+            }
+            if (tierSelector) {
+              // Only show Enterprise option
+              Array.from(tierSelector.options).forEach(opt => {
+                opt.style.display = opt.value === "enterprise" ? "block" : "none";
+                if (opt.value === "enterprise") opt.selected = true;
+              });
+            }
+            // Update header messaging
+            const promptHeader = upgradePrompt?.querySelector("h3");
+            if (promptHeader) {
+              promptHeader.innerHTML = "🚀 Unlock Protocol-Grade Security";
+            }
+          }
+          // Starter users: Show Pro and Enterprise (not Free)
+          else if (tier === "starter") {
+            if (pricingTable) {
+              const rows = pricingTable.querySelectorAll("tbody tr");
+              rows.forEach((row, idx) => {
+                // Hide Free row (first one)
+                row.style.display = idx === 0 ? "none" : "table-row";
+              });
+            }
+            if (tierSelector) {
+              // Hide starter option (they already have it)
+              Array.from(tierSelector.options).forEach(opt => {
+                opt.style.display = opt.value === "starter" ? "none" : "block";
+              });
+            }
+          }
+          // Free users: Show all options with value anchoring
+          else {
+            // Add value anchoring message for free users
+            const valueAnchor = document.getElementById("value-anchor-message");
+            if (!valueAnchor && upgradePrompt) {
+              const anchorDiv = document.createElement("div");
+              anchorDiv.id = "value-anchor-message";
+              anchorDiv.className = "value-anchor";
+              anchorDiv.innerHTML = `
+                <div style="background: linear-gradient(135deg, rgba(155, 89, 182, 0.15), rgba(52, 152, 219, 0.15));
+                            border-radius: 12px; padding: var(--space-4); margin-bottom: var(--space-4);
+                            border: 1px solid var(--accent-purple);">
+                  <p style="font-size: var(--text-lg); font-weight: 600; color: var(--text-primary); margin: 0;">
+                    💡 <strong>Traditional audits cost $15,000 - $70,000+</strong>
+                  </p>
+                  <p style="color: var(--text-secondary); margin-top: var(--space-2); font-size: var(--text-sm);">
+                    Get the same vulnerability detection for <strong style="color: var(--green);">99.6% less</strong>.
+                    Our AI-powered platform uses the exact same tools (Slither, Mythril, Echidna) trusted by
+                    CertiK, Trail of Bits, and ConsenSys Diligence.
+                  </p>
+                </div>
+              `;
+              upgradePrompt.insertBefore(anchorDiv, upgradePrompt.firstChild);
+            }
+          }
+
           maxFileSize =
             size_limit === "Unlimited"
               ? Infinity
@@ -4115,19 +4228,44 @@ document.addEventListener("DOMContentLoaded", () => {
           onchainSection.style.display = "none";
         }
 
-        // FREE TIER UPGRADE PROMPT
+        // FREE TIER UPGRADE PROMPT - Psychological: Loss aversion, social proof, urgency
         if (report.upgrade_prompt) {
           const upgradePromptEl = document.getElementById("upgrade-prompt");
           if (upgradePromptEl) {
+            // Calculate value proposition
+            const totalIssues = report.total_issues || report.issues?.length || 0;
+            const hiddenCount = totalIssues > 3 ? totalIssues - 3 : 0;
+
             upgradePromptEl.innerHTML = `
-              <div class="upgrade-banner">
-                <div class="upgrade-icon">🔒</div>
-                <div class="upgrade-content">
-                  <h3>More Issues Detected!</h3>
-                  <p>${escapeHtml(report.upgrade_prompt || '')}</p>
-                  <a href="#tier-select" class="btn btn-primary" onclick="document.getElementById('tier-select').scrollIntoView({behavior: 'smooth'})">
-                    Upgrade to See All Issues & Get Fix Recommendations
-                  </a>
+              <div class="upgrade-banner" style="background: linear-gradient(135deg, rgba(231, 76, 60, 0.08), rgba(155, 89, 182, 0.12));
+                                                  border: 2px solid var(--accent-purple); border-radius: 16px;
+                                                  padding: var(--space-5); margin: var(--space-4) 0;">
+                <div style="display: flex; align-items: flex-start; gap: var(--space-4);">
+                  <div class="upgrade-icon" style="font-size: 48px; line-height: 1;">⚠️</div>
+                  <div class="upgrade-content" style="flex: 1;">
+                    <h3 style="color: var(--red); margin: 0 0 var(--space-2) 0; font-size: var(--text-xl);">
+                      ${hiddenCount > 0 ? `${hiddenCount} Vulnerabilities Hidden` : 'Limited Analysis'}
+                    </h3>
+                    <p style="color: var(--text-primary); margin: 0 0 var(--space-3) 0; font-size: var(--text-base);">
+                      ${escapeHtml(report.upgrade_prompt || '')}
+                    </p>
+                    <div style="display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center;">
+                      <a href="#tier-select" class="btn btn-primary"
+                         style="background: linear-gradient(135deg, var(--accent-purple), var(--accent-teal));
+                                padding: 12px 24px; font-size: var(--text-base); font-weight: 700;
+                                border-radius: 8px; text-decoration: none; color: white;"
+                         onclick="document.getElementById('tier-select').scrollIntoView({behavior: 'smooth'})">
+                        🔓 Unlock Full Report - $59/mo
+                      </a>
+                      <span style="color: var(--text-tertiary); font-size: var(--text-sm);">
+                        <strong style="color: var(--green);">Save 99%</strong> vs traditional audits ($15,000+)
+                      </span>
+                    </div>
+                    <p style="color: var(--text-tertiary); font-size: var(--text-xs); margin-top: var(--space-3);">
+                      ✓ See all ${totalIssues} vulnerabilities | ✓ AI-powered fix recommendations |
+                      ✓ PDF security report | ✓ MiCA/SEC FIT21 compliance scoring
+                    </p>
+                  </div>
                 </div>
               </div>
             `;

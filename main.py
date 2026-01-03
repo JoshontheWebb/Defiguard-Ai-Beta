@@ -4316,18 +4316,49 @@ def filter_issues_for_free_tier(report: dict[str, Any], tier: str) -> dict[str, 
     top_3 = sorted_issues[:3]
     hidden_count = len(issues) - 3
     
-    # Add upgrade message
+    # Count severity of hidden issues for psychological impact
+    hidden_issues = sorted_issues[3:]
+    hidden_critical = sum(1 for i in hidden_issues if i.get("severity", "").upper() == "CRITICAL")
+    hidden_high = sum(1 for i in hidden_issues if i.get("severity", "").upper() == "HIGH")
+
+    # Add upgrade message with loss aversion and urgency triggers
     filtered_report = report.copy()
     filtered_report["issues"] = top_3
+
+    # Craft message based on hidden severity (psychological: loss aversion)
+    if hidden_critical > 0:
+        severity_warning = f"⚠️ {hidden_critical} CRITICAL"
+        if hidden_high > 0:
+            severity_warning += f" and {hidden_high} HIGH severity"
+        severity_warning += f" issue{'s' if hidden_critical + hidden_high > 1 else ''} not shown"
+        urgency = " These require immediate attention."
+    elif hidden_high > 0:
+        severity_warning = f"🔴 {hidden_high} HIGH severity issue{'s' if hidden_high > 1 else ''} hidden"
+        urgency = " Don't leave your contract exposed."
+    else:
+        severity_warning = f"🔒 {hidden_count} additional issue{'s' if hidden_count > 1 else ''} found"
+        urgency = ""
+
     filtered_report["upgrade_message"] = (
-        f"🔒 {hidden_count} more issue{'s' if hidden_count > 1 else ''} hidden. "
-        f"Upgrade to Developer ($59/mo) to see all vulnerabilities and get AI-powered fixes."
+        f"{severity_warning}.{urgency} "
+        f"Upgrade to Developer ($59/mo) to reveal all {len(issues)} vulnerabilities with AI-powered fix recommendations."
     )
-    filtered_report["watermark"] = "FREE TIER - Upgrade for full analysis"
-    
-    # Remove sensitive details
+
+    # Dynamic upgrade prompt based on findings (creates specificity + urgency)
+    filtered_report["upgrade_prompt"] = (
+        f"We detected {len(issues)} total vulnerabilities in your contract. "
+        f"The free tier shows only the top 3 most critical. "
+        f"{'⚠️ ' + str(hidden_critical) + ' CRITICAL issues remain hidden that could result in fund loss. ' if hidden_critical > 0 else ''}"
+        f"Upgrade to Developer ($59/mo) to see the complete analysis with actionable fix recommendations."
+    )
+
+    filtered_report["watermark"] = "Limited Preview - Upgrade for Complete Analysis"
+
+    # Strategic placeholder for hidden recommendations (creates desire)
     filtered_report["recommendations"] = [
-        "Upgrade to see detailed fix recommendations"
+        "🔒 AI-powered fix recommendations available with Developer plan ($59/mo)",
+        "🔒 Code-level remediation steps hidden - Upgrade to unlock",
+        "🔒 Exploit prevention strategies require paid tier"
     ]
     
     return filtered_report
