@@ -1623,7 +1623,7 @@ class AuditQueueTracker {
                         <span style="font-weight: 600; color: var(--text-primary);">Estimated wait: ~${estimatedWait} minutes</span>
                     </div>
                     <p style="font-size: var(--text-sm); color: var(--text-secondary); margin: 0 0 var(--space-2) 0;">
-                        <strong style="color: var(--accent-purple);">Team ($199/mo)</strong> and <strong>Enterprise</strong> audits are processed first.
+                        <strong style="color: var(--accent-purple);">Team ($349/mo)</strong> and <strong>Enterprise</strong> audits are processed first.
                         Skip the line and get deeper analysis with Mythril + Echidna fuzzing.
                     </p>
                     <a href="#tier-select" class="upgrade-link" style="display: inline-block; padding: 8px 16px; background: var(--accent-purple); color: white; border-radius: 6px; text-decoration: none; font-weight: 600;" onclick="document.getElementById('tier-select').scrollIntoView({behavior: 'smooth'})">
@@ -1643,7 +1643,7 @@ class AuditQueueTracker {
                         Echidna fuzzing, on-chain detection, and API access for CI/CD integration.
                     </p>
                     <a href="#tier-select" class="upgrade-link" style="display: inline-block; padding: 8px 16px; background: var(--green); color: white; border-radius: 6px; text-decoration: none; font-weight: 600;" onclick="document.getElementById('tier-select').scrollIntoView({behavior: 'smooth'})">
-                        🚀 Upgrade to Team - $199/mo
+                        🚀 Upgrade to Team - $349/mo
                     </a>
                 </div>
             `;
@@ -4255,7 +4255,7 @@ document.addEventListener("DOMContentLoaded", () => {
                                 padding: 12px 24px; font-size: var(--text-base); font-weight: 700;
                                 border-radius: 8px; text-decoration: none; color: white;"
                          onclick="document.getElementById('tier-select').scrollIntoView({behavior: 'smooth'})">
-                        🔓 Unlock Full Report - $59/mo
+                        🔓 Unlock Full Report - $99/mo
                       </a>
                       <span style="color: var(--text-tertiary); font-size: var(--text-sm);">
                         <strong style="color: var(--green);">Save 99%</strong> vs traditional audits ($15,000+)

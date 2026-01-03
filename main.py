@@ -3493,10 +3493,10 @@ FREE TIER:
 - For each issue: type, severity, 2-3 sentence description
 - NO fix recommendations (upgrade required)
 - Calculate exact counts: critical_count, high_count, medium_count, low_count
-- Set upgrade_prompt: "⚠️ [X] critical and [Y] high-severity issues detected. [Z] total issues found. Upgrade to Developer ($59/mo) to get AI-powered fix recommendations and see all vulnerabilities."
+- Set upgrade_prompt: "⚠️ [X] critical and [Y] high-severity issues detected. [Z] total issues found. Upgrade to Developer ($99/mo) to get AI-powered fix recommendations and see all vulnerabilities."
 - Executive summary under 100 words focusing on most critical risk
 
-DEVELOPER PLAN ($59/mo):
+DEVELOPER PLAN ($99/mo):
 - Full executive summary (2-3 paragraphs with regulatory context)
 - ALL issues with: type, severity, detailed description (4-5 sentences), basic fix
 - Fix recommendations must be SPECIFIC and ACTIONABLE:
@@ -3528,7 +3528,7 @@ DEVELOPER PLAN ($59/mo):
 - Basic MiCA/SEC compliance analysis (high-level only)
 - NO line numbers, code snippets, or PoC exploits (Pro+ features)
 
-TEAM PLAN ($199/mo):
+TEAM PLAN ($349/mo):
 - Everything in Starter PLUS:
 - MANDATORY FOR EVERY ISSUE - ALL fields required:
   * line_number: INTEGER - Exact line number (1-indexed) where vulnerability exists
@@ -3562,7 +3562,7 @@ TEAM PLAN ($199/mo):
   * Testing strategy (unit tests, integration tests, fuzz tests)
   * External audit recommendations
 
-ENTERPRISE PLAN ($799/mo):
+ENTERPRISE PLAN ($1,499/mo):
 - Everything in Pro PLUS:
 - PROOF OF CONCEPT (PoC) for EVERY Critical/High issue:
   * proof_of_concept: STRING - Complete, runnable exploit code (Solidity or JavaScript)
@@ -3898,7 +3898,7 @@ class UsageTracker:
                 overage_cost = self.calculate_diamond_overage(file_size) / 100
                 raise HTTPException(
                     status_code=400,
-                    detail=f"File size exceeds tier limit. Upgrade to Team ($199/mo) or Enterprise ($799/mo) for larger files."
+                    detail=f"File size exceeds tier limit. Upgrade to Team ($349/mo) or Enterprise ($1,499/mo) for larger files."
                 )
             
             self.count += 1
@@ -4341,7 +4341,7 @@ def filter_issues_for_free_tier(report: dict[str, Any], tier: str) -> dict[str, 
 
     filtered_report["upgrade_message"] = (
         f"{severity_warning}.{urgency} "
-        f"Upgrade to Developer ($59/mo) to reveal all {len(issues)} vulnerabilities with AI-powered fix recommendations."
+        f"Upgrade to Developer ($99/mo) to reveal all {len(issues)} vulnerabilities with AI-powered fix recommendations."
     )
 
     # Dynamic upgrade prompt based on findings (creates specificity + urgency)
@@ -4349,14 +4349,14 @@ def filter_issues_for_free_tier(report: dict[str, Any], tier: str) -> dict[str, 
         f"We detected {len(issues)} total vulnerabilities in your contract. "
         f"The free tier shows only the top 3 most critical. "
         f"{'⚠️ ' + str(hidden_critical) + ' CRITICAL issues remain hidden that could result in fund loss. ' if hidden_critical > 0 else ''}"
-        f"Upgrade to Developer ($59/mo) to see the complete analysis with actionable fix recommendations."
+        f"Upgrade to Developer ($99/mo) to see the complete analysis with actionable fix recommendations."
     )
 
     filtered_report["watermark"] = "Limited Preview - Upgrade for Complete Analysis"
 
     # Strategic placeholder for hidden recommendations (creates desire)
     filtered_report["recommendations"] = [
-        "🔒 AI-powered fix recommendations available with Developer plan ($59/mo)",
+        "🔒 AI-powered fix recommendations available with Developer plan ($99/mo)",
         "🔒 Code-level remediation steps hidden - Upgrade to unlock",
         "🔒 Exploit prevention strategies require paid tier"
     ]
@@ -6962,7 +6962,7 @@ async def refer(request: Request, link: str = Query(...), db: Session = Depends(
 async def upgrade_page():
     try:
         logger.debug("Upgrade page accessed")
-        return {"message": "Upgrade at /ui for Developer ($59/mo), Team ($199/mo), or Enterprise ($799/mo)."}
+        return {"message": "Upgrade at /ui for Developer ($99/mo), Team ($349/mo), or Enterprise ($1,499/mo)."}
     except Exception as e:
         logger.error(f"Upgrade page error: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
