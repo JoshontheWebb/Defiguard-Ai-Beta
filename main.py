@@ -9759,6 +9759,17 @@ For Enterprise tier, also include: "proof_of_concept", "references"
                         audit_result.pdf_path = pdf_path
                         audit_result.completed_at = datetime.now(timezone.utc)
                         audit_result.file_content = None  # Clear file_content after successful completion
+
+                        # CRITICAL: Save full report for later retrieval via access key
+                        audit_result.full_report = json.dumps(report)
+
+                        # Count issues by severity for retrieval display
+                        issues = report.get("issues", [])
+                        audit_result.critical_count = sum(1 for i in issues if i.get("severity", "").lower() == "critical")
+                        audit_result.high_count = sum(1 for i in issues if i.get("severity", "").lower() == "high")
+                        audit_result.medium_count = sum(1 for i in issues if i.get("severity", "").lower() == "medium")
+                        audit_result.low_count = sum(1 for i in issues if i.get("severity", "").lower() == "low")
+
                         db.commit()
                         logger.info(f"[AUDIT_KEY] Updated audit key {immediate_audit_key[:20]}... to completed (id={immediate_audit_result_id})")
                     else:
@@ -9774,6 +9785,13 @@ For Enterprise tier, also include: "proof_of_concept", "references"
                 # Fallback: create new AuditResult if early creation failed
                 safe_filename = sanitize_filename(file.filename) if file.filename else "contract.sol"
                 contract_hash = compute_contract_hash(code_bytes.decode('utf-8', errors='replace'))
+
+                # Count issues by severity
+                issues = report.get("issues", [])
+                critical_count = sum(1 for i in issues if i.get("severity", "").lower() == "critical")
+                high_count = sum(1 for i in issues if i.get("severity", "").lower() == "high")
+                medium_count = sum(1 for i in issues if i.get("severity", "").lower() == "medium")
+                low_count = sum(1 for i in issues if i.get("severity", "").lower() == "low")
 
                 from sqlalchemy.exc import IntegrityError
                 max_retries = 5
@@ -9791,7 +9809,12 @@ For Enterprise tier, also include: "proof_of_concept", "references"
                             notification_email=session_email if current_tier in ["pro", "enterprise"] else None,
                             api_key_id=validated_api_key_id,
                             risk_score=str(report.get("risk_score", "N/A")),
-                            issues_count=len(report.get("issues", [])),
+                            issues_count=len(issues),
+                            critical_count=critical_count,
+                            high_count=high_count,
+                            medium_count=medium_count,
+                            low_count=low_count,
+                            full_report=json.dumps(report),  # CRITICAL: Save for access key retrieval
                             pdf_path=pdf_path,
                             completed_at=datetime.now(timezone.utc)
                         )
