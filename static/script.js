@@ -4641,11 +4641,11 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
               apiKeysTableBody.innerHTML = keys.map(key => `
                 <tr style="border-bottom: 1px solid var(--glass-border);">
                   <td style="padding: var(--space-3); font-weight: 600; color: var(--text-primary);">
-                    ${key.label}
+                    ${escapeHtml(key.label)}
                   </td>
                   <td style="padding: var(--space-3);">
                     <code style="font-family: 'JetBrains Mono', monospace; font-size: var(--text-sm); color: var(--accent-teal);">
-                      ${key.key.substring(0, 8)}...${key.key.substring(key.key.length - 4)}
+                      ${escapeHtml(key.key_preview || '****')}
                     </code>
                   </td>
                   <td style="padding: var(--space-3); font-size: var(--text-sm); color: var(--text-tertiary);">
@@ -4655,41 +4655,23 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
                     ${key.last_used_at ? new Date(key.last_used_at).toLocaleDateString() : 'Never'}
                   </td>
                   <td style="padding: var(--space-3); text-align: right;">
-                    <button class="copy-key-btn btn btn-sm" data-key="${key.key}" style="margin-right: var(--space-2);">
-                      📋 Copy
-                    </button>
-                    <button class="revoke-key-btn btn btn-secondary btn-sm" data-key-id="${key.id}" data-key-label="${key.label}">
+                    <button class="revoke-key-btn btn btn-secondary btn-sm" data-key-id="${key.id}" data-key-label="${escapeHtml(key.label)}">
                       🗑️ Revoke
                     </button>
                   </td>
                 </tr>
               `).join('');
-              
-              // Copy button handlers
-              document.querySelectorAll('.copy-key-btn').forEach(btn => {
-                btn.addEventListener('click', async (e) => {
-                  const key = e.target.dataset.key;
-                  try {
-                    await navigator.clipboard.writeText(key);
-                    e.target.textContent = "✅ Copied!";
-                    setTimeout(() => { e.target.textContent = "📋 Copy"; }, 2000);
-                  } catch (err) {
-                    console.error("[ERROR] Failed to copy:", err);
-                    alert("Failed to copy API key");
-                  }
-                });
-              });
-              
+
               // Revoke button handlers
               document.querySelectorAll('.revoke-key-btn').forEach(btn => {
                 btn.addEventListener('click', async (e) => {
                   const keyId = e.target.dataset.keyId;
                   const keyLabel = e.target.dataset.keyLabel;
-                  
+
                   if (!confirm(`Revoke "${keyLabel}"? This cannot be undone and the key will stop working immediately.`)) {
                     return;
                   }
-                  
+
                   try {
                     await withCsrfToken(async (csrfToken) => {
                       const response = await fetch(`/api/keys/${keyId}`, {
@@ -4697,9 +4679,9 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
                         headers: { "X-CSRFToken": csrfToken },
                         credentials: "include"
                       });
-                      
+
                       if (!response.ok) throw new Error("Failed to revoke key");
-                      
+
                       alert(`✅ "${keyLabel}" revoked successfully`);
                       await loadApiKeys(); // Reload
                     });
@@ -5039,6 +5021,130 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
         }
       };
 
+      // Show API Key Created Modal - Enterprise-grade copyable key display
+      const showApiKeyCreatedModal = (label, apiKey) => {
+        // Create modal dynamically
+        const existingModal = document.getElementById('api-key-created-modal');
+        if (existingModal) existingModal.remove();
+
+        const modalHtml = `
+          <div id="api-key-created-modal-backdrop" style="
+            position: fixed; inset: 0; background: rgba(0,0,0,0.8);
+            z-index: 10001; display: flex; align-items: center; justify-content: center;
+          ">
+            <div id="api-key-created-modal" style="
+              background: var(--glass-bg, #1a1a2e);
+              border: 1px solid var(--glass-border, #2d2d44);
+              border-radius: var(--radius-xl, 16px);
+              padding: var(--space-8, 32px);
+              max-width: 600px; width: 90%;
+              box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+            ">
+              <div style="text-align: center; margin-bottom: var(--space-6, 24px);">
+                <div style="font-size: 48px; margin-bottom: var(--space-4, 16px);">🔐</div>
+                <h2 style="color: var(--text-primary, #fff); margin: 0 0 8px 0; font-size: var(--text-xl, 20px);">
+                  API Key Created Successfully
+                </h2>
+                <p style="color: var(--text-secondary, #a0a0a0); margin: 0; font-size: var(--text-sm, 14px);">
+                  Label: <strong>${escapeHtml(label)}</strong>
+                </p>
+              </div>
+
+              <div style="
+                background: rgba(0,0,0,0.3);
+                border: 1px solid var(--glass-border, #2d2d44);
+                border-radius: var(--radius-lg, 12px);
+                padding: var(--space-4, 16px);
+                margin-bottom: var(--space-6, 24px);
+              ">
+                <div style="display: flex; align-items: center; gap: var(--space-3, 12px);">
+                  <code id="new-api-key-display" style="
+                    flex: 1;
+                    font-family: 'JetBrains Mono', monospace;
+                    font-size: var(--text-sm, 14px);
+                    color: var(--accent-teal, #00d4aa);
+                    word-break: break-all;
+                    padding: var(--space-3, 12px);
+                    background: rgba(0,212,170,0.1);
+                    border-radius: var(--radius-md, 8px);
+                  ">${escapeHtml(apiKey)}</code>
+                  <button id="copy-new-api-key" class="btn" style="
+                    padding: var(--space-3, 12px) var(--space-4, 16px);
+                    font-size: var(--text-base, 16px);
+                    white-space: nowrap;
+                  ">📋 Copy Key</button>
+                </div>
+              </div>
+
+              <div style="
+                background: rgba(241, 196, 15, 0.1);
+                border: 1px solid rgba(241, 196, 15, 0.3);
+                border-radius: var(--radius-md, 8px);
+                padding: var(--space-4, 16px);
+                margin-bottom: var(--space-6, 24px);
+              ">
+                <p style="color: #f1c40f; margin: 0; font-size: var(--text-sm, 14px); display: flex; align-items: flex-start; gap: 8px;">
+                  <span style="font-size: 18px;">⚠️</span>
+                  <span><strong>Important:</strong> This is the only time you'll see the full key.
+                  Make sure to copy and store it securely. You won't be able to view it again.</span>
+                </p>
+              </div>
+
+              <div style="text-align: center;">
+                <button id="close-api-key-created-modal" class="btn" style="
+                  padding: var(--space-3, 12px) var(--space-6, 24px);
+                ">Done</button>
+              </div>
+            </div>
+          </div>
+        `;
+
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+        document.body.style.overflow = 'hidden';
+
+        // Copy button handler
+        document.getElementById('copy-new-api-key').addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(apiKey);
+            const btn = document.getElementById('copy-new-api-key');
+            btn.textContent = '✅ Copied!';
+            btn.style.background = 'var(--green, #27ae60)';
+            setTimeout(() => {
+              btn.textContent = '📋 Copy Key';
+              btn.style.background = '';
+            }, 2000);
+          } catch (err) {
+            console.error('[ERROR] Failed to copy API key:', err);
+            alert('Failed to copy. Please select and copy manually.');
+          }
+        });
+
+        // Close modal handler
+        const closeApiKeyCreatedModal = () => {
+          const modal = document.getElementById('api-key-created-modal-backdrop');
+          if (modal) {
+            modal.remove();
+            document.body.style.overflow = 'auto';
+          }
+        };
+
+        document.getElementById('close-api-key-created-modal').addEventListener('click', closeApiKeyCreatedModal);
+        document.getElementById('api-key-created-modal-backdrop').addEventListener('click', (e) => {
+          if (e.target.id === 'api-key-created-modal-backdrop') {
+            closeApiKeyCreatedModal();
+          }
+        });
+
+        // ESC key to close
+        const escHandler = (e) => {
+          if (e.key === 'Escape') {
+            closeApiKeyCreatedModal();
+            document.removeEventListener('keydown', escHandler);
+          }
+        };
+        document.addEventListener('keydown', escHandler);
+      };
+
       createKeyModalClose?.addEventListener("click", closeCreateKeyModal);
       createKeyCancel?.addEventListener("click", closeCreateKeyModal);
       createKeyModalBackdrop?.addEventListener("click", closeCreateKeyModal);
@@ -5073,20 +5179,15 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             }
             
             const data = await response.json();
-            
+
             closeCreateKeyModal();
-            
-            // Show the full key ONCE
-            alert(`✅ API Key Created Successfully!
 
-Label: ${data.label}
-Key: ${data.api_key}
+            // Show the full key in a copyable modal (enterprise-grade UX)
+            showApiKeyCreatedModal(data.label, data.api_key);
 
-⚠️ IMPORTANT: This is the only time you'll see the full key. Copy it now!`);
-            
             // Reload keys table
             await loadApiKeys();
-            
+
             createKeyConfirm.disabled = false;
             createKeyConfirm.textContent = "Create Key";
           });
