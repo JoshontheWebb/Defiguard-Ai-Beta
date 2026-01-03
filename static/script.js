@@ -4234,7 +4234,56 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             
             if (!response.ok) {
               const errorData = await response.json().catch(() => ({}));
-              throw new Error(errorData.detail || 'Audit request failed');
+
+              // Handle 409 Conflict - One File Per Key Policy
+              if (response.status === 409 && errorData.detail?.error === 'one_file_per_key') {
+                loading.classList.remove("show");
+                const detail = errorData.detail;
+
+                // Show informative error with action options
+                const errorHtml = `
+                  <div class="one-file-per-key-error" style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 16px; margin: 16px 0;">
+                    <h4 style="color: #856404; margin: 0 0 12px 0;">📁 API Key Already Assigned</h4>
+                    <p style="color: #856404; margin: 0 0 12px 0;">
+                      The API key "<strong>${escapeHtml(detail.api_key_label || 'Selected Key')}</strong>" is already assigned to:
+                      <strong>${escapeHtml(detail.existing_file || 'another file')}</strong>
+                    </p>
+                    <p style="color: #856404; margin: 0 0 16px 0;">
+                      Each API key can only audit <strong>one file</strong>. You can:
+                    </p>
+                    <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                      <button onclick="document.getElementById('api_key_select').value=''; this.closest('.one-file-per-key-error').remove();"
+                              style="background: #6c757d; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                        🔄 Remove Key Assignment
+                      </button>
+                      <button onclick="window.showApiKeyModal ? window.showApiKeyModal() : alert('Open API Keys in Settings'); this.closest('.one-file-per-key-error').remove();"
+                              style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                        ➕ Create New API Key
+                      </button>
+                      <button onclick="window.retrieveAuditByKey && window.retrieveAuditByKey('${escapeHtml(detail.existing_audit_key || '')}'); this.closest('.one-file-per-key-error').remove();"
+                              style="background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                        📋 View Existing Audit
+                      </button>
+                    </div>
+                  </div>
+                `;
+
+                // Insert error message before the form or in a designated area
+                const auditForm = document.getElementById('auditForm');
+                const existingError = document.querySelector('.one-file-per-key-error');
+                if (existingError) existingError.remove();
+
+                if (auditForm) {
+                  auditForm.insertAdjacentHTML('beforebegin', errorHtml);
+                } else {
+                  usageWarning.innerHTML = errorHtml;
+                }
+
+                logMessage(`One file per key: ${detail.api_key_label} already assigned to ${detail.existing_file}`);
+                return;
+              }
+
+              throw new Error(typeof errorData.detail === 'string' ? errorData.detail : (errorData.detail?.message || 'Audit request failed'));
             }
             
             const data = await response.json();
