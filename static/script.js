@@ -482,6 +482,328 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ---------------------------------------------------------------------
+// RESILIENT FETCH - Retry with exponential backoff for all API calls
+// This ensures network hiccups don't break the app
+// ---------------------------------------------------------------------
+const fetchWithRetry = async (url, options = {}, maxRetries = 3, baseDelay = 1000) => {
+    let lastError;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+            const response = await fetch(url, {
+                credentials: 'include',
+                ...options
+            });
+
+            // Don't retry on client errors (4xx) except 429 (rate limit)
+            if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+                return response;
+            }
+
+            // Retry on server errors (5xx) or rate limiting
+            if (response.status >= 500 || response.status === 429) {
+                lastError = new Error(`HTTP ${response.status}`);
+                if (attempt < maxRetries - 1) {
+                    const delay = baseDelay * Math.pow(2, attempt);
+                    debugLog(`[Fetch] Retry ${attempt + 1}/${maxRetries} for ${url} after ${delay}ms`);
+                    await new Promise(r => setTimeout(r, delay));
+                    continue;
+                }
+            }
+
+            return response;
+        } catch (err) {
+            lastError = err;
+            if (attempt < maxRetries - 1) {
+                const delay = baseDelay * Math.pow(2, attempt);
+                debugLog(`[Fetch] Network error, retry ${attempt + 1}/${maxRetries} for ${url} after ${delay}ms`);
+                await new Promise(r => setTimeout(r, delay));
+            }
+        }
+    }
+
+    throw lastError;
+};
+
+// ---------------------------------------------------------------------
+// TIER CACHE - Cache tier/usage data with TTL to reduce API calls
+// ---------------------------------------------------------------------
+const TierCache = {
+    data: null,
+    timestamp: 0,
+    TTL: 30000, // 30 seconds
+    pendingRequest: null, // Deduplication
+
+    async get(forceRefresh = false) {
+        const now = Date.now();
+
+        // Return cached if fresh
+        if (!forceRefresh && this.data && (now - this.timestamp) < this.TTL) {
+            debugLog('[TierCache] Returning cached tier data');
+            return this.data;
+        }
+
+        // Deduplicate concurrent requests
+        if (this.pendingRequest) {
+            debugLog('[TierCache] Waiting for pending request');
+            return this.pendingRequest;
+        }
+
+        // Fetch fresh data
+        this.pendingRequest = this._fetch();
+        try {
+            const result = await this.pendingRequest;
+            return result;
+        } finally {
+            this.pendingRequest = null;
+        }
+    },
+
+    async _fetch() {
+        try {
+            const response = await fetchWithRetry('/api/tier');
+            if (response.ok) {
+                this.data = await response.json();
+                this.timestamp = Date.now();
+                debugLog('[TierCache] Cached fresh tier data');
+                return this.data;
+            }
+        } catch (e) {
+            debugLog('[TierCache] Error fetching tier:', e);
+        }
+        return this.data; // Return stale data on error
+    },
+
+    invalidate() {
+        this.timestamp = 0;
+        debugLog('[TierCache] Cache invalidated');
+    }
+};
+
+// ---------------------------------------------------------------------
+// FORM STATE MANAGER - Persist form data across page navigation
+// ---------------------------------------------------------------------
+const FormStateManager = {
+    STORAGE_KEY: 'defiguard_form_state',
+
+    // Save form field value
+    saveField(fieldName, value) {
+        try {
+            const state = this.getState();
+            state[fieldName] = value;
+            state.lastUpdate = Date.now();
+            sessionStorage.setItem(this.STORAGE_KEY, JSON.stringify(state));
+        } catch (e) {
+            debugLog('[FormState] Error saving:', e);
+        }
+    },
+
+    // Get all saved state
+    getState() {
+        try {
+            const stored = sessionStorage.getItem(this.STORAGE_KEY);
+            return stored ? JSON.parse(stored) : {};
+        } catch (e) {
+            return {};
+        }
+    },
+
+    // Get specific field
+    getField(fieldName) {
+        return this.getState()[fieldName];
+    },
+
+    // Clear after successful submission
+    clear() {
+        try {
+            sessionStorage.removeItem(this.STORAGE_KEY);
+            debugLog('[FormState] Cleared');
+        } catch (e) {}
+    },
+
+    // Restore form fields from saved state
+    restore() {
+        const state = this.getState();
+        if (!state.lastUpdate) return;
+
+        // Only restore if less than 30 minutes old
+        if (Date.now() - state.lastUpdate > 30 * 60 * 1000) {
+            this.clear();
+            return;
+        }
+
+        // Restore contract address
+        if (state.contractAddress) {
+            const contractInput = document.getElementById('contract_address');
+            if (contractInput && !contractInput.value) {
+                contractInput.value = state.contractAddress;
+                debugLog('[FormState] Restored contract address');
+            }
+        }
+
+        // Restore custom report input
+        if (state.customReport) {
+            const customInput = document.getElementById('custom_report');
+            if (customInput && !customInput.value) {
+                customInput.value = state.customReport;
+                debugLog('[FormState] Restored custom report');
+            }
+        }
+
+        // Notify user of restored data
+        if (state.contractAddress || state.customReport || state.fileName) {
+            ToastNotification.show('Form data restored from previous session', 'info', 3000);
+        }
+    }
+};
+
+// ---------------------------------------------------------------------
+// LOADING MANAGER - Ensure loading states never get stuck
+// ---------------------------------------------------------------------
+const LoadingManager = {
+    activeLoaders: new Map(),
+    DEFAULT_TIMEOUT: 5 * 60 * 1000, // 5 minutes max
+
+    // Show loading with auto-timeout
+    show(element, timeoutMs = this.DEFAULT_TIMEOUT) {
+        if (!element) return;
+
+        element.classList.add('show');
+
+        // Set timeout to auto-hide
+        const timeoutId = setTimeout(() => {
+            this.hide(element);
+            console.warn('[Loading] Auto-hidden after timeout');
+            ToastNotification.show('Operation timed out. Please try again.', 'warning');
+        }, timeoutMs);
+
+        this.activeLoaders.set(element, timeoutId);
+    },
+
+    // Hide loading and clear timeout
+    hide(element) {
+        if (!element) return;
+
+        element.classList.remove('show');
+
+        const timeoutId = this.activeLoaders.get(element);
+        if (timeoutId) {
+            clearTimeout(timeoutId);
+            this.activeLoaders.delete(element);
+        }
+    },
+
+    // Clear all loading states (emergency cleanup)
+    clearAll() {
+        this.activeLoaders.forEach((timeoutId, element) => {
+            clearTimeout(timeoutId);
+            element.classList.remove('show');
+        });
+        this.activeLoaders.clear();
+    }
+};
+
+// Clean up loading states on page unload
+window.addEventListener('beforeunload', () => {
+    LoadingManager.clearAll();
+});
+
+// ---------------------------------------------------------------------
+// POLLING MANAGER - Handle polling with visibility awareness and cleanup
+// ---------------------------------------------------------------------
+const PollingManager = {
+    polls: new Map(),
+
+    // Start a poll with auto-cleanup
+    start(name, callback, intervalMs, options = {}) {
+        const {
+            maxDuration = 30 * 60 * 1000, // 30 min default
+            pauseWhenHidden = true,
+            maxConsecutiveErrors = 10
+        } = options;
+
+        // Clear existing poll with same name
+        this.stop(name);
+
+        const state = {
+            intervalId: null,
+            startTime: Date.now(),
+            consecutiveErrors: 0,
+            isPaused: false
+        };
+
+        const wrappedCallback = async () => {
+            // Check duration limit
+            if (Date.now() - state.startTime > maxDuration) {
+                debugLog(`[Polling] ${name} exceeded max duration, stopping`);
+                this.stop(name);
+                return;
+            }
+
+            // Skip if paused
+            if (state.isPaused) return;
+
+            try {
+                await callback();
+                state.consecutiveErrors = 0;
+            } catch (e) {
+                state.consecutiveErrors++;
+                debugLog(`[Polling] ${name} error (${state.consecutiveErrors}/${maxConsecutiveErrors}):`, e);
+
+                if (state.consecutiveErrors >= maxConsecutiveErrors) {
+                    debugLog(`[Polling] ${name} too many errors, stopping`);
+                    this.stop(name);
+                }
+            }
+        };
+
+        state.intervalId = setInterval(wrappedCallback, intervalMs);
+        ResourceManager.addInterval(state.intervalId);
+
+        // Handle visibility
+        if (pauseWhenHidden) {
+            const visibilityHandler = () => {
+                state.isPaused = document.visibilityState === 'hidden';
+                debugLog(`[Polling] ${name} ${state.isPaused ? 'paused' : 'resumed'}`);
+            };
+            document.addEventListener('visibilitychange', visibilityHandler);
+            state.visibilityHandler = visibilityHandler;
+        }
+
+        this.polls.set(name, state);
+
+        // Run immediately
+        wrappedCallback();
+
+        return name;
+    },
+
+    stop(name) {
+        const state = this.polls.get(name);
+        if (state) {
+            if (state.intervalId) {
+                clearInterval(state.intervalId);
+                ResourceManager.removeInterval(state.intervalId);
+            }
+            if (state.visibilityHandler) {
+                document.removeEventListener('visibilitychange', state.visibilityHandler);
+            }
+            this.polls.delete(name);
+            debugLog(`[Polling] ${name} stopped`);
+        }
+    },
+
+    stopAll() {
+        this.polls.forEach((state, name) => this.stop(name));
+    }
+};
+
+// Clean up polls on page unload
+window.addEventListener('beforeunload', () => {
+    PollingManager.stopAll();
+});
+
+// ---------------------------------------------------------------------
 // ACCESS KEY HELPERS - For persistent audit retrieval
 // Access Keys (dga_xxx) are unique identifiers for retrieving specific audit results
 // Different from Project Keys which organize audits by client/project
@@ -1173,24 +1495,65 @@ class AuditQueueTracker {
     startPolling() {
         if (this.pollInterval) return; // Already polling
 
-        this.pollInterval = ResourceManager.addInterval(setInterval(async () => {
-            if (!this.jobId) return;
+        let consecutiveErrors = 0;
+        const maxErrors = 10;
+        let pollDelay = 3000; // Start at 3 seconds
+
+        const doPoll = async () => {
+            if (!this.jobId || this.isCompleted) {
+                this.stopPolling();
+                return;
+            }
+
+            // Pause polling when page is hidden to save resources
+            if (document.visibilityState === 'hidden') {
+                return;
+            }
 
             try {
-                const response = await fetch(`/audit/status/${this.jobId}`);
+                const response = await fetchWithRetry(`/audit/status/${this.jobId}`, {}, 2, 1000);
                 if (response.ok) {
                     const data = await response.json();
                     this.handleStatusUpdate(data);
+                    consecutiveErrors = 0;
+                    pollDelay = 3000; // Reset to normal speed
+                } else {
+                    throw new Error(`HTTP ${response.status}`);
                 }
             } catch (e) {
-                log('QUEUE_POLL', 'Polling error:', e);
+                consecutiveErrors++;
+                log('QUEUE_POLL', `Polling error (${consecutiveErrors}/${maxErrors}):`, e);
+
+                if (consecutiveErrors >= maxErrors) {
+                    log('QUEUE_POLL', 'Too many errors, stopping polling');
+                    this.stopPolling();
+                    if (this.onError) {
+                        this.onError('Lost connection to server. Please refresh the page.');
+                    }
+                    return;
+                }
+
+                // Exponential backoff on errors
+                pollDelay = Math.min(pollDelay * 1.5, 15000);
             }
-        }, 3000)); // Poll every 3 seconds
+        };
+
+        // Use PollingManager for better control
+        PollingManager.start('queue-status', doPoll, 3000, {
+            maxDuration: 60 * 60 * 1000, // 1 hour max
+            pauseWhenHidden: true,
+            maxConsecutiveErrors: 10
+        });
+        this.pollInterval = 'queue-status'; // Store name instead of ID
     }
 
     stopPolling() {
         if (this.pollInterval) {
-            ResourceManager.removeInterval(this.pollInterval);
+            if (typeof this.pollInterval === 'string') {
+                PollingManager.stop(this.pollInterval);
+            } else {
+                ResourceManager.removeInterval(this.pollInterval);
+            }
             this.pollInterval = null;
         }
     }
@@ -2215,21 +2578,37 @@ document.addEventListener("DOMContentLoaded", () => {
   walletManager.init().catch(e => console.warn('[WALLET] Init failed:', e));
 
   // Fetch signed-in proof from /me (enhances with sub/provider/logged_in)
-  const fetchUsername = async () => {
+  // Cached to prevent repeated API calls (expires after 30 seconds)
+  let usernameCache = null;
+  let usernameCacheTime = 0;
+  const USERNAME_CACHE_TTL = 30000; // 30 seconds
+
+  const fetchUsername = async (forceRefresh = false) => {
+    const now = Date.now();
+
+    // Return cached if fresh
+    if (!forceRefresh && usernameCache !== undefined && (now - usernameCacheTime) < USERNAME_CACHE_TTL) {
+      return usernameCache;
+    }
+
     try {
-      const resp = await fetch('/me', { credentials: 'include' });
+      const resp = await fetchWithRetry('/me', {}, 2, 1000);
       if (resp.ok) {
         const data = await resp.json();
-        return data.logged_in ? {
+        usernameCache = data.logged_in ? {
           username: data.username,
           sub: data.sub,
           provider: data.provider,
           member_since: data.member_since
         } : null;
+        usernameCacheTime = now;
+        return usernameCache;
       }
     } catch (e) {
       console.debug('[AUTH] Failed to fetch /me');
     }
+    usernameCache = null;
+    usernameCacheTime = now;
     return null;
   };
 
@@ -2974,12 +3353,35 @@ document.addEventListener("DOMContentLoaded", () => {
 
       contractAddressInput?.addEventListener("input", (e) => {
         const address = e.target.value.trim();
+
+        // Persist form state for recovery after navigation
+        FormStateManager.saveField('contractAddress', address);
+
         if (address && address.match(/^0x[a-fA-F0-9]{40}$/)) {
           fetchFacetPreview(address);
         } else {
           facetWell.textContent = "";
         }
       });
+
+      // Persist custom report input as user types
+      const customReportInput = document.getElementById('custom_report');
+      customReportInput?.addEventListener('input', (e) => {
+        FormStateManager.saveField('customReport', e.target.value);
+      });
+
+      // Persist file selection info
+      const fileInput = document.getElementById('file');
+      fileInput?.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (file) {
+          FormStateManager.saveField('fileName', file.name);
+          FormStateManager.saveField('fileSize', file.size);
+        }
+      });
+
+      // Restore form state on page load
+      FormStateManager.restore();
 
       // ============================================================================
       // API KEY SELECTOR - Populate dropdown for audit assignment
@@ -3047,8 +3449,22 @@ document.addEventListener("DOMContentLoaded", () => {
       };
 
       // Section9: Tier Management
-      const fetchTierData = async () => {
+      // Cache to prevent redundant API calls
+      let tierDataCache = null;
+      let tierDataCacheTime = 0;
+      const TIER_CACHE_TTL = 30000; // 30 seconds
+
+      const fetchTierData = async (forceRefresh = false) => {
         const _tierStart = DebugTracer.enter('fetchTierData');
+
+        // Return cached data if fresh
+        const now = Date.now();
+        if (!forceRefresh && tierDataCache && (now - tierDataCacheTime) < TIER_CACHE_TTL) {
+          debugLog('[TierData] Returning cached tier data');
+          DebugTracer.exit('fetchTierData', _tierStart, { cached: true });
+          return tierDataCache;
+        }
+
         try {
           const user = await fetchUsername();
           DebugTracer.snapshot('fetchTierData_user', { user: user?.username || 'null' });
@@ -3056,15 +3472,21 @@ document.addEventListener("DOMContentLoaded", () => {
           const url = username
             ? `/tier?username=${encodeURIComponent(username)}`
             : "/tier";
-          const response = await fetch(url, {
+
+          // Use fetchWithRetry for resilience
+          const response = await fetchWithRetry(url, {
             headers: { Accept: "application/json" },
-            credentials: "include",
-          });
+          }, 3, 1000);
+
           if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
             throw new Error(errorData.detail || "Failed to fetch tier data");
           }
           const data = await response.json();
+
+          // Cache the response
+          tierDataCache = data;
+          tierDataCacheTime = now;
           const {
             tier,
             size_limit,
@@ -4633,7 +5055,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           usageWarning.textContent = `Enterprise audit completed with $${overageCost.toFixed(2)} overage charged.`;
           usageWarning.classList.add("success");
         }
-        loading.classList.remove("show");
+        LoadingManager.hide(loading);
         if (resultsDiv) {
           resultsDiv.classList.add("show");
           resultsDiv.focus();
@@ -4652,18 +5074,22 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
       const handleSubmit = (e) => {
         e.preventDefault();
         withCsrfToken(async (token) => {
-          loading.classList.add("show");
+          // Use LoadingManager for auto-timeout safety
+          LoadingManager.show(loading, 10 * 60 * 1000); // 10 min timeout for audits
           if (resultsDiv) resultsDiv.classList.remove("show");
           usageWarning.textContent = "";
           usageWarning.classList.remove("error", "success");
 
           const file = auditForm.querySelector("#file")?.files[0];
           if (!file) {
-            loading.classList.remove("show");
+            LoadingManager.hide(loading);
             usageWarning.textContent = "Please select a file";
             usageWarning.classList.add("error");
             return;
           }
+
+          // Save audit key for state persistence
+          AuditStateManager.setCurrentAudit(null); // Will be set when we get the key
 
           const username = (await fetchUsername())?.username || "guest";
           const formData = new FormData(auditForm);
@@ -4695,7 +5121,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
 
               // Handle 409 Conflict - One File Per Project Key Policy
               if (response.status === 409 && errorData.detail?.error === 'one_file_per_key') {
-                loading.classList.remove("show");
+                LoadingManager.hide(loading);
                 const detail = errorData.detail;
 
                 // Show informative error with action options
@@ -4766,7 +5192,13 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
               queueTracker.onComplete = async (result) => {
                 logMessage("Audit complete!");
                 queueTracker.hideQueueUI();
-                loading.classList.remove("show");
+                LoadingManager.hide(loading);
+
+                // Clear form state - audit successful, no need to restore
+                FormStateManager.clear();
+                AuditStateManager.clearCurrentAudit();
+                TierCache.invalidate(); // Force refresh tier data
+
                 if (result.tier) window.currentAuditTier = result.tier;
                 handleAuditResponse(result);
                 
@@ -4787,7 +5219,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
               queueTracker.onError = (error) => {
                 logMessage(`Audit failed: ${error}`);
                 queueTracker.hideQueueUI();
-                loading.classList.remove("show");
+                LoadingManager.hide(loading);
                 usageWarning.textContent = error || "Audit failed";
                 usageWarning.classList.add("error");
               };
@@ -4804,7 +5236,13 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             } else {
               // IMMEDIATE: Audit ran and completed
               logMessage("Audit complete!");
-              loading.classList.remove("show");
+              LoadingManager.hide(loading);
+
+              // Clear form state - audit successful, no need to restore
+              FormStateManager.clear();
+              AuditStateManager.clearCurrentAudit();
+              TierCache.invalidate(); // Force refresh tier data
+
               if (data.tier) window.currentAuditTier = data.tier;
 
               // Show Access Key popup so user can save it for later retrieval
@@ -4833,7 +5271,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           } catch (err) {
             console.error(err);
             queueTracker.hideQueueUI();
-            loading.classList.remove("show");
+            LoadingManager.hide(loading);
             usageWarning.textContent = err.message || "Audit error";
             usageWarning.classList.add("error");
           }
