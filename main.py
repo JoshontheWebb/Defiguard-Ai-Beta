@@ -107,7 +107,7 @@ except ImportError:
         SignatureVerificationError = _StripeErrorStub
     stripe_error = _StripeModuleStub()
 
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Float, LargeBinary
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Float, LargeBinary, text
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.orm import sessionmaker, Session, Mapped, mapped_column
 from slither.slither import Slither
@@ -1505,7 +1505,20 @@ async def send_audit_email_async(
     )
 
 
-Base.metadata.create_all(bind=engine, checkfirst=True)
+# Create tables - with comprehensive logging for PostgreSQL migration
+try:
+    Base.metadata.create_all(bind=engine, checkfirst=True)
+    # Verify database connectivity
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT 1"))
+        result.fetchone()
+    db_type = "PostgreSQL" if DATABASE_URL and DATABASE_URL.startswith("postgresql") else "SQLite"
+    logger.info(f"[DB] ✓ Database initialized successfully ({db_type})")
+    logger.info(f"[DB] ✓ Tables created/verified: users, api_keys, pending_audits, contracts, etc.")
+except Exception as e:
+    logger.error(f"[DB] ✗ Database initialization FAILED: {e}")
+    logger.error(f"[DB] ✗ DATABASE_URL configured: {bool(os.getenv('DATABASE_URL'))}")
+    raise
 
 def get_db():
     db = SessionLocal()
@@ -1513,6 +1526,41 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+@app.get("/health/db")
+async def database_health(db: Session = Depends(get_db)):
+    """Database health check endpoint for debugging persistence issues."""
+    try:
+        # Test basic connectivity
+        result = db.execute(text("SELECT 1")).fetchone()
+
+        # Get user count
+        user_count = db.query(User).count()
+
+        # Get database type
+        db_type = "PostgreSQL" if DATABASE_URL and DATABASE_URL.startswith("postgresql") else "SQLite"
+        db_location = "Render" if os.getenv("RENDER") else "Local"
+
+        # Check persistence flag
+        persistence_enabled = ENABLE_TIER_PERSISTENCE
+
+        return {
+            "status": "healthy",
+            "database_type": db_type,
+            "database_location": db_location,
+            "user_count": user_count,
+            "persistence_enabled": persistence_enabled,
+            "database_url_set": bool(os.getenv("DATABASE_URL")),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"[DB] Health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
 
 async def get_authenticated_user(request: Request, db: Session = Depends(get_db)) -> Optional[User]:
     # 1. Try Auth0 session first
@@ -6389,50 +6437,99 @@ async def complete_tier_checkout(
             return RedirectResponse(url="/ui?upgrade=failed&message=Security%20validation%20failed")
 
         if stripe_session.payment_status != "paid":
-            logger.error(f"Payment not completed for {username}, status={stripe_session.payment_status}")
+            logger.error(f"[PAYMENT] Payment not completed for {username}, status={stripe_session.payment_status}")
             return RedirectResponse(url="/ui?upgrade=failed&message=Payment%20failed")
 
-        # Find and update the user
+        logger.info(f"[PAYMENT] ✓ Payment verified as PAID for {username}")
+
+        # Find user - auto-create if not found (handles ephemeral DB recovery)
         user = db.query(User).filter(User.username == username).first()
         if not user:
-            logger.error(f"User {username} not found after Stripe payment")
-            return RedirectResponse(url="/auth?redirect_reason=user_not_found")
-        
+            # Auto-recover: Create user from Stripe session data
+            logger.warning(f"[PAYMENT] User {username} not found - creating from Stripe payment data")
+
+            # Extract email from Stripe customer if possible
+            user_email = None
+            if stripe_session.customer:
+                try:
+                    customer = stripe.Customer.retrieve(stripe_session.customer)
+                    user_email = customer.email
+                    logger.info(f"[PAYMENT] Retrieved email from Stripe customer: {user_email}")
+                except Exception as e:
+                    logger.warning(f"[PAYMENT] Could not retrieve Stripe customer email: {e}")
+
+            if not user_email:
+                user_email = stripe_session.customer_email or f"{username}@stripe-recovery.local"
+
+            user = User(
+                username=username,
+                email=user_email,
+                tier="free",  # Will be upgraded immediately below
+                audit_history="[]",
+                last_reset=datetime.now(timezone.utc),
+                has_diamond=False,
+                stripe_customer_id=stripe_session.customer if isinstance(stripe_session.customer, str) else None
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            logger.info(f"[PAYMENT] ✓ Auto-created user {username} from Stripe payment")
+
         # Map old tier names to new
         tier_mapping = {
             "beginner": "starter",
             "diamond": "enterprise"
         }
         normalized_tier = tier_mapping.get(tier, tier)
-        
-        # Apply tier upgrade
+
+        logger.info(f"[PAYMENT] Upgrading {username} from tier={user.tier} to tier={normalized_tier} (has_diamond={has_diamond})")
+
+        # Apply tier upgrade - UNCONDITIONAL (if you paid, you get the tier)
         user.tier = normalized_tier
         user.has_diamond = has_diamond if normalized_tier == "pro" else False
-        
+
+        # Generate API key for pro/enterprise tiers
         if normalized_tier in ["pro", "enterprise"] and not user.api_key:
             user.api_key = cast(Optional[str], secrets.token_urlsafe(32))
-        
+            logger.info(f"[PAYMENT] Generated API key for {username}")
+
+        # Handle diamond add-on
         if tier == "diamond":
             user.tier = "pro"
             user.has_diamond = True
             user.last_reset = datetime.now() + timedelta(days=30)
+            logger.info(f"[PAYMENT] Applied Diamond add-on for {username}")
         
-        # Save Stripe IDs
-        if session.subscription:
-            user.stripe_subscription_id = session.subscription if isinstance(session.subscription, str) else getattr(session.subscription, "id", None)
-            user.stripe_customer_id = session.customer
-            
-            subscription_id = session.subscription if isinstance(session.subscription, str) else getattr(session.subscription, "id", None)
+        # Save Stripe IDs - CRITICAL: Use stripe_session, not session (HTTP session)!
+        logger.info(f"[PAYMENT] Processing Stripe IDs for {username}: subscription={stripe_session.subscription}, customer={stripe_session.customer}")
+
+        # Always save customer ID if present
+        if stripe_session.customer:
+            user.stripe_customer_id = stripe_session.customer if isinstance(stripe_session.customer, str) else getattr(stripe_session.customer, "id", None)
+            logger.info(f"[PAYMENT] Saved customer ID for {username}: {user.stripe_customer_id}")
+
+        # Save subscription ID if present
+        if stripe_session.subscription:
+            user.stripe_subscription_id = stripe_session.subscription if isinstance(stripe_session.subscription, str) else getattr(stripe_session.subscription, "id", None)
+            logger.info(f"[PAYMENT] Saved subscription ID for {username}: {user.stripe_subscription_id}")
+
+            subscription_id = user.stripe_subscription_id
             if subscription_id:
                 try:
-                    for item in stripe.Subscription.retrieve(subscription_id).get("items", {}).get("data", []):
+                    sub = stripe.Subscription.retrieve(subscription_id)
+                    for item in sub.get("items", {}).get("data", []):
                         if item.price.id == STRIPE_METERED_PRICE_DIAMOND:
                             user.stripe_subscription_item_id = item.id
+                            logger.info(f"[PAYMENT] Saved subscription item ID for Diamond: {item.id}")
                 except Exception as e:
-                    logger.error(f"Failed to retrieve subscription items: {e}")
-        
+                    logger.error(f"[PAYMENT] Failed to retrieve subscription items: {e}")
+
+        # Log final user state before commit
+        logger.info(f"[PAYMENT] Final user state for {username}: tier={user.tier}, has_diamond={user.has_diamond}, stripe_customer={user.stripe_customer_id}, stripe_sub={user.stripe_subscription_id}")
+
         db.commit()
-        
+        logger.info(f"[PAYMENT] ✓ Database committed for {username}")
+
         usage_tracker.set_tier(normalized_tier, has_diamond, username, db)
         usage_tracker.reset_usage(username, db)
 
@@ -6494,20 +6591,49 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
     
     try:
         if event["type"] == "checkout.session.completed":
-            session = event["data"]["object"]
-            username = session["metadata"].get("username")
-            pending_id = session["metadata"].get("pending_id")
-            audit_type = session["metadata"].get("audit_type")
-            
+            stripe_checkout = event["data"]["object"]
+            username = stripe_checkout["metadata"].get("username")
+            pending_id = stripe_checkout["metadata"].get("pending_id")
+            audit_type = stripe_checkout["metadata"].get("audit_type")
+
+            logger.info(f"[WEBHOOK] checkout.session.completed: username={username}, tier={stripe_checkout['metadata'].get('tier')}")
+
             if not username:
-                logger.warning(f"Webhook: Missing username in metadata, event_id={event['id']}")
+                logger.warning(f"[WEBHOOK] Missing username in metadata, event_id={event['id']}")
                 return Response(status_code=200)
-            
+
+            # Find user - auto-create if not found (handles ephemeral DB recovery)
             user = db.query(User).filter(User.username == username).first()
             if not user:
-                logger.error(f"Webhook: User {username} not found")
-                return Response(status_code=200)
-            
+                logger.warning(f"[WEBHOOK] User {username} not found - auto-creating from Stripe webhook")
+
+                # Extract email from Stripe customer if possible
+                user_email = None
+                if stripe_checkout.get("customer"):
+                    try:
+                        customer = stripe.Customer.retrieve(stripe_checkout["customer"])
+                        user_email = customer.email
+                        logger.info(f"[WEBHOOK] Retrieved email from Stripe customer: {user_email}")
+                    except Exception as e:
+                        logger.warning(f"[WEBHOOK] Could not retrieve Stripe customer email: {e}")
+
+                if not user_email:
+                    user_email = stripe_checkout.get("customer_email") or f"{username}@webhook-recovery.local"
+
+                user = User(
+                    username=username,
+                    email=user_email,
+                    tier="free",  # Will be upgraded immediately below
+                    audit_history="[]",
+                    last_reset=datetime.now(timezone.utc),
+                    has_diamond=False,
+                    stripe_customer_id=stripe_checkout.get("customer")
+                )
+                db.add(user)
+                db.commit()
+                db.refresh(user)
+                logger.info(f"[WEBHOOK] ✓ Auto-created user {username} from Stripe webhook")
+
             # 1. DIAMOND OVERAGE AUDIT
             if pending_id and audit_type == "diamond_overage":
                 pending_audit = db.query(PendingAudit).filter(PendingAudit.id == pending_id).first()
@@ -6515,78 +6641,112 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
                     pending_audit.status = "processing"
                     db.commit()
                     asyncio.create_task(process_pending_audit(db, pending_id))
-                    logger.info(f"Webhook: Started background Diamond audit for {username}, pending_id={pending_id}")
+                    logger.info(f"[WEBHOOK] Started background Diamond audit for {username}, pending_id={pending_id}")
                 else:
-                    logger.warning(f"Webhook: Pending audit {pending_id} not found or already processed")
+                    logger.warning(f"[WEBHOOK] Pending audit {pending_id} not found or already processed")
                 return Response(status_code=200)
-            
+
             # 2. TIER UPGRADE
-            tier = session["metadata"].get("tier")
-            has_diamond = session["metadata"].get("has_diamond") == "true"
-            
-            if user and tier:
+            tier = stripe_checkout["metadata"].get("tier")
+            has_diamond = stripe_checkout["metadata"].get("has_diamond") == "true"
+
+            if tier:
                 # Map old tier names to new
                 tier_mapping = {
                     "beginner": "starter",
                     "diamond": "enterprise"
                 }
                 normalized_tier = tier_mapping.get(tier, tier)
-                
-                user.stripe_customer_id = session.customer
-                user.stripe_subscription_id = session.subscription
-                
-                if session.subscription:
+                previous_tier = user.tier
+
+                logger.info(f"[WEBHOOK] Processing tier upgrade for {username}: {previous_tier} → {normalized_tier}")
+
+                # Save Stripe IDs
+                user.stripe_customer_id = stripe_checkout.get("customer")
+                user.stripe_subscription_id = stripe_checkout.get("subscription")
+                logger.info(f"[WEBHOOK] Saved Stripe IDs: customer={user.stripe_customer_id}, subscription={user.stripe_subscription_id}")
+
+                if stripe_checkout.get("subscription"):
                     try:
-                        for item in stripe.Subscription.retrieve(session.subscription).get("items", {}).get("data", []):
+                        sub = stripe.Subscription.retrieve(stripe_checkout["subscription"])
+                        for item in sub.get("items", {}).get("data", []):
                             if item.price.id == STRIPE_METERED_PRICE_DIAMOND:
                                 user.stripe_subscription_item_id = item.id
+                                logger.info(f"[WEBHOOK] Saved Diamond subscription item ID: {item.id}")
                     except Exception as e:
-                        logger.error(f"Failed to retrieve subscription items: {e}")
-                
-                current_tier = user.tier
-                
-                if normalized_tier == "pro" and current_tier in ["free", "beginner", "starter"]:
+                        logger.error(f"[WEBHOOK] Failed to retrieve subscription items: {e}")
+
+                # UNCONDITIONAL TIER UPGRADE - if they paid, they get the tier!
+                if tier == "diamond":
+                    # Diamond is an add-on to Pro
                     user.tier = "pro"
-                    if not user.api_key:
-                        user.api_key = cast(Optional[str], secrets.token_urlsafe(32))
-                elif tier == "diamond" and current_tier == "pro":
                     user.has_diamond = True
                     user.last_reset = datetime.now() + timedelta(days=30)
-                elif normalized_tier == "enterprise":
-                    user.tier = "enterprise"
-                    if not user.api_key:
-                        user.api_key = cast(Optional[str], secrets.token_urlsafe(32))
-                
+                    logger.info(f"[WEBHOOK] Applied Diamond add-on for {username}")
+                else:
+                    # Direct tier upgrade (starter, pro, enterprise)
+                    user.tier = normalized_tier
+                    user.has_diamond = has_diamond if normalized_tier == "pro" else False
+
+                # Generate API key for pro/enterprise
+                if normalized_tier in ["pro", "enterprise"] and not user.api_key:
+                    user.api_key = cast(Optional[str], secrets.token_urlsafe(32))
+                    logger.info(f"[WEBHOOK] Generated API key for {username}")
+
                 usage_tracker.set_tier(normalized_tier, has_diamond, username, db)
                 usage_tracker.reset_usage(username, db)
                 db.commit()
-                
-                logger.info(f"Webhook: Tier upgrade completed for {username} to {normalized_tier}")
-                
+
+                logger.info(f"[WEBHOOK] ✓ Tier upgrade completed for {username}: {previous_tier} → {user.tier} (has_diamond={user.has_diamond})")
+
                 # Auto-resume pending audit
                 pending_audit = db.query(PendingAudit).filter(PendingAudit.username == username, PendingAudit.status == "pending").first()
                 if pending_audit:
                     pending_audit.status = "processing"
                     db.commit()
                     asyncio.create_task(process_pending_audit(db, pending_audit.id))
+                    logger.info(f"[WEBHOOK] Auto-resumed pending audit for {username}")
             else:
-                logger.debug(f"Webhook event ignored: unhandled type {event['type']}, event_id={event['id']}")
+                logger.debug(f"[WEBHOOK] No tier in metadata, event_id={event['id']}")
         
         elif event["type"] in ("invoice.payment_failed", "customer.subscription.deleted"):
-            session = event["data"]["object"]
-            user_id = session.metadata.get("user_id")
-            
-            if user_id:
-                user = db.query(User).filter(User.id == int(user_id)).first()
+            obj = event["data"]["object"]
+            logger.info(f"[WEBHOOK] {event['type']} received")
+
+            # Try to find user by subscription ID first, then by customer ID, then by metadata
+            user = None
+            subscription_id = obj.get("subscription") or obj.get("id")  # For subscription.deleted, id IS the subscription
+            customer_id = obj.get("customer")
+
+            if subscription_id:
+                user = db.query(User).filter(User.stripe_subscription_id == subscription_id).first()
                 if user:
-                    user.tier = "free"
-                    user.has_diamond = False
-                    user.stripe_subscription_id = None
-                    user.stripe_subscription_item_id = None
-                    db.commit()
-                    logger.info(f"User {user_id} reverted to free tier ({event['type']})")
+                    logger.info(f"[WEBHOOK] Found user by subscription_id: {user.username}")
+
+            if not user and customer_id:
+                user = db.query(User).filter(User.stripe_customer_id == customer_id).first()
+                if user:
+                    logger.info(f"[WEBHOOK] Found user by customer_id: {user.username}")
+
+            if not user:
+                # Fallback to metadata
+                metadata = obj.get("metadata", {}) or {}
+                user_id = metadata.get("user_id")
+                if user_id:
+                    user = db.query(User).filter(User.id == int(user_id)).first()
+                    if user:
+                        logger.info(f"[WEBHOOK] Found user by metadata user_id: {user.username}")
+
+            if user:
+                previous_tier = user.tier
+                user.tier = "free"
+                user.has_diamond = False
+                user.stripe_subscription_id = None
+                user.stripe_subscription_item_id = None
+                db.commit()
+                logger.info(f"[WEBHOOK] ✓ User {user.username} reverted from {previous_tier} to free tier ({event['type']})")
             else:
-                logger.warning(f"Webhook: No user_id in metadata for {event['type']}, cannot revert tier")
+                logger.warning(f"[WEBHOOK] Could not find user for {event['type']}, subscription={subscription_id}, customer={customer_id}")
         
         return Response(status_code=200)
     
