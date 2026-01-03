@@ -1090,7 +1090,7 @@ const ToastNotification = {
         toast.innerHTML = `
             <span style="font-size: 20px;">${icon}</span>
             <div style="flex: 1;">
-                ${message}
+                ${escapeHtml(message)}
             </div>
             <button style="background: none; border: none; color: white; cursor: pointer; font-size: 18px; padding: 0; opacity: 0.7;" onclick="this.parentElement.remove()">×</button>
         `;
@@ -2171,13 +2171,13 @@ class WalletManager {
                     <div style="text-align: center; padding: var(--space-4);">
                         <div style="font-size: 2rem; margin-bottom: var(--space-3);">⚠️</div>
                         <p style="color: var(--text-secondary); margin-bottom: var(--space-4);">
-                            ${error.message || 'Failed to initialize WalletConnect'}
+                            ${escapeHtml(error.message || 'Failed to initialize WalletConnect')}
                         </p>
                         <p style="font-size: var(--text-sm); color: var(--text-tertiary); margin-bottom: var(--space-4);">
                             <strong>Alternative:</strong> Open this page in your wallet app's browser
                         </p>
                         <div style="background: var(--glass-bg); padding: var(--space-3); border-radius: var(--radius-md); font-size: var(--text-xs); word-break: break-all; color: var(--text-tertiary);">
-                            ${window.location.origin}
+                            ${escapeHtml(window.location.origin)}
                         </div>
                         <button onclick="window.walletManager.showWalletConnectQR()" class="btn btn-secondary" style="margin-top: var(--space-4);">
                             Try Again
@@ -3354,8 +3354,9 @@ document.addEventListener("DOMContentLoaded", () => {
       });
 
       // Persist custom report input as user types
-      const customReportInput = document.getElementById('custom_report');
-      customReportInput?.addEventListener('input', (e) => {
+      // Note: customReportInput already destructured from els, use the element directly
+      const customReportEl = document.getElementById('custom_report');
+      customReportEl?.addEventListener('input', (e) => {
         FormStateManager.saveField('customReport', e.target.value);
       });
 
@@ -4098,11 +4099,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
             overallRiskEl.innerHTML = `
               <div class="onchain-risk-left">
-                <span class="onchain-risk-badge ${level}">${overall.level || 'N/A'}</span>
+                <span class="onchain-risk-badge ${escapeHtml(level)}">${escapeHtml(overall.level || 'N/A')}</span>
                 <span class="onchain-risk-score">${overall.score || 0}/100</span>
               </div>
               <div class="onchain-risk-summary">
-                ${overall.summary || 'On-chain analysis complete.'}
+                ${escapeHtml(overall.summary || 'On-chain analysis complete.')}
               </div>
             `;
           }
@@ -4123,7 +4124,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 <div class="upgrade-icon">🔒</div>
                 <div class="upgrade-content">
                   <h3>More Issues Detected!</h3>
-                  <p>${report.upgrade_prompt}</p>
+                  <p>${escapeHtml(report.upgrade_prompt || '')}</p>
                   <a href="#tier-select" class="btn btn-primary" onclick="document.getElementById('tier-select').scrollIntoView({behavior: 'smooth'})">
                     Upgrade to See All Issues & Get Fix Recommendations
                   </a>
@@ -4612,7 +4613,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
               <div class="fuzzing-header ${statusClass}">
                 <div class="fuzzing-status">
                   <span class="status-icon">${statusIcon}</span>
-                  <span class="status-text">${parsed.execution_summary || 'Fuzzing Complete'}</span>
+                  <span class="status-text">${escapeHtml(parsed.execution_summary || 'Fuzzing Complete')}</span>
                 </div>
                 ${parsed.contract_name ? `<span class="contract-badge">${escapeHtml(parsed.contract_name)}</span>` : ''}
               </div>
@@ -4641,13 +4642,17 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
               <div class="fuzzing-tests-section">
                 <h5>Function Tests</h5>
                 <div class="function-tests-list">
-                  ${parsed.function_tests.map(test => `
+                  ${parsed.function_tests.map(test => {
+                    // Validate icon - only allow safe emoji icons
+                    const safeIcons = ['✅', '❌', '⚠️', '🔄', '⏳', '✓', '✗'];
+                    const testIcon = safeIcons.includes(test.icon) ? test.icon : (test.passed ? '✅' : '❌');
+                    return `
                     <div class="function-test-item ${test.passed ? 'passed' : 'failed'}">
-                      <span class="test-icon">${test.icon}</span>
+                      <span class="test-icon">${testIcon}</span>
                       <code class="test-name">${escapeHtml(test.function)}</code>
-                      <span class="test-status">${test.status}</span>
+                      <span class="test-status">${escapeHtml(test.status || '')}</span>
                     </div>
-                  `).join('')}
+                  `}).join('')}
                 </div>
               </div>`;
           }
@@ -4812,7 +4817,10 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
 
             // For violations, show severity and actionable fix
             const isViolation = result.status === 'violated' || result.status === 'issues_found';
-            const severity = result.severity || 'HIGH';
+            // Validate severity - only allow known severity levels
+            const allowedSeverities = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'];
+            const rawSeverity = (result.severity || 'HIGH').toUpperCase();
+            const severity = allowedSeverities.includes(rawSeverity) ? rawSeverity : 'HIGH';
             const category = result.category || 'Formal Verification';
             const fix = result.fix || '';
             const isProven = result.proven === true;
@@ -4878,19 +4886,19 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           const roadmapText = report.remediation_roadmap;
           // Parse numbered items (1. ... 2. ... 3. ...)
           const steps = roadmapText.split(/\d+\.\s+/).filter(step => step.trim());
-          
+
           if (steps.length > 0) {
             remediationRoadmap.innerHTML = steps
               .map((step, index) => `
                 <li tabindex="0">
                   <span class="step-number">${index + 1}</span>
-                  <span class="step-content">${step.trim()}</span>
+                  <span class="step-content">${escapeHtml(step.trim())}</span>
                 </li>
               `)
               .join('');
           } else {
-            // Fallback if parsing fails
-            remediationRoadmap.innerHTML = `<li tabindex="0">${roadmapText}</li>`;
+            // Fallback if parsing fails - escape for XSS protection
+            remediationRoadmap.innerHTML = `<li tabindex="0">${escapeHtml(roadmapText)}</li>`;
           }
         }
         
@@ -5009,13 +5017,14 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
 
             let issuesHtml = issues.map((issue, index) => {
               const severity = (issue.severity || 'medium').toLowerCase();
-              const desc = issue.description || '';
+              const desc = escapeHtml(issue.description || '');
+              const issueType = escapeHtml(issue.type || issue.title || 'Issue');
               const needsExpand = desc.length > 80; // Show expand hint if description is long
               return `
-                <div class="mobile-issue-item ${severity}" data-issue-index="${index}" onclick="this.classList.toggle('expanded')">
+                <div class="mobile-issue-item ${escapeHtml(severity)}" data-issue-index="${index}" onclick="this.classList.toggle('expanded')">
                   <span class="mobile-issue-severity">${severityIcon[severity] || '🔵'}</span>
                   <div class="mobile-issue-content">
-                    <div class="mobile-issue-type">${issue.type || issue.title || 'Issue'}</div>
+                    <div class="mobile-issue-type">${issueType}</div>
                     <div class="mobile-issue-desc">${desc}</div>
                     ${needsExpand ? '<div class="mobile-issue-expand-hint">tap to expand</div>' : ''}
                   </div>
@@ -5789,52 +5798,72 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
                   'pending': 'background: rgba(241, 196, 15, 0.2); color: #f1c40f;',
                   'error': 'background: rgba(231, 76, 60, 0.2); color: var(--red);'
                 };
-                const statusStyle = statusStyles[job.status] || statusStyles['pending'];
+                // Normalize status to allowed values only
+                const safeStatus = ['completed', 'running', 'pending', 'error'].includes(job.status) ? job.status : 'pending';
+                const statusStyle = statusStyles[safeStatus];
 
-                // Results display
+                // Results display (numbers only, safe)
                 let resultsHtml = '—';
-                if (job.status === 'completed') {
+                if (safeStatus === 'completed') {
+                  const verified = parseInt(job.rules_verified, 10) || 0;
+                  const violated = parseInt(job.rules_violated, 10) || 0;
                   resultsHtml = `
-                    <span style="color: var(--green);">✓ ${job.rules_verified}</span> /
-                    <span style="color: var(--red);">✗ ${job.rules_violated}</span>
+                    <span style="color: var(--green);">✓ ${verified}</span> /
+                    <span style="color: var(--red);">✗ ${violated}</span>
                   `;
-                } else if (job.status === 'running' || job.status === 'pending') {
+                } else if (safeStatus === 'running' || safeStatus === 'pending') {
                   resultsHtml = '<span style="color: var(--accent-purple);">⏳ Running...</span>';
                 }
 
-                // Truncate job ID for display
-                const shortJobId = job.job_id.length > 12
-                  ? job.job_id.substring(0, 8) + '...'
-                  : job.job_id;
+                // Escape all user-controlled data
+                const safeContractName = escapeHtml(job.contract_name || 'Unknown');
+                const safeJobId = escapeHtml(job.job_id || '');
+                const shortJobId = safeJobId.length > 12
+                  ? safeJobId.substring(0, 8) + '...'
+                  : safeJobId;
+
+                // Validate URL - only allow https:// URLs to Certora domains
+                let safeJobUrl = '#';
+                if (job.job_url && typeof job.job_url === 'string') {
+                  try {
+                    const urlObj = new URL(job.job_url);
+                    if (urlObj.protocol === 'https:' &&
+                        (urlObj.hostname.endsWith('certora.com') || urlObj.hostname.endsWith('prover.certora.com'))) {
+                      safeJobUrl = escapeHtml(job.job_url);
+                    }
+                  } catch (e) {
+                    // Invalid URL, use fallback
+                  }
+                }
 
                 return `
                   <tr style="border-bottom: 1px solid var(--glass-border);">
                     <td style="padding: var(--space-3); font-weight: 600; color: var(--text-primary); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                      ${job.contract_name}
+                      ${safeContractName}
                     </td>
                     <td style="padding: var(--space-3);">
                       <span style="display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: var(--text-xs); text-transform: uppercase; ${statusStyle}">
-                        ${job.status}
+                        ${safeStatus}
                       </span>
                     </td>
                     <td style="padding: var(--space-3); text-align: center; font-size: var(--text-sm);">
                       ${resultsHtml}
                     </td>
                     <td style="padding: var(--space-3);">
-                      <a href="${job.job_url}" target="_blank" rel="noopener noreferrer"
+                      <a href="${safeJobUrl}" target="_blank" rel="noopener noreferrer"
                          style="font-family: 'JetBrains Mono', monospace; font-size: var(--text-sm); color: var(--accent-teal); text-decoration: none;"
-                         title="View on Certora Dashboard: ${job.job_id}">
+                         title="View on Certora Dashboard: ${safeJobId}">
                         ${shortJobId} ↗
                       </a>
                     </td>
                     <td style="padding: var(--space-3); text-align: right;">
-                      <button class="copy-job-id-btn btn btn-sm" data-job-id="${job.job_id}" style="margin-right: var(--space-2);">
+                      <button class="copy-job-id-btn btn btn-sm" data-job-id="${safeJobId}" style="margin-right: var(--space-2);">
                         📋
                       </button>
-                      ${job.status === 'running' || job.status === 'pending'
-                        ? `<button class="poll-job-btn btn btn-sm" data-job-id="${job.job_id}" style="margin-right: var(--space-2);">🔄</button>`
+                      ${safeStatus === 'running' || safeStatus === 'pending'
+                        ? `<button class="poll-job-btn btn btn-sm" data-job-id="${safeJobId}" style="margin-right: var(--space-2);">🔄</button>`
                         : ''}
-                      <button class="delete-job-btn btn btn-secondary btn-sm" data-job-id="${job.job_id}" data-contract="${job.contract_name}">
+                      <button class="delete-job-btn btn btn-secondary btn-sm" data-job-id="${safeJobId}" data-contract="${safeContractName}">
                         🗑️
                       </button>
                     </td>
