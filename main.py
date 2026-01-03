@@ -1548,6 +1548,45 @@ except Exception as e:
     logger.error(f"[DB] ✗ DATABASE_URL configured: {bool(os.getenv('DATABASE_URL'))}")
     raise
 
+# Run database migrations for new columns on existing tables
+def run_migrations():
+    """Add new columns to existing tables that Base.metadata.create_all won't update."""
+    is_postgres = DATABASE_URL and DATABASE_URL.startswith("postgresql")
+
+    migrations = []
+
+    if is_postgres:
+        # PostgreSQL supports ADD COLUMN IF NOT EXISTS
+        migrations = [
+            "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS audit_count INTEGER DEFAULT 0",
+            "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS max_audits INTEGER",
+            "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS is_starter_key BOOLEAN DEFAULT FALSE",
+            # Add api_key_id to audit_results if it doesn't exist
+            "ALTER TABLE audit_results ADD COLUMN IF NOT EXISTS api_key_id INTEGER REFERENCES api_keys(id)",
+        ]
+    else:
+        # SQLite doesn't support IF NOT EXISTS for columns - need to check pragma
+        migrations = []  # SQLite will get new columns on fresh DB, existing ones need manual migration
+
+    with engine.connect() as conn:
+        for migration in migrations:
+            try:
+                conn.execute(text(migration))
+                conn.commit()
+                logger.info(f"[DB] ✓ Migration applied: {migration[:60]}...")
+            except Exception as e:
+                # Column might already exist or other expected error
+                if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
+                    logger.debug(f"[DB] Migration skipped (already applied): {migration[:40]}...")
+                else:
+                    logger.warning(f"[DB] Migration warning: {e}")
+
+try:
+    run_migrations()
+    logger.info("[DB] ✓ Database migrations completed")
+except Exception as e:
+    logger.error(f"[DB] ✗ Migration error (non-fatal): {e}")
+
 def get_db():
     db = SessionLocal()
     try:
