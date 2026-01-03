@@ -88,13 +88,14 @@ services:
       - key: WEB3_PROVIDER_URL
         sync: false
       # Database (required for persistence)
+      # NOTE: If deploying via Blueprint, this auto-connects to the database below.
+      # If deploying manually, create a PostgreSQL database on Render and set DATABASE_URL
+      # in the service Environment tab with the "Internal Database URL" value.
       - key: DATABASE_URL
-        fromDatabase:
-          name: defiguard-db
-          property: connectionString
+        sync: false
       # Tier Persistence (set to 'true' to sync user tiers with Stripe on login)
       - key: ENABLE_TIER_PERSISTENCE
-        value: "true"
+        sync: false
       # Redis (required)
       - key: REDIS_URL
         sync: false

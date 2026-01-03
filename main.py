@@ -1628,10 +1628,25 @@ async def get_authenticated_user(request: Request, db: Session = Depends(get_db)
         if email:
             existing_user = db.query(User).filter(User.email == email).first()
             if existing_user:
-                # Link this auth0_sub to existing account
-                logger.info(f"[AUTH] Linking new auth0_sub {auth0_sub} to existing user {existing_user.username}")
-                existing_user.auth0_sub = auth0_sub
-                db.commit()
+                # Only link if this auth0_sub isn't already taken by another user
+                existing_sub_user = db.query(User).filter(User.auth0_sub == auth0_sub).first()
+                if existing_sub_user and existing_sub_user.id != existing_user.id:
+                    # Another user has this auth0_sub - return that user instead
+                    logger.info(f"[AUTH] auth0_sub {auth0_sub} already linked to user {existing_sub_user.username}")
+                    return existing_sub_user
+                elif not existing_sub_user:
+                    # Link this auth0_sub to existing account
+                    logger.info(f"[AUTH] Linking new auth0_sub {auth0_sub} to existing user {existing_user.username}")
+                    existing_user.auth0_sub = auth0_sub
+                    try:
+                        db.commit()
+                    except Exception as e:
+                        db.rollback()
+                        logger.warning(f"[AUTH] Failed to link auth0_sub: {e}")
+                        # Re-query in case of race condition
+                        user = db.query(User).filter(User.auth0_sub == auth0_sub).first()
+                        if user:
+                            return user
                 return existing_user
 
         # Auto-create user on first Auth0 login
@@ -1653,10 +1668,24 @@ async def get_authenticated_user(request: Request, db: Session = Depends(get_db)
             auth0_sub=auth0_sub,
             tier="free",
         )
-        db.add(new_user)
-        db.commit()
-        db.refresh(new_user)
-        return new_user
+        try:
+            db.add(new_user)
+            db.commit()
+            db.refresh(new_user)
+            return new_user
+        except Exception as e:
+            db.rollback()
+            logger.warning(f"[AUTH] User creation failed (likely race condition): {e}")
+            # Re-query in case another worker created the user
+            user = db.query(User).filter(User.auth0_sub == auth0_sub).first()
+            if user:
+                return user
+            # Try by email as fallback
+            user = db.query(User).filter(User.email == email).first()
+            if user:
+                return user
+            # Last resort: raise the original error
+            raise
     
     # 2. Fallback to legacy session user_id
     user_id = request.session.get("user_id")
