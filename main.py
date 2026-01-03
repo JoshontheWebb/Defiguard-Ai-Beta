@@ -256,6 +256,7 @@ class AuditJob:
     file_content: bytes
     tier: str
     contract_address: Optional[str] = None
+    api_key_id: Optional[int] = None  # Pro/Enterprise: Track which API key this audit belongs to
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     status: AuditStatus = AuditStatus.QUEUED
     position: int = 0
@@ -294,7 +295,8 @@ class AuditQueue:
         logger.info(f"[QUEUE] AuditQueue initialized with max_concurrent={max_concurrent} (PRIORITY ENABLED)")
     
     async def submit(self, username: str, file_content: bytes,
-                     filename: str, tier: str, contract_address: Optional[str] = None) -> AuditJob:
+                     filename: str, tier: str, contract_address: Optional[str] = None,
+                     api_key_id: Optional[int] = None) -> AuditJob:
         """Submit a new audit job to the priority queue with limits enforcement."""
         async with self.lock:
             # Security: Enforce queue depth limit to prevent memory exhaustion
@@ -326,6 +328,7 @@ class AuditQueue:
                 filename=filename,
                 tier=tier,
                 contract_address=contract_address,
+                api_key_id=api_key_id,  # Track API key assignment for Pro/Enterprise
                 position=0  # Will be calculated dynamically
             )
 
@@ -4393,14 +4396,32 @@ def _build_cover_page(story: list, styles: dict, username: str, file_size: int,
 
     story.append(Spacer(1, 1.5*inch))
 
-    # Logo for non-Enterprise tiers
+    # Logo for non-Enterprise tiers - preserve aspect ratio
     if not is_whitelabel and os.path.exists(PDF_LOGO_PATH):
         try:
-            logo = Image(PDF_LOGO_PATH, width=2.5*inch, height=0.8*inch)
+            from PIL import Image as PILImage
+            # Get original image dimensions to preserve aspect ratio
+            with PILImage.open(PDF_LOGO_PATH) as img:
+                orig_width, orig_height = img.size
+                aspect_ratio = orig_width / orig_height
+
+            # Set max dimensions while preserving aspect ratio
+            max_width = 2.0 * inch
+            max_height = 2.0 * inch
+
+            if aspect_ratio >= 1:  # Landscape or square
+                logo_width = min(max_width, max_height * aspect_ratio)
+                logo_height = logo_width / aspect_ratio
+            else:  # Portrait
+                logo_height = min(max_height, max_width / aspect_ratio)
+                logo_width = logo_height * aspect_ratio
+
+            logo = Image(PDF_LOGO_PATH, width=logo_width, height=logo_height)
             logo.hAlign = 'CENTER'
             story.append(logo)
             story.append(Spacer(1, 0.5*inch))
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Logo loading failed: {e}")
             pass  # Gracefully handle missing logo
 
     # Main title with tier-appropriate styling
@@ -4465,8 +4486,12 @@ def _build_cover_page(story: list, styles: dict, username: str, file_size: int,
         textColor=risk_color,
         alignment=TA_CENTER,
         fontName='Helvetica-Bold',
+        spaceAfter=10,  # Add spacing after score to prevent overlap
     )
     story.append(Paragraph(f"{risk_score:.0f}", score_style))
+
+    # Add explicit spacer for clear separation
+    story.append(Spacer(1, 10))
 
     score_label_style = ParagraphStyle(
         'ScoreLabel',
@@ -4474,6 +4499,7 @@ def _build_cover_page(story: list, styles: dict, username: str, file_size: int,
         fontSize=14,
         textColor=PDF_COLORS["text_secondary"],
         alignment=TA_CENTER,
+        spaceBefore=5,  # Additional spacing before label
     )
     story.append(Paragraph("SECURITY SCORE", score_label_style))
 
@@ -4689,15 +4715,19 @@ def _build_risk_score_section(story: list, styles: dict, report: dict) -> None:
         risk_level = "LOW RISK"
         risk_desc = "Contract appears relatively secure. Minor improvements may still be beneficial."
 
-    # Risk score display
-    score_style = ParagraphStyle('RiskScore', parent=styles['normal'], fontSize=36, textColor=risk_color, alignment=TA_CENTER)
+    # Risk score display - with proper spacing between elements
+    score_style = ParagraphStyle('RiskScore', parent=styles['normal'], fontSize=36, textColor=risk_color, alignment=TA_CENTER, spaceAfter=15)
     story.append(Paragraph(f"<b>{risk_score:.0f}/100</b>", score_style))
 
-    level_style = ParagraphStyle('RiskLevel', parent=styles['normal'], fontSize=14, textColor=risk_color, alignment=TA_CENTER)
+    # Add spacer between score and risk level to prevent overlap
+    story.append(Spacer(1, 20))
+
+    level_style = ParagraphStyle('RiskLevel', parent=styles['normal'], fontSize=14, textColor=risk_color, alignment=TA_CENTER, spaceAfter=10)
     story.append(Paragraph(f"<b>{risk_level}</b>", level_style))
-    story.append(Spacer(1, 5))
+
+    story.append(Spacer(1, 15))
     story.append(Paragraph(risk_desc, styles['normal']))
-    story.append(Spacer(1, 10))
+    story.append(Spacer(1, 20))
 
 def _build_severity_breakdown(story: list, styles: dict, report: dict) -> None:
     """Build severity breakdown table."""
@@ -8102,7 +8132,8 @@ async def submit_audit_to_queue(
         file_content=code_bytes,
         filename=safe_filename,
         tier=tier,
-        contract_address=contract_address
+        contract_address=contract_address,
+        api_key_id=validated_api_key_id  # Persist API key assignment through queue
     )
 
     # Generate unique audit key with retry logic for race condition safety
@@ -8774,18 +8805,60 @@ async def audit_contract(
             if active_audit_count >= MAX_CONCURRENT_AUDITS:
                 # At capacity - queue the audit
                 logger.info(f"[ADMISSION] At capacity ({active_audit_count}/{MAX_CONCURRENT_AUDITS}), queuing audit for {effective_username}")
-                
+
+                safe_filename = sanitize_filename(file.filename) if file.filename else "contract.sol"
+
                 job = await audit_queue.submit(
                     username=effective_username,
                     file_content=code_bytes,
-                    filename=file.filename or "contract.sol",
+                    filename=safe_filename,
                     tier=current_tier,
-                    contract_address=contract_address
+                    contract_address=contract_address,
+                    api_key_id=validated_api_key_id  # Persist API key assignment through queue
                 )
-                
+
+                # Generate audit key and create AuditResult (matching /audit/submit behavior)
+                # This ensures users can retrieve their audit results using the access key
+                audit_key = None
+                contract_hash = compute_contract_hash(code_bytes.decode('utf-8', errors='replace'))
+
+                from sqlalchemy.exc import IntegrityError
+                max_retries = 5
+                for attempt in range(max_retries):
+                    try:
+                        audit_key = generate_audit_key()
+                        audit_result = AuditResult(
+                            user_id=user.id if user else None,
+                            audit_key=audit_key,
+                            contract_name=safe_filename,
+                            contract_hash=contract_hash,
+                            contract_address=contract_address,
+                            file_content=code_bytes,  # Persist for crash recovery
+                            status="queued",
+                            user_tier=current_tier,
+                            notification_email=session_email if current_tier in ["pro", "enterprise"] else None,
+                            job_id=job.job_id,
+                            api_key_id=validated_api_key_id  # Assign to API key if specified
+                        )
+                        db.add(audit_result)
+                        db.commit()
+                        logger.info(f"[AUDIT_KEY] Created audit key {audit_key[:20]}... for queued job {job.job_id[:8]}...")
+                        break
+                    except IntegrityError:
+                        db.rollback()
+                        audit_key = None
+                        logger.warning(f"[AUDIT_KEY] Key collision on attempt {attempt + 1}, retrying...")
+                        if attempt == max_retries - 1:
+                            logger.error("[AUDIT_KEY] Failed to generate unique key after max retries")
+                    except Exception as e:
+                        db.rollback()
+                        logger.error(f"[AUDIT_KEY] Failed to save audit result: {e}")
+                        audit_key = None
+                        break
+
                 status = await audit_queue.get_status(job.job_id)
-                
-                return {
+
+                response = {
                     "queued": True,
                     "job_id": job.job_id,
                     "status": "queued",
@@ -8794,6 +8867,16 @@ async def audit_contract(
                     "estimated_wait_seconds": status["estimated_wait_seconds"],
                     "message": f"Server busy. Audit queued at position {status['position']}."
                 }
+
+                if audit_key:
+                    response["audit_key"] = audit_key
+                    response["retrieve_url"] = f"/audit/retrieve/{audit_key}"
+                    response["message"] += f"\n\nSave your Access Key to retrieve results: {audit_key}"
+
+                if validated_api_key_id:
+                    response["api_key_id"] = validated_api_key_id
+
+                return response
             
             # Have capacity - increment counter and proceed
             active_audit_count += 1
@@ -9616,7 +9699,50 @@ For Enterprise tier, also include: "proof_of_concept", "references"
         updated_audit_count = len(json.loads(user.audit_history or "[]")) if user else usage_tracker.count
         tier_limits = {"free": FREE_LIMIT, "starter": STARTER_LIMIT, "beginner": STARTER_LIMIT, "pro": PRO_LIMIT, "enterprise": ENTERPRISE_LIMIT, "diamond": ENTERPRISE_LIMIT}
         audit_limit = tier_limits.get(current_tier, FREE_LIMIT)
-        
+
+        # Generate audit key and create AuditResult for immediate execution (not queued)
+        # This ensures all audits get an access key for retrieval
+        immediate_audit_key = None
+        if not _from_queue:
+            safe_filename = sanitize_filename(file.filename) if file.filename else "contract.sol"
+            contract_hash = compute_contract_hash(code_bytes.decode('utf-8', errors='replace'))
+
+            from sqlalchemy.exc import IntegrityError
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    immediate_audit_key = generate_audit_key()
+                    audit_result = AuditResult(
+                        user_id=user.id if user else None,
+                        audit_key=immediate_audit_key,
+                        contract_name=safe_filename,
+                        contract_hash=contract_hash,
+                        contract_address=contract_address,
+                        status="completed",
+                        user_tier=current_tier,
+                        notification_email=session_email if current_tier in ["pro", "enterprise"] else None,
+                        api_key_id=validated_api_key_id,  # Assign to API key if specified
+                        risk_score=str(report.get("risk_score", "N/A")),
+                        issues_count=len(report.get("issues", [])),
+                        pdf_path=pdf_path,
+                        completed_at=datetime.now(timezone.utc)
+                    )
+                    db.add(audit_result)
+                    db.commit()
+                    logger.info(f"[AUDIT_KEY] Created audit key {immediate_audit_key[:20]}... for immediate audit")
+                    break
+                except IntegrityError:
+                    db.rollback()
+                    immediate_audit_key = None
+                    logger.warning(f"[AUDIT_KEY] Key collision on attempt {attempt + 1}, retrying...")
+                    if attempt == max_retries - 1:
+                        logger.error("[AUDIT_KEY] Failed to generate unique key after max retries")
+                except Exception as e:
+                    db.rollback()
+                    logger.error(f"[AUDIT_KEY] Failed to save audit result: {e}")
+                    immediate_audit_key = None
+                    break
+
         response = {
             "report": report,
             "risk_score": str(report.get("risk_score", "N/A")),
@@ -9626,6 +9752,14 @@ For Enterprise tier, also include: "proof_of_concept", "references"
             "audit_limit": audit_limit,
             "audits_remaining": max(0, audit_limit - updated_audit_count) if audit_limit != 9999 else "unlimited"
         }
+
+        # Add audit key to response for immediate execution
+        if immediate_audit_key:
+            response["audit_key"] = immediate_audit_key
+            response["retrieve_url"] = f"/audit/retrieve/{immediate_audit_key}"
+
+        if validated_api_key_id:
+            response["api_key_id"] = validated_api_key_id
 
         # Add on-chain analysis results if available
         if onchain_analysis and onchain_analysis.get("is_contract"):

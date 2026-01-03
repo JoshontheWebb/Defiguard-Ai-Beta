@@ -4295,7 +4295,13 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             if (data.queued) {
               // QUEUED: Server at capacity, use queue tracker for real-time updates
               logMessage(`Server busy - queued at position ${data.position}`);
-              
+
+              // Show Access Key popup immediately so user can save it
+              if (data.audit_key) {
+                queueTracker.showAuditKey(data.audit_key);
+                logMessage(`Access Key generated: ${data.audit_key.substring(0, 20)}...`);
+              }
+
               queueTracker.jobId = data.job_id;
               
               queueTracker.onUpdate = (status) => {
@@ -4345,6 +4351,13 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
               logMessage("Audit complete!");
               loading.classList.remove("show");
               if (data.tier) window.currentAuditTier = data.tier;
+
+              // Show Access Key popup so user can save it for later retrieval
+              if (data.audit_key) {
+                queueTracker.showAuditKey(data.audit_key);
+                logMessage(`Access Key generated: ${data.audit_key.substring(0, 20)}...`);
+              }
+
               handleAuditResponse(data);
               
               // Update sidebar with fresh count from response (faster than full fetch)
