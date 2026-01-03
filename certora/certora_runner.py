@@ -19,6 +19,7 @@ import tempfile
 import logging
 import re
 import time
+import socket
 from typing import Optional, Any
 from pathlib import Path
 
@@ -381,7 +382,11 @@ class CertoraRunner:
                             "User-Agent": "DeFiGuard-AI/1.0"
                         })
                         with urllib.request.urlopen(req, timeout=30) as response:
-                            content = response.read().decode()
+                            raw_content = response.read()
+                            try:
+                                content = raw_content.decode('utf-8')
+                            except UnicodeDecodeError:
+                                content = raw_content.decode('latin-1', errors='replace')
                             content_type = response.headers.get('Content-Type', '')
                             logger.info(f"CertoraRunner: jobStatus response type: {content_type}, length: {len(content)}")
 
@@ -435,7 +440,12 @@ class CertoraRunner:
                         "User-Agent": "DeFiGuard-AI/1.0"
                     })
                     with urllib.request.urlopen(req, timeout=30) as response:
-                        data = json.loads(response.read().decode())
+                        raw_content = response.read()
+                        try:
+                            content = raw_content.decode('utf-8')
+                        except UnicodeDecodeError:
+                            content = raw_content.decode('latin-1', errors='replace')
+                        data = json.loads(content)
                         logger.info(f"CertoraRunner: SUCCESS - Got statsdata.json from {stats_url}! Keys: {list(data.keys())[:10]}")
 
                         # statsdata.json existing means the job is COMPLETE
@@ -478,7 +488,12 @@ class CertoraRunner:
                         "User-Agent": "DeFiGuard-AI/1.0"
                     })
                     with urllib.request.urlopen(req, timeout=30) as response:
-                        data = json.loads(response.read().decode())
+                        raw_content = response.read()
+                        try:
+                            content = raw_content.decode('utf-8')
+                        except UnicodeDecodeError:
+                            content = raw_content.decode('latin-1', errors='replace')
+                        data = json.loads(content)
                         logger.info(f"CertoraRunner: Got response from {json_url}, keys: {list(data.keys())[:5] if isinstance(data, dict) else 'array'}")
 
                         # Parse the response based on structure
@@ -535,7 +550,11 @@ class CertoraRunner:
                     "User-Agent": "DeFiGuard-AI/1.0"
                 })
                 with urllib.request.urlopen(req, timeout=30) as response:
-                    html = response.read().decode()
+                    raw_content = response.read()
+                    try:
+                        html = raw_content.decode('utf-8')
+                    except UnicodeDecodeError:
+                        html = raw_content.decode('latin-1', errors='replace')
                     html_len = len(html)
 
                     # Log a sample of the HTML for debugging (first 500 chars, excluding boilerplate)
