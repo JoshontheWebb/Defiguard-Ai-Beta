@@ -1025,10 +1025,17 @@ class User(Base):
 # Note: ForeignKey and relationship already imported from sqlalchemy at lines 110-111
 
 class APIKey(Base):
-    """Multi-key API key management for Pro/Enterprise users"""
+    """
+    Multi-key API key management for Pro/Enterprise users.
+
+    Tier Limits:
+    - Starter: 1 key (auto-created), 1 linked audit at a time
+    - Pro: 5 keys, 100 linked audits per key (500 total)
+    - Enterprise: Unlimited keys, unlimited audits
+    """
     __tablename__ = "api_keys"
     __table_args__ = {'extend_existing': True}
-    
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey('users.id'), nullable=False, index=True)
     key: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
@@ -1036,9 +1043,17 @@ class APIKey(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
-    
-    # Relationship
+
+    # Audit linking - track how many audits are linked to this key
+    audit_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_audits: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # null = unlimited
+
+    # Starter tier gets auto-created key with is_starter_key=True
+    is_starter_key: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Relationships
     user = relationship("User", back_populates="api_keys")
+    audits = relationship("AuditResult", back_populates="api_key", lazy="dynamic")
 class PendingAudit(Base):
     __tablename__ = "pending_audits"
     __table_args__ = {'extend_existing': True}
@@ -1188,7 +1203,7 @@ class AuditResult(Base):
 
     # Relationships
     user = relationship("User")
-    api_key = relationship("APIKey", backref="audits")
+    api_key = relationship("APIKey", back_populates="audits")
 
 
 def generate_audit_key() -> str:
@@ -2306,6 +2321,190 @@ async def update_api_key_label(
         logger.error(f"[API_KEY_UPDATE] Error: {e}")
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update API key")
+
+
+@app.get("/api/keys/{key_id}/audits")
+async def get_audits_by_api_key(
+    key_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = 50,
+    offset: int = 0
+) -> dict[str, Any]:
+    """
+    Retrieve all audits linked to a specific API key.
+    Returns audit summaries with access keys for easy retrieval.
+    """
+    try:
+        user = await get_authenticated_user(request, db)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+        # Find the API key and verify ownership
+        api_key = db.query(APIKey).filter(
+            APIKey.id == key_id,
+            APIKey.user_id == user.id
+        ).first()
+
+        if not api_key:
+            raise HTTPException(status_code=404, detail="API key not found")
+
+        # Get audits linked to this key
+        audits_query = db.query(AuditResult).filter(
+            AuditResult.api_key_id == key_id
+        ).order_by(AuditResult.created_at.desc())
+
+        total = audits_query.count()
+        audits = audits_query.offset(offset).limit(limit).all()
+
+        # Build response with key info for easy copying
+        audit_list = []
+        for audit in audits:
+            audit_list.append({
+                "id": audit.id,
+                "audit_key": audit.audit_key,
+                "contract_name": audit.contract_name,
+                "status": audit.status,
+                "risk_score": audit.risk_score,
+                "issues_count": audit.issues_count,
+                "critical_count": audit.critical_count,
+                "high_count": audit.high_count,
+                "created_at": audit.created_at.isoformat() if audit.created_at else None,
+                "completed_at": audit.completed_at.isoformat() if audit.completed_at else None
+            })
+
+        logger.info(f"[API_KEY_AUDITS] User {user.username} retrieved {len(audit_list)} audits for key {key_id}")
+
+        return {
+            "success": True,
+            "api_key_id": key_id,
+            "api_key_label": api_key.label,
+            "total": total,
+            "audits": audit_list,
+            "tier_info": {
+                "tier": user.tier,
+                "audit_count": api_key.audit_count,
+                "max_audits": api_key.max_audits
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API_KEY_AUDITS] Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve audits")
+
+
+@app.delete("/api/keys/{key_id}/audits/{audit_id}")
+async def unlink_audit_from_api_key(
+    key_id: int,
+    audit_id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """
+    Unlink an audit from an API key (does not delete the audit).
+    For Starter tier, this frees up the slot for a new audit.
+    """
+    try:
+        await verify_csrf_token(request)
+
+        user = await get_authenticated_user(request, db)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+        # Verify API key ownership
+        api_key = db.query(APIKey).filter(
+            APIKey.id == key_id,
+            APIKey.user_id == user.id
+        ).first()
+
+        if not api_key:
+            raise HTTPException(status_code=404, detail="API key not found")
+
+        # Find the audit and verify it's linked to this key
+        audit = db.query(AuditResult).filter(
+            AuditResult.id == audit_id,
+            AuditResult.api_key_id == key_id
+        ).first()
+
+        if not audit:
+            raise HTTPException(status_code=404, detail="Audit not found or not linked to this key")
+
+        # Unlink the audit (does not delete it - just removes the link)
+        audit.api_key_id = None
+
+        # Decrement the audit count
+        if api_key.audit_count > 0:
+            api_key.audit_count -= 1
+
+        db.commit()
+
+        logger.info(f"[API_KEY_UNLINK] User {user.username} unlinked audit {audit_id} from key {key_id}")
+
+        return {
+            "success": True,
+            "message": "Audit unlinked from API key",
+            "api_key_id": key_id,
+            "audit_id": audit_id,
+            "new_audit_count": api_key.audit_count
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API_KEY_UNLINK] Error: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to unlink audit")
+
+
+def get_api_key_limits(tier: str) -> dict[str, Any]:
+    """Get API key limits based on user tier."""
+    limits = {
+        "free": {"max_keys": 0, "max_audits_per_key": 0},
+        "starter": {"max_keys": 1, "max_audits_per_key": 1},
+        "pro": {"max_keys": 5, "max_audits_per_key": 100},
+        "enterprise": {"max_keys": None, "max_audits_per_key": None},  # None = unlimited
+        "diamond": {"max_keys": None, "max_audits_per_key": None}
+    }
+    return limits.get(tier, limits["free"])
+
+
+async def ensure_starter_api_key(user, db: Session) -> Optional[APIKey]:
+    """
+    Ensure Starter tier users have their auto-created API key.
+    Creates one if it doesn't exist.
+    Returns the key or None if user tier doesn't qualify.
+    """
+    if user.tier not in ["starter", "pro", "enterprise"]:
+        return None
+
+    # Check if user already has a starter key
+    existing_key = db.query(APIKey).filter(
+        APIKey.user_id == user.id,
+        APIKey.is_starter_key == True
+    ).first()
+
+    if existing_key:
+        return existing_key
+
+    # For Starter tier, auto-create their single key
+    if user.tier == "starter":
+        limits = get_api_key_limits("starter")
+        new_key = APIKey(
+            user_id=user.id,
+            key=secrets.token_urlsafe(32),
+            label="My Audits",
+            is_starter_key=True,
+            max_audits=limits["max_audits_per_key"]
+        )
+        db.add(new_key)
+        db.commit()
+        db.refresh(new_key)
+        logger.info(f"[API_KEY] Auto-created starter key for user {user.username}")
+        return new_key
+
+    return None
 
 
 # ============================================================================
@@ -8638,8 +8837,30 @@ async def submit_audit_to_queue(
                 status_code=400,
                 detail="Invalid API key. Key must be active and owned by you."
             )
+
+        # Check audit count limits
+        limits = get_api_key_limits(tier)
+        max_audits = limits["max_audits_per_key"]
+
+        if max_audits is not None and api_key.audit_count >= max_audits:
+            # Show upgrade message based on tier
+            if tier == "starter":
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Starter tier allows only 1 stored audit per key. Clear your existing audit in Settings, or upgrade to Pro for 100 audits per key."
+                )
+            elif tier == "pro":
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Pro tier allows 100 audits per key. Delete old audits or upgrade to Enterprise for unlimited storage."
+                )
+
+        # Increment audit count (will be committed with the audit)
+        api_key.audit_count += 1
+        api_key.last_used_at = datetime.now()
+
         validated_api_key_id = api_key_id
-        logger.info(f"[AUDIT_SUBMIT] Assigning audit to API key '{api_key.label}' (id={api_key_id})")
+        logger.info(f"[AUDIT_SUBMIT] Assigning audit to API key '{api_key.label}' (id={api_key_id}, count={api_key.audit_count})")
 
     # Pre-check file size via Content-Length to prevent DoS
     # Check Content-Length header before reading the file into memory
@@ -10040,10 +10261,14 @@ For Enterprise tier, also include: "proof_of_concept", "references"
             logger.info(f"[METRICS] Overrode AI metrics with accurate counts: {lines_of_code} LOC")
             
             # Verify Pro+ fields are present
-            
-            # Add Enterprise/Diamond extras
-            if tier_for_flags in ["enterprise", "diamond"] or getattr(user, "has_diamond", False):
+
+            # Add fuzzing results for Pro+ tiers (Pro, Enterprise, Diamond)
+            # Fuzzing is enabled for Pro tier and above - include results if available
+            if tier_for_flags in ["pro", "enterprise", "diamond"] or getattr(user, "has_diamond", False):
                 audit_json["fuzzing_results"] = fuzzing_results
+
+            # Add Enterprise/Diamond extras (Certora formal verification)
+            if tier_for_flags in ["enterprise", "diamond"] or getattr(user, "has_diamond", False):
                 # Use pre-computed certora_results from Phase 4
                 audit_json["certora_results"] = certora_results
                 audit_json["formal_verification"] = certora_results
