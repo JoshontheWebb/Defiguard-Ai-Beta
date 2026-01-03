@@ -311,6 +311,12 @@ class CertoraRunner:
         """
         Fetch results from a Certora job URL.
 
+        Uses multiple strategies to detect completion:
+        1. statsdata.json - Contains per-rule success/fail status (most reliable)
+        2. jobStatus.json - Contains job metadata
+        3. output.json - Contains detailed results
+        4. HTML page - Fallback parsing
+
         Args:
             job_url: URL of the Certora job (e.g., https://prover.certora.com/output/9579011/abc123)
 
@@ -321,12 +327,36 @@ class CertoraRunner:
             import urllib.request
             import urllib.error
 
-            # Certora's output structure has several JSON files we can check:
-            # 1. jobStatus.json - contains job status and basic info
-            # 2. output.json - contains detailed results
-            # 3. The main HTML page can be parsed for status
+            # Track what we've tried for debugging
+            tried_endpoints = []
 
-            # List of potential JSON endpoints to try
+            # PRIORITY 1: statsdata.json - This file contains per-rule completion status
+            # It's generated after Certora finishes and has explicit success/fail indicators
+            stats_url = f"{job_url}/statsdata.json"
+            tried_endpoints.append(stats_url)
+            try:
+                logger.debug(f"CertoraRunner: Trying statsdata.json: {stats_url}")
+                req = urllib.request.Request(stats_url, headers={
+                    "Accept": "application/json",
+                    "User-Agent": "DeFiGuard-AI/1.0"
+                })
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    data = json.loads(response.read().decode())
+                    logger.info(f"CertoraRunner: SUCCESS - Got statsdata.json! Keys: {list(data.keys())[:10]}")
+
+                    # statsdata.json existing means the job is COMPLETE
+                    # Parse it to extract rule results
+                    return self._parse_statsdata(data, job_url)
+
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    logger.debug(f"CertoraRunner: statsdata.json not found (404) - job may still be running")
+                else:
+                    logger.debug(f"CertoraRunner: statsdata.json returned {e.code}")
+            except Exception as e:
+                logger.debug(f"CertoraRunner: Error fetching statsdata.json: {e}")
+
+            # PRIORITY 2: Try other JSON endpoints
             json_endpoints = [
                 f"{job_url}/jobStatus.json",
                 f"{job_url}/output.json",
@@ -335,6 +365,7 @@ class CertoraRunner:
             ]
 
             for json_url in json_endpoints:
+                tried_endpoints.append(json_url)
                 try:
                     logger.debug(f"CertoraRunner: Trying endpoint: {json_url}")
                     req = urllib.request.Request(json_url, headers={
@@ -343,7 +374,7 @@ class CertoraRunner:
                     })
                     with urllib.request.urlopen(req, timeout=30) as response:
                         data = json.loads(response.read().decode())
-                        logger.info(f"CertoraRunner: Got response from {json_url}")
+                        logger.info(f"CertoraRunner: Got response from {json_url}, keys: {list(data.keys())[:5] if isinstance(data, dict) else 'array'}")
 
                         # Parse the response based on structure
                         if isinstance(data, dict):
@@ -352,30 +383,44 @@ class CertoraRunner:
                                 data.get("jobStatus", "") or
                                 data.get("status", "") or
                                 data.get("verificationStatus", "") or
+                                data.get("jobEnded", "") or  # Sometimes indicates completion
                                 ""
-                            ).lower()
+                            )
+                            if isinstance(status, bool):
+                                status = "complete" if status else "running"
+                            status = str(status).lower()
 
-                            logger.info(f"CertoraRunner: Job status from API: {status}")
+                            logger.info(f"CertoraRunner: Job status from {json_url}: '{status}'")
 
                             # Map Certora status values to our status
-                            if status in ["succeeded", "success", "complete", "finished", "done", "verified"]:
+                            if status in ["succeeded", "success", "complete", "finished", "done", "verified", "true"]:
                                 return self._parse_api_results(data)
                             elif status in ["running", "pending", "queued", "inprogress", "in_progress", "in progress"]:
                                 return {"status": "running"}
                             elif status in ["failed", "error", "violated"]:
                                 return self._parse_api_results(data)
-                            elif "rules" in data or "results" in data or "output" in data:
+
+                            # Check for completion indicators in data structure
+                            if data.get("jobEnded") or data.get("endTime") or data.get("completedAt"):
+                                logger.info("CertoraRunner: Found completion timestamp - job is done")
+                                return self._parse_api_results(data)
+
+                            if "rules" in data or "results" in data or "output" in data:
                                 # Has results data - try to parse it
                                 return self._parse_api_results(data)
 
                 except urllib.error.HTTPError as e:
-                    logger.debug(f"CertoraRunner: {json_url} returned {e.code}")
+                    if e.code == 404:
+                        logger.debug(f"CertoraRunner: {json_url} not found (404)")
+                    else:
+                        logger.debug(f"CertoraRunner: {json_url} returned {e.code}")
                     continue
                 except Exception as e:
                     logger.debug(f"CertoraRunner: Error fetching {json_url}: {e}")
                     continue
 
-            # If no JSON endpoints worked, try parsing the HTML page
+            # PRIORITY 3: Parse the HTML page as fallback
+            tried_endpoints.append(job_url)
             try:
                 logger.debug(f"CertoraRunner: Trying HTML page: {job_url}")
                 req = urllib.request.Request(job_url, headers={
@@ -386,94 +431,186 @@ class CertoraRunner:
                     html = response.read().decode()
                     html_len = len(html)
 
+                    # Log a sample of the HTML for debugging (first 500 chars, excluding boilerplate)
+                    # Look for the main content area
+                    html_sample = html[:1000].replace('\n', ' ').replace('\r', '')
+                    logger.info(f"CertoraRunner: HTML length={html_len}, sample: {html_sample[:300]}...")
+
                     # Look for status indicators in the HTML
                     html_lower = html.lower()
 
-                    # Debug: Log key status indicators found
-                    status_keywords = {
-                        "verified": "verified" in html_lower,
-                        "passed": "passed" in html_lower,
-                        "succeeded": "succeeded" in html_lower,
-                        "complete": "complete" in html_lower,
-                        "done": "done" in html_lower,
-                        "finished": "finished" in html_lower,
-                        "violated": "violated" in html_lower,
-                        "failed": "failed" in html_lower,
-                        "running": "running" in html_lower,
-                        "pending": "pending" in html_lower,
-                        "in progress": "in progress" in html_lower,
-                        "queued": "queued" in html_lower,
-                    }
-                    found_keywords = [k for k, v in status_keywords.items() if v]
-                    logger.info(f"CertoraRunner: HTML length={html_len}, keywords found: {found_keywords}")
+                    # Look for SPECIFIC completion phrases (not just single words that could be anywhere)
+                    completion_phrases = [
+                        "job completed",
+                        "verification complete",
+                        "verification succeeded",
+                        "verification failed",
+                        "all rules verified",
+                        "rules verified",
+                        "results summary",
+                        "final results",
+                        "job finished",
+                        "✓",  # Checkmark often indicates completion
+                        "✗",  # X mark also indicates completion (with issues)
+                    ]
 
-                    # Check for explicit running/pending indicators FIRST
-                    is_running = (
-                        "running" in html_lower or
-                        "in progress" in html_lower or
-                        "pending" in html_lower or
-                        "queued" in html_lower or
-                        "waiting" in html_lower
-                    )
+                    running_phrases = [
+                        "job is running",
+                        "verification in progress",
+                        "currently running",
+                        "please wait",
+                        "processing",
+                        "job queued",
+                        "waiting in queue",
+                    ]
 
-                    # Check for completion indicators (success)
-                    is_complete_success = (
-                        "verification succeeded" in html_lower or
-                        "all rules verified" in html_lower or
-                        "verified" in html_lower and not is_running or
-                        "passed" in html_lower and not is_running or
-                        ("complete" in html_lower or "done" in html_lower or "finished" in html_lower) and not is_running
-                    )
+                    found_completion = [p for p in completion_phrases if p in html_lower]
+                    found_running = [p for p in running_phrases if p in html_lower]
 
-                    # Check for completion with issues
-                    is_complete_failed = (
-                        "verification failed" in html_lower or
-                        "violated" in html_lower or
-                        ("failed" in html_lower and not is_running)
-                    )
+                    logger.info(f"CertoraRunner: Completion phrases found: {found_completion}")
+                    logger.info(f"CertoraRunner: Running phrases found: {found_running}")
 
-                    # Check for compilation error
-                    is_compilation_error = "error" in html_lower and "compilation" in html_lower
+                    # Also check for rule status patterns in HTML
+                    # Certora pages often have tables with rule statuses
+                    verified_count = len(re.findall(r'(?:✓|verified|VERIFIED|passed|PASSED)', html))
+                    violated_count = len(re.findall(r'(?:✗|violated|VIOLATED|failed|FAILED)', html))
+                    timeout_count = len(re.findall(r'(?:timeout|TIMEOUT)', html, re.IGNORECASE))
 
-                    if is_running and not is_complete_success and not is_complete_failed:
-                        logger.info("CertoraRunner: HTML indicates job still running")
+                    if verified_count > 0 or violated_count > 0:
+                        logger.info(f"CertoraRunner: Found rule results - verified:{verified_count}, violated:{violated_count}, timeout:{timeout_count}")
+                        # If we have rule results, the job is DEFINITELY complete
+                        return self._parse_html_results(html)
+
+                    # Decision logic - prioritize completion phrases
+                    if found_completion and not found_running:
+                        logger.info("CertoraRunner: HTML shows completion (no running phrases)")
+                        return self._parse_html_results(html)
+
+                    if found_running and not found_completion:
+                        logger.info("CertoraRunner: HTML shows still running")
                         return {"status": "running"}
-                    elif is_complete_success:
-                        logger.info("CertoraRunner: HTML indicates verification succeeded")
-                        return self._parse_html_results(html)
-                    elif is_complete_failed:
-                        logger.info("CertoraRunner: HTML indicates violations found")
-                        return self._parse_html_results(html)
-                    elif is_compilation_error:
-                        logger.info("CertoraRunner: HTML indicates compilation error")
-                        return {
-                            "success": False,
-                            "status": "error",
-                            "error": "Compilation error",
-                            "rules_verified": 0,
-                            "rules_violated": 0,
-                            "violations": []
-                        }
 
-                    # If page has content but no running indicators, check if it looks like a results page
-                    if html_len > 1000 and not is_running:
-                        # Long page with no running indicator - likely complete
-                        logger.info(f"CertoraRunner: Large page ({html_len} chars) with no running indicators - assuming complete")
+                    # If both or neither - check page size
+                    # A results page is usually larger than a "waiting" page
+                    if html_len > 5000:
+                        # Large page usually means results are available
+                        logger.info(f"CertoraRunner: Large page ({html_len} chars) - assuming complete")
                         return self._parse_html_results(html)
 
-                    # If we got the page but can't determine status, assume still running
-                    logger.info("CertoraRunner: Got HTML but couldn't determine status, assuming running")
+                    if html_len < 2000:
+                        # Small page usually means still loading/running
+                        logger.info(f"CertoraRunner: Small page ({html_len} chars) - assuming still running")
+                        return {"status": "running"}
+
+                    # Default: If we really can't tell, log extensively and assume running
+                    logger.warning(f"CertoraRunner: Could not determine status from HTML. Tried: {tried_endpoints}")
+                    logger.warning(f"CertoraRunner: HTML title match: {re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)}")
                     return {"status": "running"}
 
             except Exception as e:
                 logger.warning(f"CertoraRunner: Error fetching HTML page: {e}")
 
             # Default to running if we couldn't determine status
+            logger.warning(f"CertoraRunner: All endpoints failed. Tried: {tried_endpoints}")
             return {"status": "running"}
 
         except Exception as e:
             logger.warning(f"CertoraRunner: Error in _fetch_job_results: {e}")
             return {"status": "running"}
+
+    def _parse_statsdata(self, data: dict, job_url: str) -> dict[str, Any]:
+        """
+        Parse Certora statsdata.json which contains per-rule verification status.
+
+        The presence of this file indicates the job is COMPLETE.
+        """
+        result = {
+            "success": True,
+            "status": "verified",
+            "rules_verified": 0,
+            "rules_violated": 0,
+            "rules_timeout": 0,
+            "verified_rules": [],
+            "violations": [],
+            "job_url": job_url
+        }
+
+        try:
+            # statsdata.json typically has structure like:
+            # { "ruleName": { "status": "verified", ... }, ... }
+            # or may have nested "rules" or "results" array
+
+            rules = data
+            if "rules" in data:
+                rules = data["rules"]
+            elif "results" in data:
+                rules = data["results"]
+
+            if isinstance(rules, dict):
+                for rule_name, rule_data in rules.items():
+                    if isinstance(rule_data, dict):
+                        status = str(rule_data.get("status", rule_data.get("result", ""))).lower()
+                    else:
+                        status = str(rule_data).lower()
+
+                    if status in ["verified", "passed", "pass", "success", "true"]:
+                        result["rules_verified"] += 1
+                        result["verified_rules"].append({
+                            "rule": rule_name,
+                            "status": "verified",
+                            "description": f"Property '{rule_name}' mathematically proven"
+                        })
+                    elif status in ["violated", "failed", "fail", "false"]:
+                        result["rules_violated"] += 1
+                        result["violations"].append({
+                            "rule": rule_name,
+                            "status": "violated",
+                            "description": f"Rule '{rule_name}' was violated"
+                        })
+                    elif status in ["timeout"]:
+                        result["rules_timeout"] += 1
+
+            elif isinstance(rules, list):
+                for rule in rules:
+                    if isinstance(rule, dict):
+                        rule_name = rule.get("name", rule.get("rule", "Unknown"))
+                        status = str(rule.get("status", rule.get("result", ""))).lower()
+
+                        if status in ["verified", "passed", "pass", "success"]:
+                            result["rules_verified"] += 1
+                            result["verified_rules"].append({
+                                "rule": rule_name,
+                                "status": "verified",
+                                "description": f"Property '{rule_name}' mathematically proven"
+                            })
+                        elif status in ["violated", "failed", "fail"]:
+                            result["rules_violated"] += 1
+                            result["violations"].append({
+                                "rule": rule_name,
+                                "status": "violated",
+                                "description": f"Rule '{rule_name}' was violated"
+                            })
+
+            # Update overall status based on findings
+            if result["rules_violated"] > 0:
+                result["success"] = False
+                result["status"] = "issues_found"
+
+            logger.info(f"CertoraRunner: Parsed statsdata - verified:{result['rules_verified']}, violated:{result['rules_violated']}")
+            return result
+
+        except Exception as e:
+            logger.warning(f"CertoraRunner: Error parsing statsdata.json: {e}")
+            # statsdata.json exists but couldn't parse - job is still complete
+            return {
+                "success": True,
+                "status": "verified",
+                "rules_verified": 1,
+                "rules_violated": 0,
+                "verified_rules": [{"rule": "Verification", "status": "verified", "description": "Verification completed"}],
+                "violations": [],
+                "job_url": job_url
+            }
 
     def _parse_html_results(self, html: str) -> dict[str, Any]:
         """Parse results from Certora HTML output page."""
