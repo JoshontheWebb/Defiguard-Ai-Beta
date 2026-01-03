@@ -87,9 +87,14 @@ services:
         sync: false
       - key: WEB3_PROVIDER_URL
         sync: false
-      # Database (required)
+      # Database (required for persistence)
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: defiguard-db
+          property: connectionString
+      # Tier Persistence (set to 'true' to sync user tiers with Stripe on login)
+      - key: ENABLE_TIER_PERSISTENCE
+        value: "true"
       # Redis (required)
       - key: REDIS_URL
         sync: false
@@ -98,3 +103,8 @@ services:
         sync: false
       - key: ADMIN_KEY
         sync: false
+
+databases:
+  - name: defiguard-db
+    plan: free
+    region: oregon
