@@ -184,6 +184,12 @@ RATE_LIMITS = {
     "api_call": {"max_requests": 100, "window_seconds": 60},  # 100 API calls per minute
     "push": {"max_requests": 5, "window_seconds": 60},  # 5 push notifications per minute
     "overage": {"max_requests": 10, "window_seconds": 60},  # 10 overage checks per minute
+    # Security: Rate limits for sensitive endpoints
+    "auth": {"max_requests": 10, "window_seconds": 60},  # 10 auth attempts per minute
+    "api_key_create": {"max_requests": 5, "window_seconds": 60},  # 5 key creations per minute
+    "api_key_modify": {"max_requests": 10, "window_seconds": 60},  # 10 key modifications per minute
+    "wallet_connect": {"max_requests": 5, "window_seconds": 60},  # 5 wallet connects per minute
+    "email_resend": {"max_requests": 3, "window_seconds": 300},  # 3 email resends per 5 minutes
 }
 
 # Queue limits
@@ -849,6 +855,15 @@ async def debug_files(admin_key: str = Query(None)):
 @app.get("/login")
 async def login(request: Request, screen_hint: Optional[str] = None):
     try:
+        # Rate limiting for auth attempts
+        client_ip = request.client.host if request.client else "unknown"
+        rate_key = f"auth:{client_ip}"
+        limit = RATE_LIMITS["auth"]
+        if not await rate_limiter.is_allowed(rate_key, limit["max_requests"], limit["window_seconds"]):
+            retry_after = await rate_limiter.get_retry_after(rate_key, limit["window_seconds"])
+            logger.warning(f"[LOGIN] Rate limited: {client_ip}")
+            return RedirectResponse(url=f"/auth?error=rate_limited&retry_after={retry_after}")
+
         if not AUTH0_DOMAIN:
             logger.error("[LOGIN] AUTH0_DOMAIN not configured")
             return RedirectResponse(url="/auth?error=auth_not_configured")
@@ -2004,7 +2019,19 @@ async def create_api_key(
     """
     try:
         await verify_csrf_token(request)
-        
+
+        # Rate limiting for API key creation
+        client_ip = request.client.host if request.client else "unknown"
+        rate_key = f"api_key_create:{client_ip}"
+        limit = RATE_LIMITS["api_key_create"]
+        if not await rate_limiter.is_allowed(rate_key, limit["max_requests"], limit["window_seconds"]):
+            retry_after = await rate_limiter.get_retry_after(rate_key, limit["window_seconds"])
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many API key creation requests. Try again in {retry_after} seconds.",
+                headers={"Retry-After": str(retry_after)}
+            )
+
         user = await get_authenticated_user(request, db)
         if not user:
             raise HTTPException(status_code=401, detail="Not authenticated")
@@ -2179,6 +2206,18 @@ async def connect_wallet(
     """
     try:
         await verify_csrf_token(request)
+
+        # Rate limiting for wallet connection attempts
+        client_ip = request.client.host if request.client else "unknown"
+        rate_key = f"wallet_connect:{client_ip}"
+        limit = RATE_LIMITS["wallet_connect"]
+        if not await rate_limiter.is_allowed(rate_key, limit["max_requests"], limit["window_seconds"]):
+            retry_after = await rate_limiter.get_retry_after(rate_key, limit["window_seconds"])
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many wallet connection attempts. Try again in {retry_after} seconds.",
+                headers={"Retry-After": str(retry_after)}
+            )
 
         user = await get_authenticated_user(request, db)
         if not user:
@@ -5640,12 +5679,25 @@ async def serve_static(file_path: str):
         logger.warning(f"Path traversal attempt blocked: {file_path}")
         raise HTTPException(status_code=403, detail="Invalid file path")
 
-    # Security: Validate path is within static directory using absolute path comparison
-    static_dir = os.path.abspath("static")
-    file_full_path = os.path.abspath(os.path.join("static", file_path))
+    # Security: Reject URL-encoded traversal attempts
+    from urllib.parse import unquote
+    decoded_path = unquote(file_path)
+    if ".." in decoded_path or decoded_path.startswith("/") or decoded_path.startswith("\\"):
+        logger.warning(f"URL-encoded path traversal attempt blocked: {file_path}")
+        raise HTTPException(status_code=403, detail="Invalid file path")
 
-    if not file_full_path.startswith(static_dir + os.sep):
+    # Security: Validate path is within static directory using realpath to follow symlinks
+    static_dir = os.path.realpath("static")
+    file_full_path = os.path.realpath(os.path.join("static", file_path))
+
+    # Ensure the resolved path is within static directory (prevents symlink attacks)
+    if not file_full_path.startswith(static_dir + os.sep) and file_full_path != static_dir:
         logger.warning(f"Path escape attempt blocked: {file_path} -> {file_full_path}")
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Reject symlinks pointing outside static directory
+    if os.path.islink(os.path.join("static", file_path)):
+        logger.warning(f"Symlink access blocked: {file_path}")
         raise HTTPException(status_code=403, detail="Access denied")
 
     if not os.path.isfile(file_full_path):
@@ -6362,15 +6414,20 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
 # WebSocket for real-time audit logging
 @app.websocket("/ws-audit-log")
 async def websocket_audit_log(websocket: WebSocket, token: str = Query(None)):
-    # Security: Validate token for authenticated users, allow guest fallback for compatibility
+    # Security: Validate token for authenticated users
+    # If token is provided but invalid, reject connection (prevent token probing)
+    # If no token provided, allow guest access for backward compatibility
     effective_username = "guest"
     if token:
         validated_username = verify_ws_token(token, _secret_key)
         if validated_username:
             effective_username = validated_username
         else:
-            logger.warning(f"[WS_AUDIT] Invalid token attempted: {token[:20]}...")
-            # Continue as guest for backward compatibility
+            logger.warning(f"[WS_AUDIT] Invalid token rejected: {token[:20]}...")
+            # Security: Reject connection if token was provided but is invalid
+            # This prevents attackers from probing tokens
+            await websocket.close(code=4001, reason="Invalid authentication token")
+            return
 
     await websocket.accept()
     active_audit_websockets[effective_username] = websocket
@@ -8060,20 +8117,44 @@ async def submit_audit_to_queue(
         validated_api_key_id = api_key_id
         logger.info(f"[AUDIT_SUBMIT] Assigning audit to API key '{api_key.label}' (id={api_key_id})")
 
-    # Read file
+    # Pre-check file size via Content-Length to prevent DoS
+    # Check Content-Length header before reading the file into memory
+    content_length = request.headers.get("content-length")
+    size_limit = usage_tracker.size_limits.get(tier, 250 * 1024)
+    max_allowed = size_limit if tier not in ["enterprise", "diamond"] else 50 * 1024 * 1024  # 50MB max for enterprise
+
+    if content_length:
+        try:
+            declared_size = int(content_length)
+            # Content-Length includes form boundaries, so allow some overhead
+            if declared_size > max_allowed + 10 * 1024:  # 10KB overhead for form data
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File too large. Maximum allowed: {max_allowed / 1024:.1f}KB for {tier} tier."
+                )
+        except ValueError:
+            pass  # Invalid Content-Length, will be caught when reading
+
+    # Read file with size limit enforcement
     code_bytes = await file.read()
     file_size = len(code_bytes)
 
     if file_size == 0:
         raise HTTPException(status_code=400, detail="Empty file uploaded")
 
+    # Enforce size limit after reading (in case Content-Length was spoofed)
+    if file_size > max_allowed:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File size ({file_size / 1024:.1f}KB) exceeds maximum allowed ({max_allowed / 1024:.1f}KB) for {tier} tier."
+        )
+
     # Security: Validate file type
     is_valid, error_msg = validate_solidity_file(file.filename, code_bytes)
     if not is_valid:
         raise HTTPException(status_code=400, detail=error_msg)
 
-    # Check file size limits
-    size_limit = usage_tracker.size_limits.get(tier, 250 * 1024)
+    # Check file size limits for tier restrictions
     if file_size > size_limit and tier not in ["enterprise", "diamond"]:
         raise HTTPException(
             status_code=400,
@@ -8381,6 +8462,18 @@ async def resend_audit_email(
 
     # Security: Verify CSRF token
     await verify_csrf_token(request)
+
+    # Rate limiting for email resend (prevent email bombing)
+    client_ip = request.client.host if request.client else "unknown"
+    rate_key = f"email_resend:{session_username}:{client_ip}"
+    limit = RATE_LIMITS["email_resend"]
+    if not await rate_limiter.is_allowed(rate_key, limit["max_requests"], limit["window_seconds"]):
+        retry_after = await rate_limiter.get_retry_after(rate_key, limit["window_seconds"])
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many email resend requests. Try again in {retry_after // 60} minutes.",
+            headers={"Retry-After": str(retry_after)}
+        )
 
     # Validate audit key format and length
     if not audit_key or not audit_key.startswith("dga_") or len(audit_key) > 64:
@@ -9125,8 +9218,10 @@ async def audit_contract(
                         job_url = raw_results.get("job_url") if raw_results else None
                         if job_url and user:
                             try:
-                                # Extract job_id from URL
-                                job_id_match = job_url.split("/")[-1] if job_url else None
+                                # Extract job_id from URL - handle query parameters properly
+                                from urllib.parse import urlparse
+                                parsed_url = urlparse(job_url)
+                                job_id_match = parsed_url.path.split("/")[-1] if parsed_url.path else None
                                 new_job = CertoraJob(
                                     user_id=user.id,
                                     contract_hash=contract_hash,

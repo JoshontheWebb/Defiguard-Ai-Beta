@@ -2699,7 +2699,8 @@ document.addEventListener("DOMContentLoaded", () => {
       try {
         if (hamburger && sidebar && mainContent) {
           // Check if event listeners are already attached (prevent duplicates)
-          if (!hamburger._debugInitialized) {
+          // Use same flag as HamburgerManager to prevent duplicate event listeners
+          if (!hamburger._hamburgerInitialized) {
             hamburger.addEventListener("click", () => {
               DebugTracer.snapshot('hamburger_click', {
                 sidebarOpen: sidebar.classList.contains('open'),
@@ -2717,7 +2718,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 hamburger.click();
               }
             });
-            hamburger._debugInitialized = true;
+            hamburger._hamburgerInitialized = true;
+            HamburgerManager.initialized = true;
             DebugTracer.exit('hamburger_init', _hamburgerStart, { success: true });
           } else {
             DebugTracer.exit('hamburger_init', _hamburgerStart, { skipped: 'already_initialized' });
@@ -3281,9 +3283,9 @@ document.addEventListener("DOMContentLoaded", () => {
                           .map(
                             (facet) => `
                             <tr tabindex="0">
-                                <td>${facet.facetAddress}</td>
-                                <td>${facet.functionSelectors.join(", ")}</td>
-                                <td>${facet.functions.join(", ")}</td>
+                                <td>${escapeHtml(facet.facetAddress || '')}</td>
+                                <td>${escapeHtml((facet.functionSelectors || []).join(", "))}</td>
+                                <td>${escapeHtml((facet.functions || []).join(", "))}</td>
                             </tr>
                         `
                           )
