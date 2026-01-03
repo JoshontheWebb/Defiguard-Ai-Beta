@@ -107,7 +107,7 @@ except ImportError:
         SignatureVerificationError = _StripeErrorStub
     stripe_error = _StripeModuleStub()
 
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Float
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Float, LargeBinary
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.orm import sessionmaker, Session, Mapped, mapped_column
 from slither.slither import Slither
@@ -1095,6 +1095,10 @@ class AuditResult(Base):
     contract_hash: Mapped[str] = mapped_column(String(64), index=True)  # SHA256
     contract_address: Mapped[Optional[str]] = mapped_column(String(42), nullable=True)  # On-chain address
 
+    # Persisted file content for recovery after server restart
+    # Stored as binary to preserve exact file content for retry capability
+    file_content: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+
     # Queue/Processing status
     status: Mapped[str] = mapped_column(String(50), default="queued", index=True)
     # Status values: queued, processing, completed, failed
@@ -1659,20 +1663,34 @@ async def lifespan(app: FastAPI):
     # Initialize clients
     global client, w3
     client, w3 = initialize_client()
-    
+
+    # Recover pending jobs from previous server run (CRITICAL for data persistence)
+    # This must run BEFORE starting the queue processor to avoid race conditions
+    try:
+        await recover_pending_jobs()
+        logger.info("[STARTUP] Job recovery completed")
+    except Exception as e:
+        logger.error(f"[STARTUP] Job recovery failed: {e}")
+        # Continue startup even if recovery fails - better to start than crash
+
     # Start background queue processor
     processor_task = asyncio.create_task(process_audit_queue())
     logger.info("[QUEUE] Background audit queue processor started")
-    
+
     # Start periodic cleanup task
     cleanup_task = asyncio.create_task(periodic_queue_cleanup())
     logger.info("[QUEUE] Periodic cleanup task started")
-    
+
+    # Start stale job detector (prevents orphaned processing jobs)
+    timeout_task = asyncio.create_task(detect_stale_processing_jobs())
+    logger.info("[QUEUE] Stale job detector started (30 min timeout)")
+
     yield  # App running
-    
+
     # Cleanup on shutdown
     processor_task.cancel()
     cleanup_task.cancel()
+    timeout_task.cancel()
     logger.info("[QUEUE] Background tasks cancelled")
 
 from fastapi import Request
@@ -7640,8 +7658,12 @@ async def process_audit_queue():
                             audit_result.certora_results = json.dumps(result.get("certora_results", [])) if result else None
                             audit_result.pdf_path = result.get("pdf_path") if result else None
 
+                            # Clear file_content to save storage (no longer needed after successful completion)
+                            # The full_report contains all results, so we don't need to keep the original file
+                            audit_result.file_content = None
+
                             queue_db.commit()
-                            logger.info(f"[AUDIT_RESULT] Saved completed results for audit {audit_result.audit_key[:20]}...")
+                            logger.info(f"[AUDIT_RESULT] Saved completed results for audit {audit_result.audit_key[:20]}... (file_content cleared)")
 
                             # Send email notification if configured
                             if audit_result.notification_email and not audit_result.email_sent:
@@ -7741,6 +7763,158 @@ async def periodic_queue_cleanup():
             break
         except Exception as e:
             logger.error(f"[QUEUE_CLEANUP] Error: {e}")
+
+
+async def recover_pending_jobs():
+    """
+    Recover jobs that were pending when server crashed/restarted.
+
+    This function:
+    1. Finds all AuditResult records with status 'queued' or 'processing'
+    2. Resets 'processing' jobs back to 'queued' (they were interrupted)
+    3. Re-adds jobs with persisted file_content back to the in-memory queue
+    4. Marks jobs without file_content as failed (unrecoverable)
+
+    Called once at startup in lifespan().
+    """
+    db = SessionLocal()
+    recovered_count = 0
+    failed_count = 0
+
+    try:
+        # Find all pending jobs (queued or processing with file content)
+        pending_jobs = db.query(AuditResult).filter(
+            AuditResult.status.in_(["queued", "processing"]),
+        ).all()
+
+        if not pending_jobs:
+            logger.info("[RECOVERY] No pending jobs to recover")
+            return
+
+        logger.info(f"[RECOVERY] Found {len(pending_jobs)} pending jobs to recover")
+
+        for result in pending_jobs:
+            try:
+                # If job was processing, reset to queued
+                if result.status == "processing":
+                    result.status = "queued"
+                    result.started_at = None
+                    result.current_phase = None
+                    result.progress = 0
+                    logger.info(f"[RECOVERY] Reset processing job {result.audit_key[:20]}... to queued")
+
+                # Check if we have file content to recover
+                if result.file_content:
+                    # Get username from user relationship or default to guest
+                    username = "guest"
+                    if result.user_id:
+                        user = db.query(User).filter(User.id == result.user_id).first()
+                        if user:
+                            username = user.username or user.email or "guest"
+
+                    # Generate new job_id for the recovered job
+                    new_job_id = str(uuid.uuid4())
+
+                    # Submit to queue
+                    job = await audit_queue.submit(
+                        username=username,
+                        file_content=result.file_content,
+                        filename=result.contract_name,
+                        tier=result.user_tier,
+                        contract_address=result.contract_address
+                    )
+
+                    # Update AuditResult with new job_id
+                    result.job_id = job.job_id
+                    recovered_count += 1
+                    logger.info(f"[RECOVERY] Recovered job {result.audit_key[:20]}... with new job_id {job.job_id[:8]}...")
+                else:
+                    # No file content - cannot recover, mark as failed
+                    result.status = "failed"
+                    result.error_message = "Recovery failed: File content was not persisted. Please re-submit your audit."
+                    result.completed_at = datetime.now()
+                    failed_count += 1
+                    logger.warning(f"[RECOVERY] Cannot recover job {result.audit_key[:20]}... - no file content")
+
+            except Exception as e:
+                logger.error(f"[RECOVERY] Error recovering job {result.audit_key[:20]}...: {e}")
+                result.status = "failed"
+                result.error_message = f"Recovery error: {str(e)[:500]}"
+                result.completed_at = datetime.now()
+                failed_count += 1
+
+        db.commit()
+        logger.info(f"[RECOVERY] Recovery complete: {recovered_count} recovered, {failed_count} failed")
+
+    except Exception as e:
+        logger.error(f"[RECOVERY] Critical error during recovery: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
+async def detect_stale_processing_jobs():
+    """
+    Background task to detect and recover jobs stuck in 'processing' state.
+
+    Jobs that have been processing for more than 30 minutes are considered stale
+    and are marked as failed. This prevents resource leaks and gives users
+    clear feedback about failed audits.
+
+    Runs every 5 minutes.
+    """
+    PROCESSING_TIMEOUT_MINUTES = 30
+    CHECK_INTERVAL_SECONDS = 300  # 5 minutes
+
+    while True:
+        try:
+            await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+
+            db = SessionLocal()
+            try:
+                timeout_threshold = datetime.now() - timedelta(minutes=PROCESSING_TIMEOUT_MINUTES)
+
+                # Find stale processing jobs
+                stale_jobs = db.query(AuditResult).filter(
+                    AuditResult.status == "processing",
+                    AuditResult.started_at < timeout_threshold
+                ).all()
+
+                if stale_jobs:
+                    logger.warning(f"[TIMEOUT] Found {len(stale_jobs)} stale processing jobs")
+
+                    for result in stale_jobs:
+                        processing_time = (datetime.now() - result.started_at).total_seconds() / 60
+                        result.status = "failed"
+                        result.error_message = (
+                            f"Processing timeout: Job exceeded {PROCESSING_TIMEOUT_MINUTES} minute limit "
+                            f"(ran for {processing_time:.1f} minutes). This may indicate a system issue. "
+                            "Please try re-submitting your audit."
+                        )
+                        result.completed_at = datetime.now()
+
+                        # Remove from in-memory queue processing set if present
+                        if result.job_id:
+                            audit_queue.processing.discard(result.job_id)
+                            if result.job_id in audit_queue.jobs:
+                                audit_queue.jobs[result.job_id].status = AuditStatus.FAILED
+                                audit_queue.jobs[result.job_id].error = result.error_message
+
+                        logger.warning(
+                            f"[TIMEOUT] Marked job {result.audit_key[:20]}... as failed "
+                            f"(processing for {processing_time:.1f} minutes)"
+                        )
+
+                    db.commit()
+
+            finally:
+                db.close()
+
+        except asyncio.CancelledError:
+            logger.info("[TIMEOUT] Stale job detector cancelled")
+            break
+        except Exception as e:
+            logger.error(f"[TIMEOUT] Error detecting stale jobs: {e}")
 
 
 async def notify_job_subscribers(job_id: str, data: dict):
@@ -7897,6 +8071,31 @@ async def submit_audit_to_queue(
     # Compute contract hash
     contract_hash = compute_contract_hash(code_bytes.decode('utf-8', errors='replace'))
 
+    # One-File-Per-Key Policy Enforcement
+    # Each API key can only be associated with ONE file (identified by contract_hash).
+    # Users can re-audit the SAME file multiple times with the same key.
+    # Users CANNOT audit DIFFERENT files with the same key.
+    if validated_api_key_id is not None:
+        existing_different_file = db.query(AuditResult).filter(
+            AuditResult.api_key_id == validated_api_key_id,
+            AuditResult.contract_hash != contract_hash,  # Different file
+            AuditResult.status.in_(["queued", "processing", "completed"])  # Only count real audits
+        ).first()
+
+        if existing_different_file:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "one_file_per_key",
+                    "message": f"This API key is already assigned to a different file: '{existing_different_file.contract_name}'. "
+                               f"Each API key can only audit one file. You can re-audit the same file, or create a new API key for different files.",
+                    "existing_file": existing_different_file.contract_name,
+                    "existing_audit_key": existing_different_file.audit_key,
+                    "api_key_label": api_key.label
+                }
+            )
+        logger.debug(f"[AUDIT_SUBMIT] One-file-per-key check passed for api_key_id={validated_api_key_id}")
+
     # Submit to queue first
     job = await audit_queue.submit(
         username=effective_username,
@@ -7920,6 +8119,7 @@ async def submit_audit_to_queue(
                     contract_name=safe_filename,
                     contract_hash=contract_hash,
                     contract_address=contract_address,
+                    file_content=code_bytes,  # Persist for crash recovery
                     status="queued",
                     user_tier=tier,
                     notification_email=user_email if tier in ["pro", "enterprise"] else None,
@@ -8406,7 +8606,34 @@ async def audit_contract(
         except PermissionError as e:
             logger.error(f"Failed to write temp file: {str(e)}")
             raise HTTPException(status_code=500, detail="Failed to save temporary file due to permissions")
-        
+
+        # One-File-Per-Key Policy Enforcement (only for direct calls, not queue-originated)
+        # Each API key can only be associated with ONE file (identified by contract_hash).
+        if validated_api_key_id is not None and not _from_queue:
+            early_contract_hash = compute_contract_hash(code_bytes.decode('utf-8', errors='replace'))
+            existing_different_file = db.query(AuditResult).filter(
+                AuditResult.api_key_id == validated_api_key_id,
+                AuditResult.contract_hash != early_contract_hash,  # Different file
+                AuditResult.status.in_(["queued", "processing", "completed"])  # Only count real audits
+            ).first()
+
+            if existing_different_file:
+                # Clean up temp file before raising
+                if temp_path and os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "one_file_per_key",
+                        "message": f"This API key is already assigned to a different file: '{existing_different_file.contract_name}'. "
+                                   f"Each API key can only audit one file. You can re-audit the same file, or create a new API key for different files.",
+                        "existing_file": existing_different_file.contract_name,
+                        "existing_audit_key": existing_different_file.audit_key,
+                        "api_key_label": api_key_obj.label
+                    }
+                )
+            logger.debug(f"[AUDIT] One-file-per-key check passed for api_key_id={validated_api_key_id}")
+
         # Diamond large file redirect
         if file_size > usage_tracker.size_limits.get(current_tier, 250 * 1024) and not has_diamond:
             overage_cost = usage_tracker.calculate_diamond_overage(file_size) / 100
