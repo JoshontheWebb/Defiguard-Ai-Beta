@@ -205,6 +205,605 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ---------------------------------------------------------------------
+// AUDIT STATE PERSISTENCE - Survives page navigation and browser close
+// Stores audit log messages and current audit state in sessionStorage
+// ---------------------------------------------------------------------
+const AuditStateManager = {
+    STORAGE_KEY: 'defiguard_audit_state',
+    MAX_LOG_ENTRIES: 100,
+
+    // Get current state
+    getState() {
+        try {
+            const stored = sessionStorage.getItem(this.STORAGE_KEY);
+            return stored ? JSON.parse(stored) : { logs: [], currentAuditKey: null, lastUpdate: null };
+        } catch (e) {
+            return { logs: [], currentAuditKey: null, lastUpdate: null };
+        }
+    },
+
+    // Save state
+    saveState(state) {
+        try {
+            // Trim logs to max entries
+            if (state.logs && state.logs.length > this.MAX_LOG_ENTRIES) {
+                state.logs = state.logs.slice(-this.MAX_LOG_ENTRIES);
+            }
+            state.lastUpdate = Date.now();
+            sessionStorage.setItem(this.STORAGE_KEY, JSON.stringify(state));
+        } catch (e) {
+            debugLog('[AuditState] Error saving state:', e);
+        }
+    },
+
+    // Add a log message
+    addLog(message) {
+        const state = this.getState();
+        state.logs.push({
+            time: new Date().toISOString(),
+            message: message
+        });
+        this.saveState(state);
+    },
+
+    // Set current audit key (so we can resume tracking)
+    setCurrentAudit(auditKey) {
+        const state = this.getState();
+        state.currentAuditKey = auditKey;
+        this.saveState(state);
+    },
+
+    // Clear current audit (when complete or failed)
+    clearCurrentAudit() {
+        const state = this.getState();
+        state.currentAuditKey = null;
+        state.logs = []; // Clear logs when audit completes
+        this.saveState(state);
+    },
+
+    // Get logs for display
+    getLogs() {
+        return this.getState().logs;
+    },
+
+    // Check if there's an ongoing audit
+    hasOngoingAudit() {
+        const state = this.getState();
+        return !!state.currentAuditKey;
+    },
+
+    // Get current audit key
+    getCurrentAuditKey() {
+        return this.getState().currentAuditKey;
+    }
+};
+
+// ---------------------------------------------------------------------
+// HAMBURGER MENU MANAGER - Ensures mobile menu works after navigation
+// Handles iOS Safari bfcache (back-forward cache) issues
+// ---------------------------------------------------------------------
+const HamburgerManager = {
+    initialized: false,
+
+    // Initialize or re-initialize hamburger menu
+    init() {
+        const hamburger = document.getElementById('hamburger');
+        const sidebar = document.getElementById('sidebar');
+        const mainContent = document.querySelector('.main-content');
+
+        if (!hamburger || !sidebar || !mainContent) {
+            debugLog('[Hamburger] Elements not found, will retry');
+            return false;
+        }
+
+        // Check if already initialized
+        if (hamburger._hamburgerInitialized) {
+            debugLog('[Hamburger] Already initialized');
+            return true;
+        }
+
+        // Add click handler
+        hamburger.addEventListener('click', () => {
+            sidebar.classList.toggle('open');
+            hamburger.classList.toggle('open');
+            document.body.classList.toggle('sidebar-open');
+            mainContent.style.marginLeft = sidebar.classList.contains('open') ? '270px' : '';
+        });
+
+        // Add keyboard support
+        hamburger.setAttribute('tabindex', '0');
+        hamburger.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                hamburger.click();
+            }
+        });
+
+        hamburger._hamburgerInitialized = true;
+        this.initialized = true;
+        debugLog('[Hamburger] Initialized successfully');
+        return true;
+    },
+
+    // Retry initialization with delay (for iOS timing issues)
+    initWithRetry(maxRetries = 5, delay = 100) {
+        let attempts = 0;
+        const tryInit = () => {
+            attempts++;
+            if (this.init()) {
+                return;
+            }
+            if (attempts < maxRetries) {
+                setTimeout(tryInit, delay * attempts); // Exponential backoff
+            } else {
+                console.warn('[Hamburger] Failed to initialize after', maxRetries, 'attempts');
+            }
+        };
+        tryInit();
+    }
+};
+
+// Handle iOS Safari bfcache - re-initialize UI when returning from external page
+window.addEventListener('pageshow', (event) => {
+    if (event.persisted) {
+        // Page was restored from bfcache (common on iOS after Stripe redirect)
+        debugLog('[PageShow] Page restored from bfcache, re-initializing UI');
+        HamburgerManager.initWithRetry();
+
+        // Also trigger a visibility event to reconnect WebSockets
+        document.dispatchEvent(new Event('visibilitychange'));
+    }
+});
+
+// Also handle focus events (user returns to tab)
+window.addEventListener('focus', () => {
+    // Ensure hamburger is initialized when window regains focus
+    if (!HamburgerManager.initialized) {
+        HamburgerManager.initWithRetry();
+    }
+});
+
+// ---------------------------------------------------------------------
+// WEBSOCKET RECONNECTION MANAGER - Auto-reconnects audit log WebSocket
+// ---------------------------------------------------------------------
+const WebSocketManager = {
+    ws: null,
+    wsUrl: null,
+    reconnectAttempts: 0,
+    maxReconnectAttempts: 10,
+    reconnectDelay: 1000,
+    isConnecting: false,
+    onMessageCallback: null,
+    onConnectCallback: null,
+    onDisconnectCallback: null,
+
+    // Connect to WebSocket with auto-reconnect
+    connect(url, callbacks = {}) {
+        this.wsUrl = url;
+        this.onMessageCallback = callbacks.onMessage || null;
+        this.onConnectCallback = callbacks.onConnect || null;
+        this.onDisconnectCallback = callbacks.onDisconnect || null;
+        this._doConnect();
+    },
+
+    _doConnect() {
+        if (this.isConnecting || !this.wsUrl) return;
+
+        this.isConnecting = true;
+        debugLog('[WS] Connecting to:', this.wsUrl);
+
+        try {
+            this.ws = new WebSocket(this.wsUrl);
+            ResourceManager.addWebSocket(this.ws);
+
+            this.ws.onopen = () => {
+                debugLog('[WS] Connected');
+                this.isConnecting = false;
+                this.reconnectAttempts = 0;
+                if (this.onConnectCallback) this.onConnectCallback();
+            };
+
+            this.ws.onmessage = (event) => {
+                if (this.onMessageCallback) this.onMessageCallback(event);
+            };
+
+            this.ws.onerror = (error) => {
+                debugLog('[WS] Error:', error);
+                this.isConnecting = false;
+            };
+
+            this.ws.onclose = () => {
+                debugLog('[WS] Disconnected');
+                this.isConnecting = false;
+                ResourceManager.removeWebSocket(this.ws);
+                this.ws = null;
+                if (this.onDisconnectCallback) this.onDisconnectCallback();
+                this._scheduleReconnect();
+            };
+        } catch (e) {
+            debugLog('[WS] Connection error:', e);
+            this.isConnecting = false;
+            this._scheduleReconnect();
+        }
+    },
+
+    _scheduleReconnect() {
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            debugLog('[WS] Max reconnect attempts reached');
+            return;
+        }
+
+        // Only reconnect if page is visible
+        if (document.visibilityState !== 'visible') {
+            debugLog('[WS] Page not visible, skipping reconnect');
+            return;
+        }
+
+        this.reconnectAttempts++;
+        const delay = Math.min(this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1), 30000);
+        debugLog(`[WS] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
+
+        setTimeout(() => this._doConnect(), delay);
+    },
+
+    // Force reconnect (e.g., when page becomes visible)
+    reconnect() {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            this.reconnectAttempts = 0;
+            this._doConnect();
+        }
+    },
+
+    // Check if connected
+    isConnected() {
+        return this.ws && this.ws.readyState === WebSocket.OPEN;
+    },
+
+    // Disconnect
+    disconnect() {
+        if (this.ws) {
+            this.ws.close();
+            this.ws = null;
+        }
+    }
+};
+
+// Reconnect WebSocket when page becomes visible again
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+        // Page is visible again - try to reconnect if needed
+        setTimeout(() => {
+            if (!WebSocketManager.isConnected() && WebSocketManager.wsUrl) {
+                debugLog('[WS] Page visible, attempting reconnect');
+                WebSocketManager.reconnect();
+            }
+        }, 500);
+    }
+});
+
+// ---------------------------------------------------------------------
+// RESILIENT FETCH - Retry with exponential backoff for all API calls
+// This ensures network hiccups don't break the app
+// ---------------------------------------------------------------------
+const fetchWithRetry = async (url, options = {}, maxRetries = 3, baseDelay = 1000) => {
+    let lastError;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+            const response = await fetch(url, {
+                credentials: 'include',
+                ...options
+            });
+
+            // Don't retry on client errors (4xx) except 429 (rate limit)
+            if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+                return response;
+            }
+
+            // Retry on server errors (5xx) or rate limiting
+            if (response.status >= 500 || response.status === 429) {
+                lastError = new Error(`HTTP ${response.status}`);
+                if (attempt < maxRetries - 1) {
+                    const delay = baseDelay * Math.pow(2, attempt);
+                    debugLog(`[Fetch] Retry ${attempt + 1}/${maxRetries} for ${url} after ${delay}ms`);
+                    await new Promise(r => setTimeout(r, delay));
+                    continue;
+                }
+            }
+
+            return response;
+        } catch (err) {
+            lastError = err;
+            if (attempt < maxRetries - 1) {
+                const delay = baseDelay * Math.pow(2, attempt);
+                debugLog(`[Fetch] Network error, retry ${attempt + 1}/${maxRetries} for ${url} after ${delay}ms`);
+                await new Promise(r => setTimeout(r, delay));
+            }
+        }
+    }
+
+    throw lastError;
+};
+
+// ---------------------------------------------------------------------
+// TIER CACHE - Cache tier/usage data with TTL to reduce API calls
+// ---------------------------------------------------------------------
+const TierCache = {
+    data: null,
+    timestamp: 0,
+    TTL: 30000, // 30 seconds
+    pendingRequest: null, // Deduplication
+
+    async get(forceRefresh = false) {
+        const now = Date.now();
+
+        // Return cached if fresh
+        if (!forceRefresh && this.data && (now - this.timestamp) < this.TTL) {
+            debugLog('[TierCache] Returning cached tier data');
+            return this.data;
+        }
+
+        // Deduplicate concurrent requests
+        if (this.pendingRequest) {
+            debugLog('[TierCache] Waiting for pending request');
+            return this.pendingRequest;
+        }
+
+        // Fetch fresh data
+        this.pendingRequest = this._fetch();
+        try {
+            const result = await this.pendingRequest;
+            return result;
+        } finally {
+            this.pendingRequest = null;
+        }
+    },
+
+    async _fetch() {
+        try {
+            const response = await fetchWithRetry('/api/tier');
+            if (response.ok) {
+                this.data = await response.json();
+                this.timestamp = Date.now();
+                debugLog('[TierCache] Cached fresh tier data');
+                return this.data;
+            }
+        } catch (e) {
+            debugLog('[TierCache] Error fetching tier:', e);
+        }
+        return this.data; // Return stale data on error
+    },
+
+    invalidate() {
+        this.timestamp = 0;
+        debugLog('[TierCache] Cache invalidated');
+    }
+};
+
+// ---------------------------------------------------------------------
+// FORM STATE MANAGER - Persist form data across page navigation
+// ---------------------------------------------------------------------
+const FormStateManager = {
+    STORAGE_KEY: 'defiguard_form_state',
+
+    // Save form field value
+    saveField(fieldName, value) {
+        try {
+            const state = this.getState();
+            state[fieldName] = value;
+            state.lastUpdate = Date.now();
+            sessionStorage.setItem(this.STORAGE_KEY, JSON.stringify(state));
+        } catch (e) {
+            debugLog('[FormState] Error saving:', e);
+        }
+    },
+
+    // Get all saved state
+    getState() {
+        try {
+            const stored = sessionStorage.getItem(this.STORAGE_KEY);
+            return stored ? JSON.parse(stored) : {};
+        } catch (e) {
+            return {};
+        }
+    },
+
+    // Get specific field
+    getField(fieldName) {
+        return this.getState()[fieldName];
+    },
+
+    // Clear after successful submission
+    clear() {
+        try {
+            sessionStorage.removeItem(this.STORAGE_KEY);
+            debugLog('[FormState] Cleared');
+        } catch (e) {}
+    },
+
+    // Restore form fields from saved state
+    restore() {
+        const state = this.getState();
+        if (!state.lastUpdate) return;
+
+        // Only restore if less than 30 minutes old
+        if (Date.now() - state.lastUpdate > 30 * 60 * 1000) {
+            this.clear();
+            return;
+        }
+
+        // Restore contract address
+        if (state.contractAddress) {
+            const contractInput = document.getElementById('contract_address');
+            if (contractInput && !contractInput.value) {
+                contractInput.value = state.contractAddress;
+                debugLog('[FormState] Restored contract address');
+            }
+        }
+
+        // Restore custom report input
+        if (state.customReport) {
+            const customInput = document.getElementById('custom_report');
+            if (customInput && !customInput.value) {
+                customInput.value = state.customReport;
+                debugLog('[FormState] Restored custom report');
+            }
+        }
+
+        // Notify user of restored data
+        if (state.contractAddress || state.customReport || state.fileName) {
+            ToastNotification.show('Form data restored from previous session', 'info', 3000);
+        }
+    }
+};
+
+// ---------------------------------------------------------------------
+// LOADING MANAGER - Ensure loading states never get stuck
+// ---------------------------------------------------------------------
+const LoadingManager = {
+    activeLoaders: new Map(),
+    DEFAULT_TIMEOUT: 5 * 60 * 1000, // 5 minutes max
+
+    // Show loading with auto-timeout
+    show(element, timeoutMs = this.DEFAULT_TIMEOUT) {
+        if (!element) return;
+
+        element.classList.add('show');
+
+        // Set timeout to auto-hide
+        const timeoutId = setTimeout(() => {
+            this.hide(element);
+            console.warn('[Loading] Auto-hidden after timeout');
+            ToastNotification.show('Operation timed out. Please try again.', 'warning');
+        }, timeoutMs);
+
+        this.activeLoaders.set(element, timeoutId);
+    },
+
+    // Hide loading and clear timeout
+    hide(element) {
+        if (!element) return;
+
+        element.classList.remove('show');
+
+        const timeoutId = this.activeLoaders.get(element);
+        if (timeoutId) {
+            clearTimeout(timeoutId);
+            this.activeLoaders.delete(element);
+        }
+    },
+
+    // Clear all loading states (emergency cleanup)
+    clearAll() {
+        this.activeLoaders.forEach((timeoutId, element) => {
+            clearTimeout(timeoutId);
+            element.classList.remove('show');
+        });
+        this.activeLoaders.clear();
+    }
+};
+
+// Clean up loading states on page unload
+window.addEventListener('beforeunload', () => {
+    LoadingManager.clearAll();
+});
+
+// ---------------------------------------------------------------------
+// POLLING MANAGER - Handle polling with visibility awareness and cleanup
+// ---------------------------------------------------------------------
+const PollingManager = {
+    polls: new Map(),
+
+    // Start a poll with auto-cleanup
+    start(name, callback, intervalMs, options = {}) {
+        const {
+            maxDuration = 30 * 60 * 1000, // 30 min default
+            pauseWhenHidden = true,
+            maxConsecutiveErrors = 10
+        } = options;
+
+        // Clear existing poll with same name
+        this.stop(name);
+
+        const state = {
+            intervalId: null,
+            startTime: Date.now(),
+            consecutiveErrors: 0,
+            isPaused: false
+        };
+
+        const wrappedCallback = async () => {
+            // Check duration limit
+            if (Date.now() - state.startTime > maxDuration) {
+                debugLog(`[Polling] ${name} exceeded max duration, stopping`);
+                this.stop(name);
+                return;
+            }
+
+            // Skip if paused
+            if (state.isPaused) return;
+
+            try {
+                await callback();
+                state.consecutiveErrors = 0;
+            } catch (e) {
+                state.consecutiveErrors++;
+                debugLog(`[Polling] ${name} error (${state.consecutiveErrors}/${maxConsecutiveErrors}):`, e);
+
+                if (state.consecutiveErrors >= maxConsecutiveErrors) {
+                    debugLog(`[Polling] ${name} too many errors, stopping`);
+                    this.stop(name);
+                }
+            }
+        };
+
+        state.intervalId = setInterval(wrappedCallback, intervalMs);
+        ResourceManager.addInterval(state.intervalId);
+
+        // Handle visibility
+        if (pauseWhenHidden) {
+            const visibilityHandler = () => {
+                state.isPaused = document.visibilityState === 'hidden';
+                debugLog(`[Polling] ${name} ${state.isPaused ? 'paused' : 'resumed'}`);
+            };
+            document.addEventListener('visibilitychange', visibilityHandler);
+            state.visibilityHandler = visibilityHandler;
+        }
+
+        this.polls.set(name, state);
+
+        // Run immediately
+        wrappedCallback();
+
+        return name;
+    },
+
+    stop(name) {
+        const state = this.polls.get(name);
+        if (state) {
+            if (state.intervalId) {
+                clearInterval(state.intervalId);
+                ResourceManager.removeInterval(state.intervalId);
+            }
+            if (state.visibilityHandler) {
+                document.removeEventListener('visibilitychange', state.visibilityHandler);
+            }
+            this.polls.delete(name);
+            debugLog(`[Polling] ${name} stopped`);
+        }
+    },
+
+    stopAll() {
+        this.polls.forEach((state, name) => this.stop(name));
+    }
+};
+
+// Clean up polls on page unload
+window.addEventListener('beforeunload', () => {
+    PollingManager.stopAll();
+});
+
+// ---------------------------------------------------------------------
 // ACCESS KEY HELPERS - For persistent audit retrieval
 // Access Keys (dga_xxx) are unique identifiers for retrieving specific audit results
 // Different from Project Keys which organize audits by client/project
@@ -248,7 +847,7 @@ window.retrieveAuditByKey = async function(auditKey) {
 
     try {
         ToastNotification.show('Retrieving audit...', 'info');
-        const response = await fetch(`/audit/retrieve/${auditKey}`);
+        const response = await fetchWithRetry(`/audit/retrieve/${auditKey}`, {}, 3, 1000);
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
             throw new Error(error.detail || 'Failed to retrieve audit');
@@ -540,9 +1139,7 @@ const CertoraNotificationChecker = {
         this.isChecking = true;
 
         try {
-            const response = await fetch('/api/certora/notifications', {
-                credentials: 'include'
-            });
+            const response = await fetchWithRetry('/api/certora/notifications', {}, 2, 1000);
 
             if (!response.ok) {
                 this.isChecking = false;
@@ -581,19 +1178,18 @@ const CertoraNotificationChecker = {
 
     async dismissNotifications(jobIds) {
         try {
-            // Get CSRF token
-            const csrfResponse = await fetch('/csrf-token', { credentials: 'include' });
+            // Get CSRF token with retry
+            const csrfResponse = await fetchWithRetry('/csrf-token', {}, 2, 500);
             const { csrf_token } = await csrfResponse.json();
 
-            await fetch('/api/certora/notifications/dismiss', {
+            await fetchWithRetry('/api/certora/notifications/dismiss', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'X-CSRFToken': csrf_token
                 },
-                credentials: 'include',
                 body: JSON.stringify({ job_ids: jobIds })
-            });
+            }, 2, 1000);
         } catch (error) {
             debugLog('[CERTORA_NOTIFY] Error dismissing notifications:', error);
         }
@@ -651,12 +1247,11 @@ class AuditQueueTracker {
 
     async submitAudit(formData, csrfToken) {
         try {
-            const response = await fetch('/audit/submit', {
+            const response = await fetchWithRetry('/audit/submit', {
                 method: 'POST',
                 headers: { 'X-CSRFToken': csrfToken },
-                body: formData,
-                credentials: 'include'
-            });
+                body: formData
+            }, 2, 2000); // 2 retries with 2s delay for uploads
 
             if (!response.ok) {
                 const errorData = await response.json().catch(() => ({}));
@@ -794,7 +1389,7 @@ class AuditQueueTracker {
         // Get WebSocket authentication token
         let wsToken = "";
         try {
-            const tokenResponse = await fetch("/api/ws-token", { credentials: 'include' });
+            const tokenResponse = await fetchWithRetry("/api/ws-token", {}, 2, 500);
             if (tokenResponse.ok) {
                 const tokenData = await tokenResponse.json();
                 wsToken = tokenData.token || "";
@@ -896,24 +1491,65 @@ class AuditQueueTracker {
     startPolling() {
         if (this.pollInterval) return; // Already polling
 
-        this.pollInterval = ResourceManager.addInterval(setInterval(async () => {
-            if (!this.jobId) return;
+        let consecutiveErrors = 0;
+        const maxErrors = 10;
+        let pollDelay = 3000; // Start at 3 seconds
+
+        const doPoll = async () => {
+            if (!this.jobId || this.isCompleted) {
+                this.stopPolling();
+                return;
+            }
+
+            // Pause polling when page is hidden to save resources
+            if (document.visibilityState === 'hidden') {
+                return;
+            }
 
             try {
-                const response = await fetch(`/audit/status/${this.jobId}`);
+                const response = await fetchWithRetry(`/audit/status/${this.jobId}`, {}, 2, 1000);
                 if (response.ok) {
                     const data = await response.json();
                     this.handleStatusUpdate(data);
+                    consecutiveErrors = 0;
+                    pollDelay = 3000; // Reset to normal speed
+                } else {
+                    throw new Error(`HTTP ${response.status}`);
                 }
             } catch (e) {
-                log('QUEUE_POLL', 'Polling error:', e);
+                consecutiveErrors++;
+                log('QUEUE_POLL', `Polling error (${consecutiveErrors}/${maxErrors}):`, e);
+
+                if (consecutiveErrors >= maxErrors) {
+                    log('QUEUE_POLL', 'Too many errors, stopping polling');
+                    this.stopPolling();
+                    if (this.onError) {
+                        this.onError('Lost connection to server. Please refresh the page.');
+                    }
+                    return;
+                }
+
+                // Exponential backoff on errors
+                pollDelay = Math.min(pollDelay * 1.5, 15000);
             }
-        }, 3000)); // Poll every 3 seconds
+        };
+
+        // Use PollingManager for better control
+        PollingManager.start('queue-status', doPoll, 3000, {
+            maxDuration: 60 * 60 * 1000, // 1 hour max
+            pauseWhenHidden: true,
+            maxConsecutiveErrors: 10
+        });
+        this.pollInterval = 'queue-status'; // Store name instead of ID
     }
 
     stopPolling() {
         if (this.pollInterval) {
-            ResourceManager.removeInterval(this.pollInterval);
+            if (typeof this.pollInterval === 'string') {
+                PollingManager.stop(this.pollInterval);
+            } else {
+                ResourceManager.removeInterval(this.pollInterval);
+            }
             this.pollInterval = null;
         }
     }
@@ -1591,10 +2227,9 @@ class WalletManager {
 
     async fetchCsrfToken() {
         try {
-            const response = await fetch(`/csrf-token?_=${Date.now()}`, {
-                method: 'GET',
-                credentials: 'include'
-            });
+            const response = await fetchWithRetry(`/csrf-token?_=${Date.now()}`, {
+                method: 'GET'
+            }, 2, 500);
             if (!response.ok) throw new Error('CSRF fetch failed');
             const data = await response.json();
             return data.csrf_token || null;
@@ -1617,19 +2252,18 @@ class WalletManager {
             }
 
             // Send to backend to verify and save
-            const response = await fetch('/api/wallet/connect', {
+            const response = await fetchWithRetry('/api/wallet/connect', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'X-CSRFToken': csrfToken
                 },
-                credentials: 'include',
                 body: JSON.stringify({
                     address: this.address,
                     message: message,
                     signature: signature
                 })
-            });
+            }, 2, 1000);
 
             if (!response.ok) {
                 const error = await response.json().catch(() => ({}));
@@ -1666,9 +2300,7 @@ class WalletManager {
 
         try {
             // Fetch from backend (which proxies to Etherscan)
-            const response = await fetch(`/api/wallet/contracts?address=${this.address}`, {
-                credentials: 'include'
-            });
+            const response = await fetchWithRetry(`/api/wallet/contracts?address=${this.address}`, {}, 2, 1000);
 
             if (!response.ok) {
                 throw new Error('Failed to fetch contracts');
@@ -1721,9 +2353,7 @@ class WalletManager {
 
         try {
             // Fetch source code from backend
-            const response = await fetch(`/api/wallet/contract-source?address=${contractAddress}`, {
-                credentials: 'include'
-            });
+            const response = await fetchWithRetry(`/api/wallet/contract-source?address=${contractAddress}`, {}, 2, 1000);
 
             if (!response.ok) {
                 const error = await response.json().catch(() => ({}));
@@ -1906,10 +2536,9 @@ document.addEventListener("DOMContentLoaded", () => {
   // Section2: CSRF Token Management – fresh token for every POST (no cache, no stale risk, Stripe always works)
   const fetchCsrfToken = async () => {
     try {
-      const response = await fetch(`/csrf-token?_=${Date.now()}`, {
-        method: "GET",
-        credentials: "include",
-      });
+      const response = await fetchWithRetry(`/csrf-token?_=${Date.now()}`, {
+        method: "GET"
+      }, 2, 500);
       if (!response.ok) throw new Error("CSRF fetch failed");
       const data = await response.json();
       if (!data.csrf_token) throw new Error("Empty token");
@@ -1938,21 +2567,37 @@ document.addEventListener("DOMContentLoaded", () => {
   walletManager.init().catch(e => console.warn('[WALLET] Init failed:', e));
 
   // Fetch signed-in proof from /me (enhances with sub/provider/logged_in)
-  const fetchUsername = async () => {
+  // Cached to prevent repeated API calls (expires after 30 seconds)
+  let usernameCache = null;
+  let usernameCacheTime = 0;
+  const USERNAME_CACHE_TTL = 30000; // 30 seconds
+
+  const fetchUsername = async (forceRefresh = false) => {
+    const now = Date.now();
+
+    // Return cached if fresh
+    if (!forceRefresh && usernameCache !== undefined && (now - usernameCacheTime) < USERNAME_CACHE_TTL) {
+      return usernameCache;
+    }
+
     try {
-      const resp = await fetch('/me', { credentials: 'include' });
+      const resp = await fetchWithRetry('/me', {}, 2, 1000);
       if (resp.ok) {
         const data = await resp.json();
-        return data.logged_in ? {
+        usernameCache = data.logged_in ? {
           username: data.username,
           sub: data.sub,
           provider: data.provider,
           member_since: data.member_since
         } : null;
+        usernameCacheTime = now;
+        return usernameCache;
       }
     } catch (e) {
       console.debug('[AUTH] Failed to fetch /me');
     }
+    usernameCache = null;
+    usernameCacheTime = now;
     return null;
   };
 
@@ -2096,9 +2741,15 @@ document.addEventListener("DOMContentLoaded", () => {
         console.error('[INIT] Hamburger init error:', e);
       }
 
-      // Real-time audit log
-      const logMessage = (msg) => {
+      // Real-time audit log with persistence
+      const logMessage = (msg, persist = true) => {
         console.log(`[AUDIT] ${msg}`);
+
+        // Persist to sessionStorage so logs survive page navigation
+        if (persist) {
+          AuditStateManager.addLog(msg);
+        }
+
         if (auditLog) {
           const entry = document.createElement("div");
           entry.textContent = `[${new Date().toISOString()}] ${msg}`;
@@ -2109,11 +2760,157 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       };
 
-      // WebSocket audit log (single instance) - tracked by ResourceManager for cleanup
+      // Restore previous log messages on page load (e.g., after navigation)
+      const restoreLogs = () => {
+        const savedLogs = AuditStateManager.getLogs();
+        if (savedLogs.length > 0 && auditLog) {
+          debugLog(`[AUDIT] Restoring ${savedLogs.length} saved log messages`);
+          savedLogs.forEach(logEntry => {
+            const entry = document.createElement("div");
+            entry.textContent = `[${logEntry.time}] ${logEntry.message}`;
+            entry.style.opacity = '0.7'; // Slightly faded to indicate restored
+            auditLog.appendChild(entry);
+          });
+          auditLog.scrollTop = auditLog.scrollHeight;
+          if (auditLog.style.display === "none") auditLog.style.display = "block";
+
+          // Add separator to show where restored logs end
+          const separator = document.createElement("div");
+          separator.textContent = "--- Session resumed ---";
+          separator.style.textAlign = "center";
+          separator.style.color = "var(--accent-teal)";
+          separator.style.borderTop = "1px solid var(--accent-teal)";
+          separator.style.marginTop = "4px";
+          separator.style.paddingTop = "4px";
+          auditLog.appendChild(separator);
+        }
+      };
+
+      // Restore logs on page load
+      restoreLogs();
+
+      // Check for ongoing audits from SERVER (works across all devices)
+      // This queries /api/user/audits and finds any in-progress audits
+      const checkOngoingAudits = async () => {
+        try {
+          const response = await fetchWithRetry('/api/user/audits?limit=5', {}, 2, 1000);
+          if (!response.ok) {
+            debugLog('[AUDIT] Could not fetch user audits - user may not be logged in');
+            return;
+          }
+
+          const data = await response.json();
+          const audits = data.audits || [];
+
+          // Find any audits that are still in progress
+          const inProgress = audits.filter(a =>
+            a.status === 'processing' || a.status === 'queued'
+          );
+
+          if (inProgress.length > 0) {
+            // Show all in-progress audits
+            inProgress.forEach(audit => {
+              logMessage(`📋 In-progress audit: ${audit.contract_name || 'Contract'} (${audit.status})`, false);
+            });
+
+            // Store the most recent one for tracking
+            const mostRecent = inProgress[0];
+            AuditStateManager.setCurrentAudit(mostRecent.audit_key);
+
+            // Start polling for updates on the most recent
+            startAuditPolling(mostRecent.audit_key);
+          }
+
+          // Also check for recently completed audits that user might have missed
+          const recentlyCompleted = audits.filter(a => {
+            if (a.status !== 'completed' || !a.completed_at) return false;
+            const completedTime = new Date(a.completed_at).getTime();
+            const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
+            return completedTime > fiveMinutesAgo;
+          });
+
+          if (recentlyCompleted.length > 0 && !inProgress.length) {
+            const recent = recentlyCompleted[0];
+            logMessage(`✅ Recent audit completed: ${recent.contract_name || 'Contract'} - Score: ${recent.risk_score}`, false);
+
+            // Offer to load the results
+            ToastNotification.show(
+              `Your audit "${recent.contract_name || 'Contract'}" completed! Click to view results.`,
+              'success',
+              8000
+            );
+          }
+
+        } catch (e) {
+          debugLog('[AUDIT] Error checking ongoing audits:', e);
+        }
+      };
+
+      // Poll for audit status updates (server-side state)
+      let auditPollInterval = null;
+      const startAuditPolling = (auditKey) => {
+        if (auditPollInterval) {
+          clearInterval(auditPollInterval);
+        }
+
+        const pollAudit = async () => {
+          try {
+            const response = await fetchWithRetry(`/audit/retrieve/${auditKey}`, {}, 2, 1000);
+            if (!response.ok) return;
+
+            const data = await response.json();
+            debugLog(`[AUDIT] Poll status: ${data.status}`);
+
+            if (data.status === 'completed') {
+              clearInterval(auditPollInterval);
+              auditPollInterval = null;
+              logMessage('✅ Audit completed!');
+              AuditStateManager.clearCurrentAudit();
+
+              // Trigger UI update with results
+              window.dispatchEvent(new CustomEvent('retrievedAuditComplete', { detail: {
+                report: data.report,
+                risk_score: data.risk_score,
+                tier: data.user_tier,
+                audit_key: data.audit_key,
+                pdf_url: data.pdf_url
+              }}));
+
+              ToastNotification.show('Your audit is complete! Results are now available.', 'success');
+
+            } else if (data.status === 'failed') {
+              clearInterval(auditPollInterval);
+              auditPollInterval = null;
+              logMessage(`❌ Audit failed: ${data.error || 'Unknown error'}`);
+              AuditStateManager.clearCurrentAudit();
+
+            } else if (data.status === 'processing') {
+              // Update with current phase
+              if (data.current_phase) {
+                logMessage(`🔄 ${data.current_phase}`, false);
+              }
+            }
+          } catch (e) {
+            debugLog('[AUDIT] Poll error:', e);
+          }
+        };
+
+        // Poll every 10 seconds
+        auditPollInterval = setInterval(pollAudit, 10000);
+        ResourceManager.addInterval(auditPollInterval);
+
+        // Also poll immediately
+        pollAudit();
+      };
+
+      // Check ongoing audits after a short delay (let UI initialize first)
+      setTimeout(checkOngoingAudits, 1500);
+
+      // WebSocket audit log with auto-reconnect
       // Security: Only connect if we have a valid token (server requires authentication)
       let wsToken = "";
       try {
-        const tokenResponse = await fetch("/api/ws-token", { credentials: 'include' });
+        const tokenResponse = await fetchWithRetry("/api/ws-token", {}, 2, 500);
         if (tokenResponse.ok) {
           const tokenData = await tokenResponse.json();
           wsToken = tokenData.token || "";
@@ -2122,23 +2919,20 @@ document.addEventListener("DOMContentLoaded", () => {
         debugLog("[AUDIT] Could not fetch WS token - user may not be logged in");
       }
 
-      // Only attempt WebSocket connection if we have a valid token
+      // Use WebSocketManager for auto-reconnect capability
       if (wsToken) {
         const wsUrl = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws-audit-log?token=${encodeURIComponent(wsToken)}`;
-        const auditLogWs = new WebSocket(wsUrl);
-        ResourceManager.addWebSocket(auditLogWs);
-        auditLogWs.onopen = () => logMessage("Connected to audit log");
-        auditLogWs.onmessage = (e) => {
-          try {
-            const data = JSON.parse(e.data);
-            if (data.type === "audit_log") logMessage(data.message);
-          } catch (_) {}
-        };
-        auditLogWs.onerror = () => logMessage("WebSocket error");
-        auditLogWs.onclose = () => {
-          logMessage("Disconnected from audit log");
-          ResourceManager.removeWebSocket(auditLogWs);
-        };
+
+        WebSocketManager.connect(wsUrl, {
+          onConnect: () => logMessage("Connected to audit log"),
+          onMessage: (e) => {
+            try {
+              const data = JSON.parse(e.data);
+              if (data.type === "audit_log") logMessage(data.message);
+            } catch (_) {}
+          },
+          onDisconnect: () => logMessage("Disconnected from audit log (will auto-reconnect)")
+        });
       } else {
         debugLog("[AUDIT] Skipping WebSocket connection - no auth token available");
       }
@@ -2347,14 +3141,13 @@ document.addEventListener("DOMContentLoaded", () => {
             console.log(
               `[DEBUG] Fetching ${endpoint}?${query}, time=${new Date().toISOString()}`
             );
-            const response = await fetch(`${endpoint}?${query}`, {
+            const response = await fetchWithRetry(`${endpoint}?${query}`, {
               method: "GET",
               headers: {
                 Accept: "application/json",
                 "Cache-Control": "no-cache",
-              },
-              credentials: "include",
-            });
+              }
+            }, 3, 2000);
             if (!response.ok) {
               const errorData = await response.json().catch(() => ({}));
               throw new Error(
@@ -2449,7 +3242,7 @@ document.addEventListener("DOMContentLoaded", () => {
         try {
           const user = await fetchUsername();
           const username = user?.username || "";
-          const response = await fetch(
+          const response = await fetchWithRetry(
             `/facets/${contractAddress}?username=${encodeURIComponent(
               username
             )}&_=${Date.now()}`,
@@ -2458,9 +3251,8 @@ document.addEventListener("DOMContentLoaded", () => {
               headers: {
                 Accept: "application/json",
                 "Cache-Control": "no-cache",
-              },
-              credentials: "include",
-            }
+              }
+            }, 2, 1000
           );
           if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
@@ -2548,12 +3340,35 @@ document.addEventListener("DOMContentLoaded", () => {
 
       contractAddressInput?.addEventListener("input", (e) => {
         const address = e.target.value.trim();
+
+        // Persist form state for recovery after navigation
+        FormStateManager.saveField('contractAddress', address);
+
         if (address && address.match(/^0x[a-fA-F0-9]{40}$/)) {
           fetchFacetPreview(address);
         } else {
           facetWell.textContent = "";
         }
       });
+
+      // Persist custom report input as user types
+      const customReportInput = document.getElementById('custom_report');
+      customReportInput?.addEventListener('input', (e) => {
+        FormStateManager.saveField('customReport', e.target.value);
+      });
+
+      // Persist file selection info
+      const fileInput = document.getElementById('file');
+      fileInput?.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (file) {
+          FormStateManager.saveField('fileName', file.name);
+          FormStateManager.saveField('fileSize', file.size);
+        }
+      });
+
+      // Restore form state on page load
+      FormStateManager.restore();
 
       // ============================================================================
       // API KEY SELECTOR - Populate dropdown for audit assignment
@@ -2568,10 +3383,9 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!selector) return;
 
         try {
-          const response = await fetch('/api/keys', {
-            credentials: 'include',
+          const response = await fetchWithRetry('/api/keys', {
             headers: { 'Accept': 'application/json' }
-          });
+          }, 2, 1000);
 
           if (!response.ok) {
             // User might not have API key access yet - hide selector silently
@@ -2621,8 +3435,22 @@ document.addEventListener("DOMContentLoaded", () => {
       };
 
       // Section9: Tier Management
-      const fetchTierData = async () => {
+      // Cache to prevent redundant API calls
+      let tierDataCache = null;
+      let tierDataCacheTime = 0;
+      const TIER_CACHE_TTL = 30000; // 30 seconds
+
+      const fetchTierData = async (forceRefresh = false) => {
         const _tierStart = DebugTracer.enter('fetchTierData');
+
+        // Return cached data if fresh
+        const now = Date.now();
+        if (!forceRefresh && tierDataCache && (now - tierDataCacheTime) < TIER_CACHE_TTL) {
+          debugLog('[TierData] Returning cached tier data');
+          DebugTracer.exit('fetchTierData', _tierStart, { cached: true });
+          return tierDataCache;
+        }
+
         try {
           const user = await fetchUsername();
           DebugTracer.snapshot('fetchTierData_user', { user: user?.username || 'null' });
@@ -2630,15 +3458,21 @@ document.addEventListener("DOMContentLoaded", () => {
           const url = username
             ? `/tier?username=${encodeURIComponent(username)}`
             : "/tier";
-          const response = await fetch(url, {
+
+          // Use fetchWithRetry for resilience
+          const response = await fetchWithRetry(url, {
             headers: { Accept: "application/json" },
-            credentials: "include",
-          });
+          }, 3, 1000);
+
           if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
             throw new Error(errorData.detail || "Failed to fetch tier data");
           }
           const data = await response.json();
+
+          // Cache the response
+          tierDataCache = data;
+          tierDataCacheTime = now;
           const {
             tier,
             size_limit,
@@ -2924,16 +3758,15 @@ document.addEventListener("DOMContentLoaded", () => {
             console.log(
               `[DEBUG] Sending /create-tier-checkout request with body: ${requestBody}, time=${new Date().toISOString()}`
             );
-            const response = await fetch("/create-tier-checkout", {
+            const response = await fetchWithRetry("/create-tier-checkout", {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
                 "X-CSRFToken": token,
                 Accept: "application/json",
               },
-              credentials: "include",
               body: requestBody,
-            });
+            }, 3, 2000);
             console.log(
               `[DEBUG] /create-tier-checkout response status: ${
                 response.status
@@ -3014,16 +3847,15 @@ document.addEventListener("DOMContentLoaded", () => {
             console.log(
               `[DEBUG] Sending /enterprise-audit request for username=${username}, time=${new Date().toISOString()}`
             );
-            const response = await fetch(
+            const response = await fetchWithRetry(
               `/enterprise-audit?username=${encodeURIComponent(username)}`,
               {
                 method: "POST",
-                headers: { 
+                headers: {
                   "X-CSRFToken": token
                 },
-                body: formData,
-                credentials: "include",
-              }
+                body: formData
+              }, 2, 2000
             );
             console.log(
               `[DEBUG] /enterprise-audit response status: ${
@@ -4207,7 +5039,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           usageWarning.textContent = `Enterprise audit completed with $${overageCost.toFixed(2)} overage charged.`;
           usageWarning.classList.add("success");
         }
-        loading.classList.remove("show");
+        LoadingManager.hide(loading);
         if (resultsDiv) {
           resultsDiv.classList.add("show");
           resultsDiv.focus();
@@ -4226,18 +5058,22 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
       const handleSubmit = (e) => {
         e.preventDefault();
         withCsrfToken(async (token) => {
-          loading.classList.add("show");
+          // Use LoadingManager for auto-timeout safety
+          LoadingManager.show(loading, 10 * 60 * 1000); // 10 min timeout for audits
           if (resultsDiv) resultsDiv.classList.remove("show");
           usageWarning.textContent = "";
           usageWarning.classList.remove("error", "success");
 
           const file = auditForm.querySelector("#file")?.files[0];
           if (!file) {
-            loading.classList.remove("show");
+            LoadingManager.hide(loading);
             usageWarning.textContent = "Please select a file";
             usageWarning.classList.add("error");
             return;
           }
+
+          // Save audit key for state persistence
+          AuditStateManager.setCurrentAudit(null); // Will be set when we get the key
 
           const username = (await fetchUsername())?.username || "guest";
           const formData = new FormData(auditForm);
@@ -4257,19 +5093,18 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             }
 
             // Submit to /audit - it will either run immediately or queue
-            const response = await fetch(auditUrl, {
+            const response = await fetchWithRetry(auditUrl, {
               method: 'POST',
               headers: { 'X-CSRFToken': token },
-              body: formData,
-              credentials: 'include'
-            });
+              body: formData
+            }, 2, 3000); // 2 retries with 3s delay for file uploads
             
             if (!response.ok) {
               const errorData = await response.json().catch(() => ({}));
 
               // Handle 409 Conflict - One File Per Project Key Policy
               if (response.status === 409 && errorData.detail?.error === 'one_file_per_key') {
-                loading.classList.remove("show");
+                LoadingManager.hide(loading);
                 const detail = errorData.detail;
 
                 // Show informative error with action options
@@ -4340,7 +5175,13 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
               queueTracker.onComplete = async (result) => {
                 logMessage("Audit complete!");
                 queueTracker.hideQueueUI();
-                loading.classList.remove("show");
+                LoadingManager.hide(loading);
+
+                // Clear form state - audit successful, no need to restore
+                FormStateManager.clear();
+                AuditStateManager.clearCurrentAudit();
+                TierCache.invalidate(); // Force refresh tier data
+
                 if (result.tier) window.currentAuditTier = result.tier;
                 handleAuditResponse(result);
                 
@@ -4361,7 +5202,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
               queueTracker.onError = (error) => {
                 logMessage(`Audit failed: ${error}`);
                 queueTracker.hideQueueUI();
-                loading.classList.remove("show");
+                LoadingManager.hide(loading);
                 usageWarning.textContent = error || "Audit failed";
                 usageWarning.classList.add("error");
               };
@@ -4378,7 +5219,13 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             } else {
               // IMMEDIATE: Audit ran and completed
               logMessage("Audit complete!");
-              loading.classList.remove("show");
+              LoadingManager.hide(loading);
+
+              // Clear form state - audit successful, no need to restore
+              FormStateManager.clear();
+              AuditStateManager.clearCurrentAudit();
+              TierCache.invalidate(); // Force refresh tier data
+
               if (data.tier) window.currentAuditTier = data.tier;
 
               // Show Access Key popup so user can save it for later retrieval
@@ -4407,7 +5254,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           } catch (err) {
             console.error(err);
             queueTracker.hideQueueUI();
-            loading.classList.remove("show");
+            LoadingManager.hide(loading);
             usageWarning.textContent = err.message || "Audit error";
             usageWarning.classList.add("error");
           }
@@ -4500,9 +5347,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           }
 
           debugLog(`[DEBUG] Fetching PDF from: ${fetchUrl}`);
-          const response = await fetch(fetchUrl, {
-            credentials: "include"
-          });
+          const response = await fetchWithRetry(fetchUrl, {}, 3, 1000);
 
           if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
@@ -4572,9 +5417,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           mobilePdfDownload.textContent = "⏳ Downloading...";
           mobilePdfDownload.disabled = true;
 
-          const response = await fetch(fetchUrl, {
-            credentials: "include"
-          });
+          const response = await fetchWithRetry(fetchUrl, {}, 3, 1000);
 
           if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
@@ -4638,14 +5481,13 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             usageWarning.textContent = "Minting NFT reward...";
             usageWarning.classList.remove("error");
             
-            const response = await fetch(`/mint-nft?username=${encodeURIComponent(username)}`, {
+            const response = await fetchWithRetry(`/mint-nft?username=${encodeURIComponent(username)}`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
                 "X-CSRF-Token": token,
-              },
-              credentials: "include",
-            });
+              }
+            }, 2, 2000);
             
             if (!response.ok) {
               const errorData = await response.json().catch(() => ({}));
@@ -4695,10 +5537,9 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           const tierUrl = user?.username 
             ? `/tier?username=${encodeURIComponent(user.username)}`
             : "/tier";
-          const tierResponse = await fetch(tierUrl, {
-            headers: { Accept: "application/json" },
-            credentials: "include"
-          });
+          const tierResponse = await fetchWithRetry(tierUrl, {
+            headers: { Accept: "application/json" }
+          }, 2, 1000);
           
           if (!tierResponse.ok) throw new Error("Failed to fetch tier data");
           
@@ -4784,9 +5625,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
       // Load and display all project keys
       const loadApiKeys = async () => {
         try {
-          const response = await fetch("/api/keys", {
-            credentials: "include"
-          });
+          const response = await fetchWithRetry("/api/keys", {}, 2, 1000);
 
           if (!response.ok) throw new Error("Failed to load project keys");
 
@@ -4854,11 +5693,10 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
 
                   try {
                     await withCsrfToken(async (csrfToken) => {
-                      const response = await fetch(`/api/keys/${keyId}`, {
+                      const response = await fetchWithRetry(`/api/keys/${keyId}`, {
                         method: "DELETE",
-                        headers: { "X-CSRFToken": csrfToken },
-                        credentials: "include"
-                      });
+                        headers: { "X-CSRFToken": csrfToken }
+                      }, 2, 1000);
 
                       if (!response.ok) throw new Error("Failed to revoke key");
 
@@ -4896,9 +5734,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
       // Load and display Certora verification jobs
       const loadCertoraJobs = async () => {
         try {
-          const response = await fetch("/api/certora/jobs", {
-            credentials: "include"
-          });
+          const response = await fetchWithRetry("/api/certora/jobs", {}, 2, 1000);
 
           if (!response.ok) throw new Error("Failed to load Certora jobs");
 
@@ -5001,11 +5837,10 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
 
                   try {
                     await withCsrfToken(async (csrfToken) => {
-                      const response = await fetch(`/api/certora/poll/${jobId}`, {
+                      const response = await fetchWithRetry(`/api/certora/poll/${jobId}`, {
                         method: "POST",
-                        headers: { "X-CSRFToken": csrfToken },
-                        credentials: "include"
-                      });
+                        headers: { "X-CSRFToken": csrfToken }
+                      }, 2, 1000);
 
                       if (!response.ok) throw new Error("Failed to poll job");
 
@@ -5040,11 +5875,10 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
 
                   try {
                     await withCsrfToken(async (csrfToken) => {
-                      const response = await fetch(`/api/certora/job/${jobId}`, {
+                      const response = await fetchWithRetry(`/api/certora/job/${jobId}`, {
                         method: "DELETE",
-                        headers: { "X-CSRFToken": csrfToken },
-                        credentials: "include"
-                      });
+                        headers: { "X-CSRFToken": csrfToken }
+                      }, 2, 1000);
 
                       if (!response.ok) throw new Error("Failed to delete job");
 
@@ -5100,12 +5934,11 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           formData.append('file', file);
 
           await withCsrfToken(async (csrfToken) => {
-            const response = await fetch("/api/certora/start", {
+            const response = await fetchWithRetry("/api/certora/start", {
               method: "POST",
               headers: { "X-CSRFToken": csrfToken },
-              credentials: "include",
               body: formData
-            });
+            }, 2, 2000); // 2 retries with 2s base delay for uploads
 
             if (!response.ok) {
               const error = await response.json();
@@ -5343,15 +6176,14 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           createKeyConfirm.textContent = "Creating...";
 
           await withCsrfToken(async (csrfToken) => {
-            const response = await fetch("/api/keys/create", {
+            const response = await fetchWithRetry("/api/keys/create", {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
                 "X-CSRFToken": csrfToken
               },
-              credentials: "include",
               body: JSON.stringify({ label })
-            });
+            }, 2, 1000);
 
             if (!response.ok) {
               const error = await response.json();
@@ -5475,9 +6307,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
       // Check if user needs to accept legal documents
       const checkLegalAcceptance = async () => {
         try {
-          const response = await fetch("/legal/status", {
-            credentials: "include"
-          });
+          const response = await fetchWithRetry("/legal/status", {}, 2, 1000);
           
           if (!response.ok) {
             console.error("[LEGAL] Failed to check acceptance status");
@@ -5538,18 +6368,17 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           legalAcceptButton.textContent = "Accepting...";
           
           await withCsrfToken(async (csrfToken) => {
-            const response = await fetch("/legal/accept", {
+            const response = await fetchWithRetry("/legal/accept", {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
                 "X-CSRFToken": csrfToken
               },
-              credentials: "include",
               body: JSON.stringify({
                 accepted_terms: acceptTermsCheckbox.checked,
                 accepted_privacy: acceptPrivacyCheckbox.checked
               })
-            });
+            }, 2, 1000);
             
             if (!response.ok) {
               const error = await response.json();
