@@ -245,20 +245,20 @@
                     </small>
                 </div>
 
-                <!-- Project Key Assignment (Pro/Enterprise) -->
-                <div class="form-group pro-enterprise-only api-key-selector-group" style="display: none;">
-                    <label for="api_key_select">
-                        Assign to Project Key (Optional)
-                        <span class="badge">Pro/Enterprise</span>
-                        <span class="tooltip-trigger" title="Project Keys help you organize audits by client or project. Each key can only audit one file but you can re-audit the same file multiple times.">ⓘ</span>
+                <!-- API Key Assignment - SAVE YOUR AUDITS (Pro/Enterprise/Starter) -->
+                <div class="form-group paid-tier-only api-key-selector-group" style="display: none;">
+                    <label for="api_key_select" style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 1.1em;">🔐 Save Audit to API Key</span>
+                        <span class="badge" style="background: linear-gradient(135deg, var(--green), #27ae60);">Recommended</span>
                     </label>
-                    <select id="api_key_select" name="api_key_id" aria-describedby="api-key-help">
-                        <option value="">-- No Assignment (Personal) --</option>
+                    <select id="api_key_select" name="api_key_id" aria-describedby="api-key-help" style="border: 2px solid var(--green); background: rgba(39, 174, 96, 0.1);">
+                        <option value="">⚠️ Don't save (access key required)</option>
                         <!-- Options populated dynamically via JS -->
                     </select>
-                    <small id="api-key-help">
-                        Organize audits by project or client. Each project key = one file.
-                        <a href="#" id="create-key-from-audit" style="color: var(--accent-teal);">Create new key</a>
+                    <small id="api-key-help" style="display: flex; flex-direction: column; gap: 4px;">
+                        <span style="color: var(--green);">✅ Selecting a key saves your audit permanently - access it anytime in Settings!</span>
+                        <span style="color: var(--text-secondary);">Without a key, you must save the access key manually or lose your results.</span>
+                        <a href="#" id="create-key-from-audit" style="color: var(--accent-teal);">+ Create new API key</a>
                     </small>
                 </div>
 

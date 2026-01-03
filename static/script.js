@@ -1347,6 +1347,104 @@ window.showAuditKeyRetrievalModal = function() {
     });
 };
 
+// Show warning when user submits audit without linking to API key
+window.showUnlinkedAuditWarning = function() {
+    return new Promise((resolve) => {
+        // Check if modal already exists
+        let modal = document.getElementById('unlinked-audit-warning-modal');
+        if (modal) {
+            modal.remove();
+        }
+
+        // Create modal
+        modal = document.createElement('div');
+        modal.id = 'unlinked-audit-warning-modal';
+        modal.className = 'modal-backdrop';
+        modal.style.cssText = 'display: flex; z-index: 100001;';
+        modal.innerHTML = `
+            <div class="modal-content" style="max-width: 500px; border: 2px solid #f39c12;">
+                <div class="modal-header" style="background: linear-gradient(135deg, #f39c12, #e67e22);">
+                    <h3 style="color: white;">⚠️ Audit Won't Be Saved</h3>
+                </div>
+                <div class="modal-body" style="padding: 24px;">
+                    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 16px;">
+                        You haven't selected an <strong>API Key</strong> to save this audit.
+                    </p>
+
+                    <div style="background: #fff3cd; border-radius: 8px; padding: 16px; margin-bottom: 20px;">
+                        <p style="color: #856404; margin: 0 0 8px 0; font-weight: 600;">Without an API key:</p>
+                        <ul style="color: #856404; margin: 0; padding-left: 20px;">
+                            <li>You must manually save the <code>dga_</code> access key</li>
+                            <li>If you lose the key, your results are <strong>gone forever</strong></li>
+                            <li>You can't manage or retrieve the audit from Settings</li>
+                        </ul>
+                    </div>
+
+                    <div style="background: rgba(39, 174, 96, 0.1); border: 1px solid var(--green); border-radius: 8px; padding: 16px; margin-bottom: 20px;">
+                        <p style="color: var(--green); margin: 0 0 8px 0; font-weight: 600;">✅ With an API key:</p>
+                        <ul style="color: var(--green); margin: 0; padding-left: 20px;">
+                            <li>Audit saved permanently to your account</li>
+                            <li>Access anytime in Settings → My Audits</li>
+                            <li>Copy/share access keys whenever needed</li>
+                        </ul>
+                    </div>
+
+                    <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                        <button id="unlinked-select-key-btn" class="btn btn-primary" style="flex: 1; min-width: 140px; background: linear-gradient(135deg, var(--green), #27ae60);">
+                            🔐 Select a Key
+                        </button>
+                        <button id="unlinked-proceed-btn" class="btn btn-secondary" style="flex: 1; min-width: 140px;">
+                            Continue Anyway
+                        </button>
+                    </div>
+
+                    <p style="color: var(--text-secondary); font-size: 12px; margin-top: 16px; text-align: center;">
+                        💡 Tip: Create an API key in Settings if you don't have one yet
+                    </p>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+
+        // Handle "Select a Key" button
+        document.getElementById('unlinked-select-key-btn').addEventListener('click', () => {
+            modal.remove();
+            // Focus the API key selector
+            const apiKeySelect = document.getElementById('api_key_select');
+            if (apiKeySelect) {
+                apiKeySelect.focus();
+                apiKeySelect.style.animation = 'pulse 0.5s ease 3';
+            }
+            resolve(false); // Don't proceed with submission
+        });
+
+        // Handle "Continue Anyway" button
+        document.getElementById('unlinked-proceed-btn').addEventListener('click', () => {
+            modal.remove();
+            resolve(true); // Proceed with submission
+        });
+
+        // Close on backdrop click (same as cancel)
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) {
+                modal.remove();
+                resolve(false);
+            }
+        });
+
+        // Close on Escape key
+        const handleEscape = (e) => {
+            if (e.key === 'Escape') {
+                modal.remove();
+                document.removeEventListener('keydown', handleEscape);
+                resolve(false);
+            }
+        };
+        document.addEventListener('keydown', handleEscape);
+    });
+};
+
 // ---------------------------------------------------------------------
 // TOAST NOTIFICATION SYSTEM - For background job notifications
 // ---------------------------------------------------------------------
@@ -4133,8 +4231,17 @@ document.addEventListener("DOMContentLoaded", () => {
                   tier === "pro" || tier === "enterprise" ? "block" : "none")
             );
 
-          // Populate API key selector for Pro/Enterprise users
-          if (tier === "pro" || tier === "enterprise") {
+          // Show paid-tier-only elements (starter, pro, enterprise)
+          document
+            .querySelectorAll(".paid-tier-only")
+            .forEach(
+              (el) =>
+                (el.style.display =
+                  tier === "starter" || tier === "pro" || tier === "enterprise" ? "block" : "none")
+            );
+
+          // Populate API key selector for all paid tiers (Starter gets auto-created key)
+          if (tier === "starter" || tier === "pro" || tier === "enterprise") {
             populateApiKeySelector();
           }
 
@@ -5585,6 +5692,26 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           submitBtn.disabled = true;
           submitBtn.dataset.originalText = submitBtn.textContent;
           submitBtn.textContent = 'Submitting...';
+        }
+
+        // Check if user has API keys available but hasn't selected one
+        const apiKeySelect = document.getElementById('api_key_select');
+        const selectorGroup = document.querySelector('.api-key-selector-group');
+        const hasApiKeys = apiKeySelect && apiKeySelect.options.length > 1;
+        const noKeySelected = !apiKeySelect?.value;
+
+        // Show warning if paid tier user has keys but didn't select one
+        if (selectorGroup && selectorGroup.style.display !== 'none' && hasApiKeys && noKeySelected) {
+          const proceed = await showUnlinkedAuditWarning();
+          if (!proceed) {
+            // User cancelled - reset the form state
+            isSubmitting = false;
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.textContent = submitBtn.dataset.originalText || '🚀 Analyze Contract';
+            }
+            return;
+          }
         }
 
         withCsrfToken(async (token) => {
