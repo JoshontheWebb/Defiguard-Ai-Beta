@@ -2530,6 +2530,71 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       });
 
+      // ============================================================================
+      // API KEY SELECTOR - Populate dropdown for audit assignment
+      // ============================================================================
+
+      /**
+       * Populates the API key selector dropdown for Pro/Enterprise users.
+       * Called when tier data is loaded and user has Pro/Enterprise tier.
+       */
+      const populateApiKeySelector = async () => {
+        const selector = document.getElementById('api_key_select');
+        if (!selector) return;
+
+        try {
+          const response = await fetch('/api/keys', {
+            credentials: 'include',
+            headers: { 'Accept': 'application/json' }
+          });
+
+          if (!response.ok) {
+            // User might not have API key access yet - hide selector silently
+            const selectorGroup = document.querySelector('.api-key-selector-group');
+            if (selectorGroup) selectorGroup.style.display = 'none';
+            return;
+          }
+
+          const data = await response.json();
+          const { keys } = data;
+
+          // Clear and rebuild options
+          selector.innerHTML = '<option value="">-- No Assignment (Personal) --</option>';
+
+          if (keys && keys.length > 0) {
+            keys.forEach(key => {
+              const option = document.createElement('option');
+              option.value = key.id;
+              option.textContent = `${key.label} (${key.audit_count || 0} audits)`;
+              selector.appendChild(option);
+            });
+
+            // Show "Create new key" link handler
+            const createKeyLink = document.getElementById('create-key-from-audit');
+            if (createKeyLink) {
+              createKeyLink.addEventListener('click', (e) => {
+                e.preventDefault();
+                // Open settings modal to API keys section
+                const settingsLink = document.getElementById('sidebar-settings-link');
+                if (settingsLink) settingsLink.click();
+              });
+            }
+
+            debugLog('[API_KEY_SELECTOR] Populated with', keys.length, 'keys');
+          } else {
+            // No keys yet - show helpful message
+            selector.innerHTML = '<option value="">No API keys yet - create one in Settings</option>';
+            debugLog('[API_KEY_SELECTOR] No keys available');
+          }
+
+        } catch (error) {
+          console.error('[API_KEY_SELECTOR] Failed to load API keys:', error);
+          // Hide selector on error
+          const selectorGroup = document.querySelector('.api-key-selector-group');
+          if (selectorGroup) selectorGroup.style.display = 'none';
+        }
+      };
+
       // Section9: Tier Management
       const fetchTierData = async () => {
         const _tierStart = DebugTracer.enter('fetchTierData');
@@ -2722,6 +2787,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 (el.style.display =
                   tier === "pro" || tier === "enterprise" ? "block" : "none")
             );
+
+          // Populate API key selector for Pro/Enterprise users
+          if (tier === "pro" || tier === "enterprise") {
+            populateApiKeySelector();
+          }
 
           if (customReportInput) {
             customReportInput.style.display =
@@ -4140,11 +4210,22 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           const username = (await fetchUsername())?.username || "guest";
           const formData = new FormData(auditForm);
 
+          // Get optional API key assignment (Pro/Enterprise feature)
+          const apiKeySelect = document.getElementById('api_key_select');
+          const selectedApiKeyId = apiKeySelect?.value || '';
+
           try {
             logMessage("Submitting audit...");
-            
+
+            // Build URL with optional api_key_id parameter
+            let auditUrl = `/audit?username=${encodeURIComponent(username)}`;
+            if (selectedApiKeyId) {
+              auditUrl += `&api_key_id=${encodeURIComponent(selectedApiKeyId)}`;
+              logMessage(`Assigning to API key: ${apiKeySelect.options[apiKeySelect.selectedIndex]?.text || selectedApiKeyId}`);
+            }
+
             // Submit to /audit - it will either run immediately or queue
-            const response = await fetch(`/audit?username=${encodeURIComponent(username)}`, {
+            const response = await fetch(auditUrl, {
               method: 'POST',
               headers: { 'X-CSRFToken': token },
               body: formData,
@@ -4632,7 +4713,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
             if (keys.length === 0) {
               apiKeysTableBody.innerHTML = `
                 <tr>
-                  <td colspan="5" style="padding: var(--space-6); text-align: center; color: var(--text-tertiary);">
+                  <td colspan="6" style="padding: var(--space-6); text-align: center; color: var(--text-tertiary);">
                     No API keys yet. Create your first key to get started!
                   </td>
                 </tr>
@@ -4653,6 +4734,11 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
                   </td>
                   <td style="padding: var(--space-3); font-size: var(--text-sm); color: var(--text-tertiary);">
                     ${key.last_used_at ? new Date(key.last_used_at).toLocaleDateString() : 'Never'}
+                  </td>
+                  <td style="padding: var(--space-3); font-size: var(--text-sm); text-align: center;">
+                    <span style="background: rgba(155, 89, 182, 0.2); color: var(--accent-purple); padding: 2px 8px; border-radius: 12px; font-size: 12px;">
+                      ${key.audit_count || 0} audits
+                    </span>
                   </td>
                   <td style="padding: var(--space-3); text-align: right;">
                     <button class="revoke-key-btn btn btn-secondary btn-sm" data-key-id="${key.id}" data-key-label="${escapeHtml(key.label)}">

@@ -1142,8 +1142,18 @@ class AuditResult(Base):
     # Link to in-memory job_id for real-time updates
     job_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
 
-    # Relationship
+    # API Key assignment (Pro/Enterprise feature)
+    # Allows users to organize audits by project/client via named API keys
+    api_key_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey('api_keys.id', ondelete='SET NULL'),  # Keep audit if key is revoked
+        nullable=True,
+        index=True
+    )
+
+    # Relationships
     user = relationship("User")
+    api_key = relationship("APIKey", backref="audits")
 
 
 def generate_audit_key() -> str:
@@ -1925,18 +1935,27 @@ async def list_api_keys(
             APIKey.user_id == user.id,
             APIKey.is_active == True
         ).order_by(APIKey.created_at.desc()).all()
-        
+
         # Determine max keys based on tier
         max_keys = None if user.tier == "enterprise" else 5  # Pro = 5, Enterprise = unlimited
-        
-        keys_data = [{
-            "id": key.id,
-            "key_preview": f"{key.key[:12]}...{key.key[-4:]}" if key.key and len(key.key) > 16 else "****",  # Security: Only show masked key
-            "label": key.label,
-            "created_at": key.created_at.isoformat(),
-            "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
-            "is_active": key.is_active
-        } for key in keys]
+
+        # Build key data with audit counts
+        keys_data = []
+        for key in keys:
+            # Count audits assigned to this key
+            audit_count = db.query(AuditResult).filter(
+                AuditResult.api_key_id == key.id
+            ).count()
+
+            keys_data.append({
+                "id": key.id,
+                "key_preview": f"{key.key[:12]}...{key.key[-4:]}" if key.key and len(key.key) > 16 else "****",
+                "label": key.label,
+                "created_at": key.created_at.isoformat(),
+                "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
+                "is_active": key.is_active,
+                "audit_count": audit_count  # Number of audits assigned to this key
+            })
         
         return {
             "keys": keys_data,
@@ -7754,6 +7773,7 @@ async def submit_audit_to_queue(
     contract_address: str = Query(None),
     notify_email: str = Query(None),
     generate_key: bool = Query(True),
+    api_key_id: int = Query(None, description="Assign audit to a specific API key (Pro/Enterprise)"),
     db: Session = Depends(get_db)
 ) -> dict:
     """
@@ -7770,6 +7790,7 @@ async def submit_audit_to_queue(
         contract_address: Optional on-chain address for verification
         notify_email: Optional email to notify when audit completes
         generate_key: Whether to generate an audit access key (default: True)
+        api_key_id: Optional API key ID to assign this audit to (Pro/Enterprise)
     """
     await verify_csrf_token(request)
 
@@ -7807,6 +7828,33 @@ async def submit_audit_to_queue(
             tier = user.tier
             if not user_email:
                 user_email = user.email
+
+    # Validate API key assignment (Pro/Enterprise feature)
+    validated_api_key_id = None
+    if api_key_id is not None:
+        if not user:
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication required to assign audits to API keys"
+            )
+        if tier not in ["pro", "enterprise"]:
+            raise HTTPException(
+                status_code=403,
+                detail="API key assignment requires Pro or Enterprise tier"
+            )
+        # Verify the API key belongs to this user and is active
+        api_key = db.query(APIKey).filter(
+            APIKey.id == api_key_id,
+            APIKey.user_id == user.id,
+            APIKey.is_active == True
+        ).first()
+        if not api_key:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid API key. Key must be active and owned by you."
+            )
+        validated_api_key_id = api_key_id
+        logger.info(f"[AUDIT_SUBMIT] Assigning audit to API key '{api_key.label}' (id={api_key_id})")
 
     # Read file
     code_bytes = await file.read()
@@ -7875,7 +7923,8 @@ async def submit_audit_to_queue(
                     status="queued",
                     user_tier=tier,
                     notification_email=user_email if tier in ["pro", "enterprise"] else None,
-                    job_id=job.job_id
+                    job_id=job.job_id,
+                    api_key_id=validated_api_key_id  # Assign to API key if specified
                 )
                 db.add(audit_result)
                 db.commit()
@@ -7912,6 +7961,10 @@ async def submit_audit_to_queue(
         response["audit_key"] = audit_key
         response["retrieve_url"] = f"/audit/retrieve/{audit_key}"
         response["message"] += f"\n\nSave your audit key to access results later: {audit_key}"
+
+    # Include API key assignment info in response
+    if validated_api_key_id:
+        response["api_key_id"] = validated_api_key_id
 
     return response
 

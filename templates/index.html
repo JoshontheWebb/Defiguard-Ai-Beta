@@ -229,19 +229,35 @@
                 <!-- Contract Address (Pro/Enterprise) -->
                 <div class="form-group pro-enterprise-only" style="display: none;">
                     <label for="contract_address">
-                        Ethereum Contract Address (Optional) 
+                        Ethereum Contract Address (Optional)
                         <span class="badge">Pro/Enterprise</span>
                     </label>
-                    <input 
-                        type="text" 
-                        id="contract_address" 
-                        name="contract_address" 
-                        placeholder="0x..." 
+                    <input
+                        type="text"
+                        id="contract_address"
+                        name="contract_address"
+                        placeholder="0x..."
                         pattern="^0x[a-fA-F0-9]{40}$"
                         aria-describedby="contract-help"
                     >
                     <small id="contract-help">
                         Enables on-chain analysis and facet pattern detection
+                    </small>
+                </div>
+
+                <!-- API Key Assignment (Pro/Enterprise) -->
+                <div class="form-group pro-enterprise-only api-key-selector-group" style="display: none;">
+                    <label for="api_key_select">
+                        Assign to API Key (Optional)
+                        <span class="badge">Pro/Enterprise</span>
+                    </label>
+                    <select id="api_key_select" name="api_key_id" aria-describedby="api-key-help">
+                        <option value="">-- No Assignment (Personal) --</option>
+                        <!-- Options populated dynamically via JS -->
+                    </select>
+                    <small id="api-key-help">
+                        Organize audits by project or client.
+                        <a href="#" id="create-key-from-audit" style="color: var(--accent-teal);">Create new key</a>
                     </small>
                 </div>
 
