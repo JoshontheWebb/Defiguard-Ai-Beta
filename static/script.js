@@ -2516,7 +2516,8 @@ function formatCode(code) {
 // ---------------------------------------------------------------------
 // Section1: DOM Handling
 // ---------------------------------------------------------------------
-function waitForDOM(selectors, callback, maxAttempts = 20, interval = 300) {
+function waitForDOM(selectors, callback, maxAttempts = 50, interval = 300) {
+    // 50 attempts * 300ms = 15 seconds max wait (increased from 6s for slow networks)
     let attempts = 0;
     const elements = {};
 
@@ -2538,11 +2539,15 @@ function waitForDOM(selectors, callback, maxAttempts = 20, interval = 300) {
             callback(elements);
         } else if (attempts < maxAttempts) {
             attempts++;
-            debugLog(`[DEBUG] Waiting for DOM elements, attempt ${attempts}/${maxAttempts}, missing: ${missing.join(', ')}`);
+            if (attempts % 10 === 0) {
+                // Log every 3 seconds to avoid spam
+                debugLog(`[DEBUG] Waiting for DOM elements, attempt ${attempts}/${maxAttempts}, missing: ${missing.join(', ')}`);
+            }
             setTimeout(check, interval);
         } else {
-            // *** FALLBACK: Proceed even if some elements are missing ***
-            console.warn('[WARN] DOM elements not fully loaded after max attempts. Proceeding with partial init. Missing:', missing);
+            // FALLBACK: Proceed with partial elements - log which are missing for debugging
+            console.warn('[WARN] DOM elements not fully loaded after 15 seconds. Proceeding with partial init.');
+            console.warn('[WARN] Missing elements:', missing);
             callback(elements);
         }
     };
@@ -2551,19 +2556,41 @@ function waitForDOM(selectors, callback, maxAttempts = 20, interval = 300) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  // Section2: CSRF Token Management – fresh token for every POST (no cache, no stale risk, Stripe always works)
-  const fetchCsrfToken = async () => {
+  // Section2: CSRF Token Management
+  // Cache token for 10 seconds to reduce latency, but refresh before expiry
+  // Backend tokens last 15 minutes, so 10-second cache is safe
+  let csrfTokenCache = null;
+  let csrfTokenCacheTime = 0;
+  const CSRF_CACHE_TTL = 10000; // 10 seconds
+
+  const fetchCsrfToken = async (forceRefresh = false) => {
+    const now = Date.now();
+
+    // Return cached token if still valid and not forcing refresh
+    if (!forceRefresh && csrfTokenCache && (now - csrfTokenCacheTime) < CSRF_CACHE_TTL) {
+      debugLog(`[DEBUG] Using cached CSRF token (age: ${now - csrfTokenCacheTime}ms)`);
+      return csrfTokenCache;
+    }
+
     try {
-      const response = await fetchWithRetry(`/csrf-token?_=${Date.now()}`, {
+      const response = await fetchWithRetry(`/csrf-token?_=${now}`, {
         method: "GET"
       }, 2, 500);
       if (!response.ok) throw new Error("CSRF fetch failed");
       const data = await response.json();
       if (!data.csrf_token) throw new Error("Empty token");
-      debugLog(`[DEBUG] Fresh CSRF token fetched: ${data.csrf_token.substring(0, 10)}...`);
+
+      // Cache the token
+      csrfTokenCache = data.csrf_token;
+      csrfTokenCacheTime = now;
+
+      debugLog(`[DEBUG] Fresh CSRF token fetched and cached: ${data.csrf_token.substring(0, 10)}...`);
       return data.csrf_token;
     } catch (err) {
       console.error("[ERROR] CSRF token fetch failed:", err);
+      // On error, invalidate cache
+      csrfTokenCache = null;
+      csrfTokenCacheTime = 0;
       return null;
     }
   };
