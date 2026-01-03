@@ -339,6 +339,8 @@ class CertoraRunner:
         3. output.json - Contains detailed results
         4. HTML page - Fallback parsing
 
+        AUTHENTICATION: Adds CERTORAKEY to requests for authenticated access.
+
         Args:
             job_url: URL of the Certora job (e.g., https://prover.certora.com/output/9579011/abc123)
 
@@ -359,6 +361,23 @@ class CertoraRunner:
             base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
             query_string = f"?{parsed.query}" if parsed.query else ""
 
+            # AUTHENTICATION: Build headers with API key for authenticated access
+            # Certora API accepts either anonymousKey query param OR Authorization header
+            auth_headers = {
+                "Accept": "application/json, text/html",
+                "User-Agent": "DeFiGuard-AI/1.0",
+            }
+            if self.api_key:
+                # Add API key in multiple formats for compatibility
+                auth_headers["Authorization"] = f"Bearer {self.api_key}"
+                auth_headers["x-api-key"] = self.api_key
+                # Also add as query param if not already present
+                if not query_string:
+                    query_string = f"?anonymousKey={self.api_key}"
+                elif "anonymousKey" not in query_string:
+                    query_string += f"&anonymousKey={self.api_key}"
+                logger.info("CertoraRunner: Added authentication headers and anonymousKey to requests")
+
             # CRITICAL: Certora output FILES are hosted on vaas-stg.certora.com, NOT prover.certora.com
             # The job URL from CLI is prover.certora.com but statsdata.json etc are on vaas-stg
             vaas_base_url = base_url.replace("prover.certora.com", "vaas-stg.certora.com")
@@ -377,10 +396,7 @@ class CertoraRunner:
                     tried_endpoints.append(job_status_url)
                     try:
                         logger.info(f"CertoraRunner: Trying jobStatus URL: {job_status_url}")
-                        req = urllib.request.Request(job_status_url, headers={
-                            "Accept": "application/json, text/html",
-                            "User-Agent": "DeFiGuard-AI/1.0"
-                        })
+                        req = urllib.request.Request(job_status_url, headers=auth_headers)
                         with urllib.request.urlopen(req, timeout=30) as response:
                             raw_content = response.read()
                             try:
@@ -435,10 +451,7 @@ class CertoraRunner:
                 tried_endpoints.append(stats_url)
                 try:
                     logger.info(f"CertoraRunner: Trying statsdata.json: {stats_url}")
-                    req = urllib.request.Request(stats_url, headers={
-                        "Accept": "application/json",
-                        "User-Agent": "DeFiGuard-AI/1.0"
-                    })
+                    req = urllib.request.Request(stats_url, headers=auth_headers)
                     with urllib.request.urlopen(req, timeout=30) as response:
                         raw_content = response.read()
                         try:
@@ -483,10 +496,7 @@ class CertoraRunner:
                 tried_endpoints.append(json_url)
                 try:
                     logger.info(f"CertoraRunner: Trying endpoint: {json_url}")
-                    req = urllib.request.Request(json_url, headers={
-                        "Accept": "application/json",
-                        "User-Agent": "DeFiGuard-AI/1.0"
-                    })
+                    req = urllib.request.Request(json_url, headers=auth_headers)
                     with urllib.request.urlopen(req, timeout=30) as response:
                         raw_content = response.read()
                         try:
@@ -545,10 +555,9 @@ class CertoraRunner:
             logger.info(f"CertoraRunner: All JSON endpoints failed, trying HTML page (SPA shell): {html_url}")
             tried_endpoints.append(html_url)
             try:
-                req = urllib.request.Request(html_url, headers={
-                    "Accept": "text/html",
-                    "User-Agent": "DeFiGuard-AI/1.0"
-                })
+                # Use auth_headers but override Accept for HTML
+                html_headers = {**auth_headers, "Accept": "text/html"}
+                req = urllib.request.Request(html_url, headers=html_headers)
                 with urllib.request.urlopen(req, timeout=30) as response:
                     raw_content = response.read()
                     try:
