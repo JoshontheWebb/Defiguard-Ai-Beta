@@ -205,6 +205,283 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ---------------------------------------------------------------------
+// AUDIT STATE PERSISTENCE - Survives page navigation and browser close
+// Stores audit log messages and current audit state in sessionStorage
+// ---------------------------------------------------------------------
+const AuditStateManager = {
+    STORAGE_KEY: 'defiguard_audit_state',
+    MAX_LOG_ENTRIES: 100,
+
+    // Get current state
+    getState() {
+        try {
+            const stored = sessionStorage.getItem(this.STORAGE_KEY);
+            return stored ? JSON.parse(stored) : { logs: [], currentAuditKey: null, lastUpdate: null };
+        } catch (e) {
+            return { logs: [], currentAuditKey: null, lastUpdate: null };
+        }
+    },
+
+    // Save state
+    saveState(state) {
+        try {
+            // Trim logs to max entries
+            if (state.logs && state.logs.length > this.MAX_LOG_ENTRIES) {
+                state.logs = state.logs.slice(-this.MAX_LOG_ENTRIES);
+            }
+            state.lastUpdate = Date.now();
+            sessionStorage.setItem(this.STORAGE_KEY, JSON.stringify(state));
+        } catch (e) {
+            debugLog('[AuditState] Error saving state:', e);
+        }
+    },
+
+    // Add a log message
+    addLog(message) {
+        const state = this.getState();
+        state.logs.push({
+            time: new Date().toISOString(),
+            message: message
+        });
+        this.saveState(state);
+    },
+
+    // Set current audit key (so we can resume tracking)
+    setCurrentAudit(auditKey) {
+        const state = this.getState();
+        state.currentAuditKey = auditKey;
+        this.saveState(state);
+    },
+
+    // Clear current audit (when complete or failed)
+    clearCurrentAudit() {
+        const state = this.getState();
+        state.currentAuditKey = null;
+        state.logs = []; // Clear logs when audit completes
+        this.saveState(state);
+    },
+
+    // Get logs for display
+    getLogs() {
+        return this.getState().logs;
+    },
+
+    // Check if there's an ongoing audit
+    hasOngoingAudit() {
+        const state = this.getState();
+        return !!state.currentAuditKey;
+    },
+
+    // Get current audit key
+    getCurrentAuditKey() {
+        return this.getState().currentAuditKey;
+    }
+};
+
+// ---------------------------------------------------------------------
+// HAMBURGER MENU MANAGER - Ensures mobile menu works after navigation
+// Handles iOS Safari bfcache (back-forward cache) issues
+// ---------------------------------------------------------------------
+const HamburgerManager = {
+    initialized: false,
+
+    // Initialize or re-initialize hamburger menu
+    init() {
+        const hamburger = document.getElementById('hamburger');
+        const sidebar = document.getElementById('sidebar');
+        const mainContent = document.querySelector('.main-content');
+
+        if (!hamburger || !sidebar || !mainContent) {
+            debugLog('[Hamburger] Elements not found, will retry');
+            return false;
+        }
+
+        // Check if already initialized
+        if (hamburger._hamburgerInitialized) {
+            debugLog('[Hamburger] Already initialized');
+            return true;
+        }
+
+        // Add click handler
+        hamburger.addEventListener('click', () => {
+            sidebar.classList.toggle('open');
+            hamburger.classList.toggle('open');
+            document.body.classList.toggle('sidebar-open');
+            mainContent.style.marginLeft = sidebar.classList.contains('open') ? '270px' : '';
+        });
+
+        // Add keyboard support
+        hamburger.setAttribute('tabindex', '0');
+        hamburger.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                hamburger.click();
+            }
+        });
+
+        hamburger._hamburgerInitialized = true;
+        this.initialized = true;
+        debugLog('[Hamburger] Initialized successfully');
+        return true;
+    },
+
+    // Retry initialization with delay (for iOS timing issues)
+    initWithRetry(maxRetries = 5, delay = 100) {
+        let attempts = 0;
+        const tryInit = () => {
+            attempts++;
+            if (this.init()) {
+                return;
+            }
+            if (attempts < maxRetries) {
+                setTimeout(tryInit, delay * attempts); // Exponential backoff
+            } else {
+                console.warn('[Hamburger] Failed to initialize after', maxRetries, 'attempts');
+            }
+        };
+        tryInit();
+    }
+};
+
+// Handle iOS Safari bfcache - re-initialize UI when returning from external page
+window.addEventListener('pageshow', (event) => {
+    if (event.persisted) {
+        // Page was restored from bfcache (common on iOS after Stripe redirect)
+        debugLog('[PageShow] Page restored from bfcache, re-initializing UI');
+        HamburgerManager.initWithRetry();
+
+        // Also trigger a visibility event to reconnect WebSockets
+        document.dispatchEvent(new Event('visibilitychange'));
+    }
+});
+
+// Also handle focus events (user returns to tab)
+window.addEventListener('focus', () => {
+    // Ensure hamburger is initialized when window regains focus
+    if (!HamburgerManager.initialized) {
+        HamburgerManager.initWithRetry();
+    }
+});
+
+// ---------------------------------------------------------------------
+// WEBSOCKET RECONNECTION MANAGER - Auto-reconnects audit log WebSocket
+// ---------------------------------------------------------------------
+const WebSocketManager = {
+    ws: null,
+    wsUrl: null,
+    reconnectAttempts: 0,
+    maxReconnectAttempts: 10,
+    reconnectDelay: 1000,
+    isConnecting: false,
+    onMessageCallback: null,
+    onConnectCallback: null,
+    onDisconnectCallback: null,
+
+    // Connect to WebSocket with auto-reconnect
+    connect(url, callbacks = {}) {
+        this.wsUrl = url;
+        this.onMessageCallback = callbacks.onMessage || null;
+        this.onConnectCallback = callbacks.onConnect || null;
+        this.onDisconnectCallback = callbacks.onDisconnect || null;
+        this._doConnect();
+    },
+
+    _doConnect() {
+        if (this.isConnecting || !this.wsUrl) return;
+
+        this.isConnecting = true;
+        debugLog('[WS] Connecting to:', this.wsUrl);
+
+        try {
+            this.ws = new WebSocket(this.wsUrl);
+            ResourceManager.addWebSocket(this.ws);
+
+            this.ws.onopen = () => {
+                debugLog('[WS] Connected');
+                this.isConnecting = false;
+                this.reconnectAttempts = 0;
+                if (this.onConnectCallback) this.onConnectCallback();
+            };
+
+            this.ws.onmessage = (event) => {
+                if (this.onMessageCallback) this.onMessageCallback(event);
+            };
+
+            this.ws.onerror = (error) => {
+                debugLog('[WS] Error:', error);
+                this.isConnecting = false;
+            };
+
+            this.ws.onclose = () => {
+                debugLog('[WS] Disconnected');
+                this.isConnecting = false;
+                ResourceManager.removeWebSocket(this.ws);
+                this.ws = null;
+                if (this.onDisconnectCallback) this.onDisconnectCallback();
+                this._scheduleReconnect();
+            };
+        } catch (e) {
+            debugLog('[WS] Connection error:', e);
+            this.isConnecting = false;
+            this._scheduleReconnect();
+        }
+    },
+
+    _scheduleReconnect() {
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            debugLog('[WS] Max reconnect attempts reached');
+            return;
+        }
+
+        // Only reconnect if page is visible
+        if (document.visibilityState !== 'visible') {
+            debugLog('[WS] Page not visible, skipping reconnect');
+            return;
+        }
+
+        this.reconnectAttempts++;
+        const delay = Math.min(this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1), 30000);
+        debugLog(`[WS] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
+
+        setTimeout(() => this._doConnect(), delay);
+    },
+
+    // Force reconnect (e.g., when page becomes visible)
+    reconnect() {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            this.reconnectAttempts = 0;
+            this._doConnect();
+        }
+    },
+
+    // Check if connected
+    isConnected() {
+        return this.ws && this.ws.readyState === WebSocket.OPEN;
+    },
+
+    // Disconnect
+    disconnect() {
+        if (this.ws) {
+            this.ws.close();
+            this.ws = null;
+        }
+    }
+};
+
+// Reconnect WebSocket when page becomes visible again
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+        // Page is visible again - try to reconnect if needed
+        setTimeout(() => {
+            if (!WebSocketManager.isConnected() && WebSocketManager.wsUrl) {
+                debugLog('[WS] Page visible, attempting reconnect');
+                WebSocketManager.reconnect();
+            }
+        }, 500);
+    }
+});
+
+// ---------------------------------------------------------------------
 // ACCESS KEY HELPERS - For persistent audit retrieval
 // Access Keys (dga_xxx) are unique identifiers for retrieving specific audit results
 // Different from Project Keys which organize audits by client/project
@@ -2096,9 +2373,15 @@ document.addEventListener("DOMContentLoaded", () => {
         console.error('[INIT] Hamburger init error:', e);
       }
 
-      // Real-time audit log
-      const logMessage = (msg) => {
+      // Real-time audit log with persistence
+      const logMessage = (msg, persist = true) => {
         console.log(`[AUDIT] ${msg}`);
+
+        // Persist to sessionStorage so logs survive page navigation
+        if (persist) {
+          AuditStateManager.addLog(msg);
+        }
+
         if (auditLog) {
           const entry = document.createElement("div");
           entry.textContent = `[${new Date().toISOString()}] ${msg}`;
@@ -2109,7 +2392,153 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       };
 
-      // WebSocket audit log (single instance) - tracked by ResourceManager for cleanup
+      // Restore previous log messages on page load (e.g., after navigation)
+      const restoreLogs = () => {
+        const savedLogs = AuditStateManager.getLogs();
+        if (savedLogs.length > 0 && auditLog) {
+          debugLog(`[AUDIT] Restoring ${savedLogs.length} saved log messages`);
+          savedLogs.forEach(logEntry => {
+            const entry = document.createElement("div");
+            entry.textContent = `[${logEntry.time}] ${logEntry.message}`;
+            entry.style.opacity = '0.7'; // Slightly faded to indicate restored
+            auditLog.appendChild(entry);
+          });
+          auditLog.scrollTop = auditLog.scrollHeight;
+          if (auditLog.style.display === "none") auditLog.style.display = "block";
+
+          // Add separator to show where restored logs end
+          const separator = document.createElement("div");
+          separator.textContent = "--- Session resumed ---";
+          separator.style.textAlign = "center";
+          separator.style.color = "var(--accent-teal)";
+          separator.style.borderTop = "1px solid var(--accent-teal)";
+          separator.style.marginTop = "4px";
+          separator.style.paddingTop = "4px";
+          auditLog.appendChild(separator);
+        }
+      };
+
+      // Restore logs on page load
+      restoreLogs();
+
+      // Check for ongoing audits from SERVER (works across all devices)
+      // This queries /api/user/audits and finds any in-progress audits
+      const checkOngoingAudits = async () => {
+        try {
+          const response = await fetch('/api/user/audits?limit=5', { credentials: 'include' });
+          if (!response.ok) {
+            debugLog('[AUDIT] Could not fetch user audits - user may not be logged in');
+            return;
+          }
+
+          const data = await response.json();
+          const audits = data.audits || [];
+
+          // Find any audits that are still in progress
+          const inProgress = audits.filter(a =>
+            a.status === 'processing' || a.status === 'queued'
+          );
+
+          if (inProgress.length > 0) {
+            // Show all in-progress audits
+            inProgress.forEach(audit => {
+              logMessage(`📋 In-progress audit: ${audit.contract_name || 'Contract'} (${audit.status})`, false);
+            });
+
+            // Store the most recent one for tracking
+            const mostRecent = inProgress[0];
+            AuditStateManager.setCurrentAudit(mostRecent.audit_key);
+
+            // Start polling for updates on the most recent
+            startAuditPolling(mostRecent.audit_key);
+          }
+
+          // Also check for recently completed audits that user might have missed
+          const recentlyCompleted = audits.filter(a => {
+            if (a.status !== 'completed' || !a.completed_at) return false;
+            const completedTime = new Date(a.completed_at).getTime();
+            const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
+            return completedTime > fiveMinutesAgo;
+          });
+
+          if (recentlyCompleted.length > 0 && !inProgress.length) {
+            const recent = recentlyCompleted[0];
+            logMessage(`✅ Recent audit completed: ${recent.contract_name || 'Contract'} - Score: ${recent.risk_score}`, false);
+
+            // Offer to load the results
+            ToastNotification.show(
+              `Your audit "${recent.contract_name || 'Contract'}" completed! Click to view results.`,
+              'success',
+              8000
+            );
+          }
+
+        } catch (e) {
+          debugLog('[AUDIT] Error checking ongoing audits:', e);
+        }
+      };
+
+      // Poll for audit status updates (server-side state)
+      let auditPollInterval = null;
+      const startAuditPolling = (auditKey) => {
+        if (auditPollInterval) {
+          clearInterval(auditPollInterval);
+        }
+
+        const pollAudit = async () => {
+          try {
+            const response = await fetch(`/audit/retrieve/${auditKey}`);
+            if (!response.ok) return;
+
+            const data = await response.json();
+            debugLog(`[AUDIT] Poll status: ${data.status}`);
+
+            if (data.status === 'completed') {
+              clearInterval(auditPollInterval);
+              auditPollInterval = null;
+              logMessage('✅ Audit completed!');
+              AuditStateManager.clearCurrentAudit();
+
+              // Trigger UI update with results
+              window.dispatchEvent(new CustomEvent('retrievedAuditComplete', { detail: {
+                report: data.report,
+                risk_score: data.risk_score,
+                tier: data.user_tier,
+                audit_key: data.audit_key,
+                pdf_url: data.pdf_url
+              }}));
+
+              ToastNotification.show('Your audit is complete! Results are now available.', 'success');
+
+            } else if (data.status === 'failed') {
+              clearInterval(auditPollInterval);
+              auditPollInterval = null;
+              logMessage(`❌ Audit failed: ${data.error || 'Unknown error'}`);
+              AuditStateManager.clearCurrentAudit();
+
+            } else if (data.status === 'processing') {
+              // Update with current phase
+              if (data.current_phase) {
+                logMessage(`🔄 ${data.current_phase}`, false);
+              }
+            }
+          } catch (e) {
+            debugLog('[AUDIT] Poll error:', e);
+          }
+        };
+
+        // Poll every 10 seconds
+        auditPollInterval = setInterval(pollAudit, 10000);
+        ResourceManager.addInterval(auditPollInterval);
+
+        // Also poll immediately
+        pollAudit();
+      };
+
+      // Check ongoing audits after a short delay (let UI initialize first)
+      setTimeout(checkOngoingAudits, 1500);
+
+      // WebSocket audit log with auto-reconnect
       // Security: Only connect if we have a valid token (server requires authentication)
       let wsToken = "";
       try {
@@ -2122,23 +2551,20 @@ document.addEventListener("DOMContentLoaded", () => {
         debugLog("[AUDIT] Could not fetch WS token - user may not be logged in");
       }
 
-      // Only attempt WebSocket connection if we have a valid token
+      // Use WebSocketManager for auto-reconnect capability
       if (wsToken) {
         const wsUrl = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws-audit-log?token=${encodeURIComponent(wsToken)}`;
-        const auditLogWs = new WebSocket(wsUrl);
-        ResourceManager.addWebSocket(auditLogWs);
-        auditLogWs.onopen = () => logMessage("Connected to audit log");
-        auditLogWs.onmessage = (e) => {
-          try {
-            const data = JSON.parse(e.data);
-            if (data.type === "audit_log") logMessage(data.message);
-          } catch (_) {}
-        };
-        auditLogWs.onerror = () => logMessage("WebSocket error");
-        auditLogWs.onclose = () => {
-          logMessage("Disconnected from audit log");
-          ResourceManager.removeWebSocket(auditLogWs);
-        };
+
+        WebSocketManager.connect(wsUrl, {
+          onConnect: () => logMessage("Connected to audit log"),
+          onMessage: (e) => {
+            try {
+              const data = JSON.parse(e.data);
+              if (data.type === "audit_log") logMessage(data.message);
+            } catch (_) {}
+          },
+          onDisconnect: () => logMessage("Disconnected from audit log (will auto-reconnect)")
+        });
       } else {
         debugLog("[AUDIT] Skipping WebSocket connection - no auth token available");
       }
