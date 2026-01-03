@@ -69,10 +69,24 @@ services:
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
         sync: false
-      # Stripe Price IDs
-      - key: STRIPE_PRICE_PRO
+      # Stripe Price IDs - MONTHLY (required)
+      - key: STRIPE_PRICE_STARTER_MONTHLY
         sync: false
+      - key: STRIPE_PRICE_PRO_MONTHLY
+        sync: false
+      - key: STRIPE_PRICE_ENTERPRISE_MONTHLY
+        sync: false
+      # Stripe Price IDs - ANNUAL (optional - for discounted yearly billing)
+      - key: STRIPE_PRICE_STARTER_ANNUAL
+        sync: false
+      - key: STRIPE_PRICE_PRO_ANNUAL
+        sync: false
+      - key: STRIPE_PRICE_ENTERPRISE_ANNUAL
+        sync: false
+      # Legacy price IDs (backward compatibility)
       - key: STRIPE_PRICE_STARTER
+        sync: false
+      - key: STRIPE_PRICE_PRO
         sync: false
       - key: STRIPE_PRICE_ENTERPRISE
         sync: false
