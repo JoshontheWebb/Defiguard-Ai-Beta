@@ -838,8 +838,8 @@ async def startup_certora_poller():
         logger.info("[STARTUP] Certora job poller started")
         
 @app.get("/debug-files")
-async def debug_files(admin_key: str = Query(None)):
-    """Debug endpoint - requires admin key in production."""
+async def debug_files(admin_key: str = Header(None, alias="X-Admin-Key")):
+    """Debug endpoint - requires admin key in production (via X-Admin-Key header)."""
     expected_key = os.getenv("ADMIN_KEY")
     if not expected_key or not admin_key or not secrets.compare_digest(admin_key, expected_key):
         raise HTTPException(status_code=403, detail="Admin access required")
@@ -3628,6 +3628,11 @@ USAGE_STATE_FILE = os.path.join(DATA_DIR, "usage_state.json")
 USAGE_COUNT_FILE = os.path.join(DATA_DIR, "usage_count.txt")
 
 class UsageTracker:
+    """Thread-safe usage tracker with asyncio.Lock for concurrent request safety."""
+
+    # Class-level lock for thread safety across all async operations
+    _lock = asyncio.Lock()
+
     def __init__(self):
         self.count = 0
         self.last_reset = datetime.now()
@@ -3985,7 +3990,17 @@ class UsageTracker:
         except Exception as e:
             logger.error(f"Reset usage error for {username or 'anonymous'}: {e}")
             raise HTTPException(status_code=500, detail="Failed to reset usage")
-    
+
+    async def async_increment(self, file_size: int, username: Optional[str] = None, db: Optional[Session] = None, commit: bool = True):
+        """Thread-safe async wrapper for increment method using asyncio.Lock."""
+        async with self._lock:
+            return self.increment(file_size, username, db, commit)
+
+    async def async_reset_usage(self, username: Optional[str] = None, db: Optional[Session] = None):
+        """Thread-safe async wrapper for reset_usage method using asyncio.Lock."""
+        async with self._lock:
+            return self.reset_usage(username, db)
+
     def set_tier(self, tier: str, has_diamond: bool = False, username: Optional[str] = None, db: Optional[Session] = None):
         # Support both old and new tier names
         tier_mapping = {
@@ -5556,14 +5571,60 @@ async def regs():
     msg = search_result['posts'][0]['text'] if search_result['posts'] else "No updates found"
     return {"message": msg}
 
-# /ws-alerts for scale
+# Global tracking for ws-alerts connections
+active_alerts_websockets: set = set()
+MAX_ALERTS_CONNECTIONS = 100
+
+# /ws-alerts for scale - requires authentication, connection limits, error handling
 @app.websocket("/ws-alerts")
 async def ws_alerts(websocket: WebSocket):
+    """WebSocket for DeFi exploit alerts - authenticated with connection limits."""
+    # Connection limit check
+    if len(active_alerts_websockets) >= MAX_ALERTS_CONNECTIONS:
+        await websocket.close(code=4029, reason="Connection limit exceeded")
+        return
+
+    # Authentication: require valid token
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+
+    validated_username = verify_ws_token(token, _secret_key)
+    if not validated_username:
+        await websocket.close(code=4001, reason="Invalid or expired token")
+        return
+
     await websocket.accept()
-    while True:
-        await asyncio.sleep(300)  # 5min
-        search_result = x_semantic_search(query="latest DeFi exploits", limit=5)
-        await websocket.send_json(search_result)
+    active_alerts_websockets.add(websocket)
+    logger.info(f"[WS_ALERTS] Connected: {validated_username} (total: {len(active_alerts_websockets)})")
+
+    try:
+        while True:
+            try:
+                # Check for client disconnect or ping
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30)
+                if data == "ping":
+                    await websocket.send_text("pong")
+            except asyncio.TimeoutError:
+                # Send alerts on timeout (every 30s check, 5min alert cycle)
+                pass
+
+            # Only send alerts every 5 minutes (track with connection state)
+            await asyncio.sleep(270)  # 4.5 min to complete 5 min cycle with 30s timeout
+            try:
+                search_result = x_semantic_search(query="latest DeFi exploits", limit=5)
+                await websocket.send_json(search_result)
+            except Exception as e:
+                logger.error(f"[WS_ALERTS] Send failed for {validated_username}: {e}")
+                break
+    except WebSocketDisconnect:
+        logger.info(f"[WS_ALERTS] Disconnected: {validated_username}")
+    except Exception as e:
+        logger.error(f"[WS_ALERTS] Error for {validated_username}: {e}")
+    finally:
+        active_alerts_websockets.discard(websocket)
+        logger.info(f"[WS_ALERTS] Cleaned up: {validated_username} (remaining: {len(active_alerts_websockets)})")
 
 # /overage for pre-calc
 @app.post("/overage")
@@ -5663,8 +5724,8 @@ async def verify_api_key(
 ## Section 4.1: Prompt and Debug Endpoints
 
 @app.get("/debug")
-async def debug_log(admin_key: str = Query(None)):
-    """Debug endpoint - requires admin key in production."""
+async def debug_log(admin_key: str = Header(None, alias="X-Admin-Key")):
+    """Debug endpoint - requires admin key in production (via X-Admin-Key header)."""
     expected_key = os.getenv("ADMIN_KEY")
     if not expected_key or not admin_key or not secrets.compare_digest(admin_key, expected_key):
         raise HTTPException(status_code=403, detail="Admin access required")
@@ -10160,10 +10221,10 @@ async def debug_my_stats(
 # NEW: Admin endpoint for tier migration
 # ============================================================================
 @app.post("/admin/migrate-tiers")
-async def migrate_tiers(request: Request, db: Session = Depends(get_db), admin_key: str = Query(None)):
+async def migrate_tiers(request: Request, db: Session = Depends(get_db), admin_key: str = Header(None, alias="X-Admin-Key")):
     """
     Database migration endpoint to rename old tiers to new names.
-    ADMIN ONLY - requires admin_key from environment.
+    ADMIN ONLY - requires X-Admin-Key header.
     """
     expected_key = os.getenv("ADMIN_KEY", "")
     if not admin_key or not expected_key or not secrets.compare_digest(admin_key, expected_key):
@@ -10193,8 +10254,8 @@ async def migrate_tiers(request: Request, db: Session = Depends(get_db), admin_k
         logger.error(f"[MIGRATION] Error: {e}")
         raise HTTPException(status_code=500, detail="Migration failed")
 @app.get("/debug/echidna-env")
-async def debug_echidna_env(admin_key: str = Query(None)):
-    """Check Echidna installation and environment - requires admin key."""
+async def debug_echidna_env(admin_key: str = Header(None, alias="X-Admin-Key")):
+    """Check Echidna installation and environment - requires X-Admin-Key header."""
     expected_key = os.getenv("ADMIN_KEY")
     if not expected_key or not admin_key or not secrets.compare_digest(admin_key, expected_key):
         raise HTTPException(status_code=403, detail="Admin access required")
