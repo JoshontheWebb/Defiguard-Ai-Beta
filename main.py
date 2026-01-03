@@ -6306,20 +6306,30 @@ async def complete_tier_checkout(
     has_diamond: bool = Query(False),
     username: str = Query(...),
 ):
+    """
+    Complete tier checkout after Stripe payment.
+
+    Security model:
+    1. Validate Stripe session exists and is paid
+    2. Validate URL username matches Stripe metadata (prevents redirect hijacking)
+    3. Re-establish session for the user (handles session expiration during checkout)
+    4. Generate new CSRF token for security
+    """
     logger.debug(f"Complete-tier-checkout request: session_id={session_id}, tier={tier}, has_diamond={has_diamond}, username={username}")
 
     try:
-        session = stripe.checkout.Session.retrieve(session_id)
-        logger.info(f"Retrieved Stripe session: payment_status={session.payment_status}")
+        # Validate Stripe session
+        stripe_session = stripe.checkout.Session.retrieve(session_id)
+        logger.info(f"Retrieved Stripe session: payment_status={stripe_session.payment_status}")
 
         # Security: Validate username matches Stripe session metadata to prevent redirect hijacking
-        metadata_username = session.metadata.get("username") if session.metadata else None
+        metadata_username = stripe_session.metadata.get("username") if stripe_session.metadata else None
         if not metadata_username or metadata_username != username:
             logger.warning(f"Checkout hijack attempt: URL username {username} != metadata username {metadata_username}")
             return RedirectResponse(url="/ui?upgrade=failed&message=Security%20validation%20failed")
 
-        if session.payment_status != "paid":
-            logger.error(f"Payment not completed for {username}, status={session.payment_status}")
+        if stripe_session.payment_status != "paid":
+            logger.error(f"Payment not completed for {username}, status={stripe_session.payment_status}")
             return RedirectResponse(url="/ui?upgrade=failed&message=Payment%20failed")
 
         # Find and update the user
@@ -6365,12 +6375,30 @@ async def complete_tier_checkout(
         
         usage_tracker.set_tier(normalized_tier, has_diamond, username, db)
         usage_tracker.reset_usage(username, db)
-        
-        # Re-establish session
+
+        # Re-establish session completely (handles session expiration during checkout)
+        # This is critical: user's session may have expired during the Stripe checkout flow
         if request is not None:
+            # Clear any stale session data first
+            request.session.clear()
+
+            # Re-establish full session (same as Auth0 callback)
             request.session["user_id"] = user.id
             request.session["username"] = user.username
-            logger.info(f"Session re-established for {username} after successful Stripe payment")
+            request.session["csrf_token"] = secrets.token_urlsafe(32)
+            request.session["csrf_last_refresh"] = datetime.now().isoformat()
+
+            # Preserve auth provider info if available from Stripe metadata
+            if stripe_session.metadata:
+                provider = stripe_session.metadata.get("provider", "unknown")
+                request.session["auth_provider"] = provider
+                request.session["user"] = {
+                    "sub": user.auth0_sub or f"email|{user.id}",
+                    "email": user.email,
+                    "provider": provider
+                }
+
+            logger.info(f"Session fully re-established for {username} after successful Stripe payment (tier: {normalized_tier})")
 
         # Include tier in redirect so frontend can show it immediately
         return RedirectResponse(url=f"/ui?upgrade=success&tier={urllib.parse.quote(normalized_tier)}&message=Tier%20upgrade%20completed")
