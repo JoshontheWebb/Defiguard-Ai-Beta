@@ -3685,18 +3685,26 @@ document.addEventListener("DOMContentLoaded", () => {
           // Pro users: Only show Enterprise upgrade (not Developer)
           else if (tier === "pro") {
             if (pricingTable) {
-              // Hide Free and Developer rows, only show Enterprise
+              // Hide Free, Developer, and Team rows - only show Enterprise
               const rows = pricingTable.querySelectorAll("tbody tr");
               rows.forEach((row, idx) => {
-                // Keep only Enterprise row (last one)
+                // Keep only Enterprise row (last one, idx=3)
                 row.style.display = idx === 3 ? "table-row" : "none";
               });
             }
             if (tierSelector) {
-              // Only show Enterprise option
+              // Only show Enterprise option - use disabled+hidden for cross-browser support
               Array.from(tierSelector.options).forEach(opt => {
-                opt.style.display = opt.value === "enterprise" ? "block" : "none";
-                if (opt.value === "enterprise") opt.selected = true;
+                if (opt.value === "enterprise") {
+                  opt.disabled = false;
+                  opt.hidden = false;
+                  opt.style.display = "block";
+                  opt.selected = true;
+                } else {
+                  opt.disabled = true;
+                  opt.hidden = true;
+                  opt.style.display = "none";
+                }
               });
             }
             // Update header messaging
@@ -3710,14 +3718,24 @@ document.addEventListener("DOMContentLoaded", () => {
             if (pricingTable) {
               const rows = pricingTable.querySelectorAll("tbody tr");
               rows.forEach((row, idx) => {
-                // Hide Free row (first one)
-                row.style.display = idx === 0 ? "none" : "table-row";
+                // Hide Free row (first one) and Developer row (second one - they have it)
+                row.style.display = idx <= 1 ? "none" : "table-row";
               });
             }
             if (tierSelector) {
-              // Hide starter option (they already have it)
+              // Hide starter option (they already have it) and select pro as default
               Array.from(tierSelector.options).forEach(opt => {
-                opt.style.display = opt.value === "starter" ? "none" : "block";
+                if (opt.value === "starter") {
+                  opt.disabled = true;
+                  opt.hidden = true;
+                  opt.style.display = "none";
+                } else {
+                  opt.disabled = false;
+                  opt.hidden = false;
+                  opt.style.display = "block";
+                }
+                // Default to pro for starter users
+                if (opt.value === "pro") opt.selected = true;
               });
             }
           }
@@ -3829,51 +3847,45 @@ document.addEventListener("DOMContentLoaded", () => {
       };
 
       tierSwitchButton?.addEventListener("click", () => {
+        // Show loading state immediately
+        const originalButtonText = tierSwitchButton.textContent;
+        tierSwitchButton.textContent = "⏳ Redirecting to checkout...";
+        tierSwitchButton.disabled = true;
+
         withCsrfToken(async (token) => {
-          if (!token) {
-            usageWarning.textContent = "Unable to establish secure connection.";
-            usageWarning.classList.add("error");
-            console.error(
-              `[ERROR] No CSRF token for tier switch, time=${new Date().toISOString()}`
-            );
-            return;
-          }
-          const selectedTier = tierSelect?.value;
-          if (!selectedTier) {
-            console.error(
-              `[ERROR] tierSelect element not found, time=${new Date().toISOString()}`
-            );
-            usageWarning.textContent = "Error: Tier selection unavailable";
-            usageWarning.classList.add("error");
-            return;
-          }
-          if (!["starter", "pro", "enterprise"].includes(selectedTier)) {
-            console.error(
-              `[ERROR] Invalid tier selected: ${selectedTier}, time=${new Date().toISOString()}`
-            );
-            usageWarning.textContent = `Error: Invalid tier '${selectedTier}'. Choose starter, pro, or enterprise`;
-            usageWarning.classList.add("error");
-            return;
-          }
-          const user = await fetchUsername();
-          if (!user?.username) {
-            console.error("[ERROR] No username found, redirecting to /auth");
-            window.location.href = "/auth";
-            return;
-          }
-          const username = user.username;
-          const effectiveTier = selectedTier;
-          console.log(
-            `[DEBUG] Initiating tier switch: username=${username}, tier=${effectiveTier}, time=${new Date().toISOString()}`
-          );
           try {
+            if (!token) {
+              throw new Error("Unable to establish secure connection. Please refresh the page.");
+            }
+
+            const selectedTier = tierSelect?.value;
+            console.log(`[DEBUG] Upgrade button clicked, selectedTier=${selectedTier}, time=${new Date().toISOString()}`);
+
+            if (!selectedTier) {
+              throw new Error("Tier selection unavailable. Please refresh the page.");
+            }
+
+            if (!["starter", "pro", "enterprise"].includes(selectedTier)) {
+              throw new Error(`Invalid tier '${selectedTier}'. Choose Developer, Team, or Enterprise.`);
+            }
+
+            const user = await fetchUsername();
+            if (!user?.username) {
+              console.error("[ERROR] No username found, redirecting to /auth");
+              window.location.href = "/auth";
+              return;
+            }
+
+            const username = user.username;
+            console.log(`[DEBUG] Initiating tier switch: username=${username}, tier=${selectedTier}, time=${new Date().toISOString()}`);
+
             const requestBody = JSON.stringify({
               username: username,
-              tier: effectiveTier
+              tier: selectedTier
             });
-            console.log(
-              `[DEBUG] Sending /create-tier-checkout request with body: ${requestBody}, time=${new Date().toISOString()}`
-            );
+
+            console.log(`[DEBUG] Sending /create-tier-checkout request with body: ${requestBody}`);
+
             const response = await fetchWithRetry("/create-tier-checkout", {
               method: "POST",
               headers: {
@@ -3883,44 +3895,39 @@ document.addEventListener("DOMContentLoaded", () => {
               },
               body: requestBody,
             }, 3, 2000);
-            console.log(
-              `[DEBUG] /create-tier-checkout response status: ${
-                response.status
-              }, ok: ${response.ok}, headers: ${JSON.stringify([
-                ...response.headers,
-              ])}, time=${new Date().toISOString()}`
-            );
+
+            console.log(`[DEBUG] /create-tier-checkout response status: ${response.status}, ok: ${response.ok}`);
+
             if (!response.ok) {
               const errorData = await response.json().catch(() => ({}));
-              console.error(
-                `[ERROR] /create-tier-checkout failed: status=${
-                  response.status
-                }, detail=${
-                  errorData.detail || "Unknown error"
-                }, response_body=${JSON.stringify(
-                  errorData
-                )}, time=${new Date().toISOString()}`
-              );
-              throw new Error(
-                errorData.detail ||
-                  `Failed to initiate tier upgrade: ${response.status}`
-              );
+              console.error(`[ERROR] /create-tier-checkout failed: status=${response.status}, detail=${errorData.detail || "Unknown error"}`);
+              throw new Error(errorData.detail || `Checkout failed (${response.status}). Please try again.`);
             }
+
             const data = await response.json();
-            console.log(
-              `[DEBUG] Stripe checkout session created: session_url=${
-                data.session_url
-              }, time=${new Date().toISOString()}`
-            );
+            console.log(`[DEBUG] Stripe checkout session response:`, data);
+
+            if (!data.session_url) {
+              console.error("[ERROR] No session_url in response:", data);
+              throw new Error("Checkout session created but no redirect URL received. Please try again.");
+            }
+
+            console.log(`[DEBUG] Redirecting to Stripe: ${data.session_url}`);
             window.location.href = data.session_url;
+
           } catch (error) {
-            console.error(
-              `[ERROR] Tier switch error: ${
-                error.message
-              }, time=${new Date().toISOString()}`
-            );
-            usageWarning.textContent = `Error initiating tier upgrade: ${error.message}`;
-            usageWarning.classList.add("error");
+            console.error(`[ERROR] Tier switch error: ${error.message}`, error);
+
+            // Show error to user
+            if (usageWarning) {
+              usageWarning.textContent = `Upgrade error: ${error.message}`;
+              usageWarning.classList.add("error");
+              usageWarning.style.display = "block";
+            }
+
+            // Reset button state
+            tierSwitchButton.textContent = originalButtonText;
+            tierSwitchButton.disabled = false;
           }
         });
       });
