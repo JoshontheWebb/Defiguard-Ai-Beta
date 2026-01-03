@@ -335,7 +335,7 @@ class CertoraRunner:
             stats_url = f"{job_url}/statsdata.json"
             tried_endpoints.append(stats_url)
             try:
-                logger.debug(f"CertoraRunner: Trying statsdata.json: {stats_url}")
+                logger.info(f"CertoraRunner: Trying statsdata.json: {stats_url}")
                 req = urllib.request.Request(stats_url, headers={
                     "Accept": "application/json",
                     "User-Agent": "DeFiGuard-AI/1.0"
@@ -350,24 +350,32 @@ class CertoraRunner:
 
             except urllib.error.HTTPError as e:
                 if e.code == 404:
-                    logger.debug(f"CertoraRunner: statsdata.json not found (404) - job may still be running")
+                    logger.info(f"CertoraRunner: statsdata.json not found (404) - job may still be running")
                 else:
-                    logger.debug(f"CertoraRunner: statsdata.json returned {e.code}")
+                    logger.info(f"CertoraRunner: statsdata.json returned HTTP {e.code}")
             except Exception as e:
-                logger.debug(f"CertoraRunner: Error fetching statsdata.json: {e}")
+                logger.info(f"CertoraRunner: Error fetching statsdata.json: {e}")
 
             # PRIORITY 2: Try other JSON endpoints
+            # Certora has multiple possible URL structures for output data
             json_endpoints = [
                 f"{job_url}/jobStatus.json",
                 f"{job_url}/output.json",
                 f"{job_url}/results.json",
                 f"{job_url}/verificationProgress.json",
+                # Alternative paths - data might be in subdirectories
+                f"{job_url}/Reports/statsdata.json",
+                f"{job_url}/data/statsdata.json",
+                f"{job_url}/.certora_internal/statsdata.json",
+                # API endpoint patterns
+                f"{job_url}/status",
+                f"{job_url}/api/status",
             ]
 
             for json_url in json_endpoints:
                 tried_endpoints.append(json_url)
                 try:
-                    logger.debug(f"CertoraRunner: Trying endpoint: {json_url}")
+                    logger.info(f"CertoraRunner: Trying endpoint: {json_url}")
                     req = urllib.request.Request(json_url, headers={
                         "Accept": "application/json",
                         "User-Agent": "DeFiGuard-AI/1.0"
@@ -411,18 +419,19 @@ class CertoraRunner:
 
                 except urllib.error.HTTPError as e:
                     if e.code == 404:
-                        logger.debug(f"CertoraRunner: {json_url} not found (404)")
+                        logger.info(f"CertoraRunner: {json_url} not found (404)")
                     else:
-                        logger.debug(f"CertoraRunner: {json_url} returned {e.code}")
+                        logger.info(f"CertoraRunner: {json_url} returned HTTP {e.code}")
                     continue
                 except Exception as e:
-                    logger.debug(f"CertoraRunner: Error fetching {json_url}: {e}")
+                    logger.info(f"CertoraRunner: Error fetching {json_url}: {e}")
                     continue
 
             # PRIORITY 3: Parse the HTML page as fallback
+            # NOTE: Certora uses a React SPA, so server-side HTML fetching only gets the shell
+            logger.info(f"CertoraRunner: All JSON endpoints failed, trying HTML page (SPA shell): {job_url}")
             tried_endpoints.append(job_url)
             try:
-                logger.debug(f"CertoraRunner: Trying HTML page: {job_url}")
                 req = urllib.request.Request(job_url, headers={
                     "Accept": "text/html",
                     "User-Agent": "DeFiGuard-AI/1.0"
