@@ -8275,6 +8275,7 @@ async def websocket_job_status(websocket: WebSocket, job_id: str, token: str = Q
 async def audit_contract(
     file: UploadFile = File(...),
     contract_address: str = Query(None),
+    api_key_id: int = Query(None, description="Assign audit to a specific API key (Pro/Enterprise)"),
     db: Session = Depends(get_db),
     request: Request = None,
     _from_queue: bool = False,
@@ -8324,7 +8325,34 @@ async def audit_contract(
     else:
         current_tier = user.tier
         has_diamond = bool(user.has_diamond)
-    
+
+    # Validate API key assignment (Pro/Enterprise feature)
+    validated_api_key_id = None
+    if api_key_id is not None and not _from_queue:
+        if not user:
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication required to assign audits to API keys"
+            )
+        if current_tier not in ["pro", "enterprise"]:
+            raise HTTPException(
+                status_code=403,
+                detail="API key assignment requires Pro or Enterprise tier"
+            )
+        # Verify the API key belongs to this user and is active
+        api_key_obj = db.query(APIKey).filter(
+            APIKey.id == api_key_id,
+            APIKey.user_id == user.id,
+            APIKey.is_active == True
+        ).first()
+        if not api_key_obj:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid API key. Key must be active and owned by you."
+            )
+        validated_api_key_id = api_key_id
+        logger.info(f"[AUDIT] Assigning audit to API key '{api_key_obj.label}' (id={api_key_id})")
+
     # Initialize locals
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     code_bytes: bytes = b""
