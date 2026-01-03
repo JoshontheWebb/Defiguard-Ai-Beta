@@ -3904,11 +3904,14 @@ document.addEventListener("DOMContentLoaded", () => {
             }
 
             const username = user.username;
-            console.log(`[DEBUG] Initiating tier switch: username=${username}, tier=${selectedTier}, time=${new Date().toISOString()}`);
+            // Get billing interval from toggle (monthly or annual)
+            const billingInterval = document.getElementById("billing-interval")?.value || "monthly";
+            console.log(`[DEBUG] Initiating tier switch: username=${username}, tier=${selectedTier}, interval=${billingInterval}, time=${new Date().toISOString()}`);
 
             const requestBody = JSON.stringify({
               username: username,
-              tier: selectedTier
+              tier: selectedTier,
+              interval: billingInterval
             });
 
             console.log(`[DEBUG] Sending /create-tier-checkout request with body: ${requestBody}`);

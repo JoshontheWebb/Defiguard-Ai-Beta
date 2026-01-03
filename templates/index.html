@@ -427,14 +427,29 @@
                     🔒 All plans include SOC 2 compliant infrastructure • No long-term contracts • Cancel anytime
                 </p>
 
+                <!-- Billing Interval Toggle -->
+                <div class="billing-toggle" style="display: flex; justify-content: center; align-items: center; gap: var(--space-3); margin: var(--space-4) 0;">
+                    <span id="billing-monthly-label" style="font-weight: 600; color: var(--accent);">Monthly</span>
+                    <label class="toggle-switch" style="position: relative; display: inline-block; width: 60px; height: 30px;">
+                        <input type="checkbox" id="billing-interval-toggle" style="opacity: 0; width: 0; height: 0;">
+                        <span class="toggle-slider" style="position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+                            background: var(--bg-tertiary); border-radius: 30px; transition: 0.3s;"></span>
+                    </label>
+                    <span id="billing-annual-label" style="font-weight: 500; color: var(--text-secondary);">
+                        Annual <span style="color: var(--green); font-size: var(--text-sm);">(Save 17%)</span>
+                    </span>
+                </div>
+
                 <!-- Tier Selector -->
                 <div class="form-group">
                     <label for="tier-select">Select Your Plan:</label>
                     <select id="tier-select" aria-label="Select subscription tier">
-                        <option value="starter">Developer - $99/month (Most Popular)</option>
-                        <option value="pro">Team - $349/month (Best Value)</option>
-                        <option value="enterprise">Enterprise - $1,499/month (Protocol-Grade)</option>
+                        <!-- Monthly prices (default) -->
+                        <option value="starter" data-interval="monthly">Developer - $99/month (Most Popular)</option>
+                        <option value="pro" data-interval="monthly">Team - $349/month (Best Value)</option>
+                        <option value="enterprise" data-interval="monthly">Enterprise - $1,499/month (Protocol-Grade)</option>
                     </select>
+                    <input type="hidden" id="billing-interval" value="monthly">
                 </div>
 
                 <button id="tier-switch" class="upgrade-button" aria-label="Upgrade to selected tier">
@@ -1393,6 +1408,130 @@
             </div>
         </div>
     </div>
+
+    <!-- Billing Interval Toggle Script -->
+    <script>
+    (function() {
+        const billingToggle = document.getElementById('billing-interval-toggle');
+        const billingIntervalInput = document.getElementById('billing-interval');
+        const monthlyLabel = document.getElementById('billing-monthly-label');
+        const annualLabel = document.getElementById('billing-annual-label');
+        const tierSelect = document.getElementById('tier-select');
+        const toggleSlider = document.querySelector('.toggle-slider');
+
+        // Pricing data for both intervals
+        const pricing = {
+            monthly: {
+                starter: { label: 'Developer - $99/month (Most Popular)', amount: '$99/mo' },
+                pro: { label: 'Team - $349/month (Best Value)', amount: '$349/mo' },
+                enterprise: { label: 'Enterprise - $1,499/month (Protocol-Grade)', amount: '$1,499/mo' }
+            },
+            annual: {
+                starter: { label: 'Developer - $990/year (2 months free)', amount: '$990/yr' },
+                pro: { label: 'Team - $3,490/year (2 months free)', amount: '$3,490/yr' },
+                enterprise: { label: 'Enterprise - $14,990/year (2 months free)', amount: '$14,990/yr' }
+            }
+        };
+
+        function updatePricingDisplay(interval) {
+            // Update hidden input
+            if (billingIntervalInput) {
+                billingIntervalInput.value = interval;
+            }
+
+            // Update labels styling
+            if (interval === 'annual') {
+                if (monthlyLabel) {
+                    monthlyLabel.style.fontWeight = '500';
+                    monthlyLabel.style.color = 'var(--text-secondary)';
+                }
+                if (annualLabel) {
+                    annualLabel.style.fontWeight = '600';
+                    annualLabel.style.color = 'var(--accent)';
+                }
+                if (toggleSlider) {
+                    toggleSlider.style.background = 'var(--green)';
+                }
+            } else {
+                if (monthlyLabel) {
+                    monthlyLabel.style.fontWeight = '600';
+                    monthlyLabel.style.color = 'var(--accent)';
+                }
+                if (annualLabel) {
+                    annualLabel.style.fontWeight = '500';
+                    annualLabel.style.color = 'var(--text-secondary)';
+                }
+                if (toggleSlider) {
+                    toggleSlider.style.background = 'var(--bg-tertiary)';
+                }
+            }
+
+            // Update tier select options
+            if (tierSelect) {
+                const currentValue = tierSelect.value;
+                Array.from(tierSelect.options).forEach(opt => {
+                    const tier = opt.value;
+                    if (pricing[interval][tier]) {
+                        opt.textContent = pricing[interval][tier].label;
+                    }
+                });
+                tierSelect.value = currentValue;
+            }
+
+            // Update pricing table amounts
+            const pricingAmounts = document.querySelectorAll('.pricing-table .pricing-amount');
+            const amounts = interval === 'annual'
+                ? ['$0', '$990', '$3,490', '$14,990']  // Free, Developer, Team, Enterprise
+                : ['$0', '$99', '$349', '$1,499'];
+            const suffixes = interval === 'annual'
+                ? ['', '/yr', '/yr', '/yr']
+                : ['', '/mo', '/mo', '/mo'];
+
+            pricingAmounts.forEach((el, idx) => {
+                if (idx > 0 && amounts[idx]) {  // Skip free tier
+                    const parent = el.parentElement;
+                    el.textContent = amounts[idx];
+                    // Update suffix if it exists in the same cell
+                    const nextText = el.nextSibling;
+                    if (nextText && nextText.nodeType === 3) {
+                        nextText.textContent = suffixes[idx];
+                    }
+                }
+            });
+
+            console.log(`[BILLING] Switched to ${interval} billing`);
+        }
+
+        // Toggle switch event listener
+        if (billingToggle) {
+            billingToggle.addEventListener('change', function() {
+                const interval = this.checked ? 'annual' : 'monthly';
+                updatePricingDisplay(interval);
+            });
+
+            // Add toggle knob styling
+            const style = document.createElement('style');
+            style.textContent = `
+                .toggle-slider:before {
+                    position: absolute;
+                    content: "";
+                    height: 22px;
+                    width: 22px;
+                    left: 4px;
+                    bottom: 4px;
+                    background: white;
+                    border-radius: 50%;
+                    transition: 0.3s;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+                }
+                #billing-interval-toggle:checked + .toggle-slider:before {
+                    transform: translateX(30px);
+                }
+            `;
+            document.head.appendChild(style);
+        }
+    })();
+    </script>
 
 </body>
 </html>

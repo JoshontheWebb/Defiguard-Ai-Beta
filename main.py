@@ -1865,16 +1865,10 @@ async def callback(request: Request):
                             stripe_tier = active_sub.metadata.get('tier')
 
                             if not stripe_tier:
-                                # Fallback: determine tier from price ID
+                                # Fallback: determine tier from price ID (supports both monthly AND annual)
                                 price_id = active_sub['items']['data'][0]['price']['id'] if active_sub.get('items', {}).get('data') else None
-                                price_to_tier = {
-                                    os.getenv("STRIPE_PRICE_STARTER"): "starter",
-                                    os.getenv("STRIPE_PRICE_PRO"): "pro",
-                                    os.getenv("STRIPE_PRICE_ENTERPRISE"): "enterprise",
-                                    os.getenv("STRIPE_PRICE_BEGINNER"): "starter",
-                                    os.getenv("STRIPE_PRICE_DIAMOND"): "diamond",
-                                }
-                                stripe_tier = price_to_tier.get(price_id, "free")
+                                # Use centralized PRICE_TO_TIER_MAP (defined later, available at runtime)
+                                stripe_tier = PRICE_TO_TIER_MAP.get(price_id, "free") if price_id else "free"
 
                             logger.info(f"[CALLBACK] Restored tier from Stripe for {email}: {stripe_tier}")
                 except stripe.error.StripeError as e:
@@ -3170,17 +3164,10 @@ def verify_tier_with_stripe(user, db: Session) -> str:
         stripe_tier = active_sub.metadata.get('tier')
 
         if not stripe_tier:
-            # Fallback: determine tier from price ID
+            # Fallback: determine tier from price ID (supports both monthly AND annual prices)
             price_id = active_sub['items']['data'][0]['price']['id'] if active_sub.get('items', {}).get('data') else None
-
-            price_to_tier = {
-                os.getenv("STRIPE_PRICE_STARTER"): "starter",
-                os.getenv("STRIPE_PRICE_PRO"): "pro",
-                os.getenv("STRIPE_PRICE_ENTERPRISE"): "enterprise",
-                os.getenv("STRIPE_PRICE_BEGINNER"): "starter",  # Legacy
-                os.getenv("STRIPE_PRICE_DIAMOND"): "diamond",
-            }
-            stripe_tier = price_to_tier.get(price_id, "free")
+            # Use centralized PRICE_TO_TIER_MAP (defined later, available at runtime)
+            stripe_tier = PRICE_TO_TIER_MAP.get(price_id, "free") if price_id else "free"
 
         # Update user if tier doesn't match
         if user.tier != stripe_tier:
@@ -3211,27 +3198,97 @@ import csv
 
 # ============================================================================
 # STRIPE PRICE IDS (Required environment variables - no hardcoded fallbacks)
+# Supports both MONTHLY and ANNUAL billing for each tier
 # ============================================================================
-STRIPE_PRICE_STARTER = os.getenv("STRIPE_PRICE_STARTER")
-STRIPE_PRICE_PRO = os.getenv("STRIPE_PRICE_PRO")
-STRIPE_PRICE_ENTERPRISE = os.getenv("STRIPE_PRICE_ENTERPRISE")
+
+# MONTHLY PRICES (default)
+STRIPE_PRICE_STARTER_MONTHLY = os.getenv("STRIPE_PRICE_STARTER_MONTHLY") or os.getenv("STRIPE_PRICE_STARTER")
+STRIPE_PRICE_PRO_MONTHLY = os.getenv("STRIPE_PRICE_PRO_MONTHLY") or os.getenv("STRIPE_PRICE_PRO")
+STRIPE_PRICE_ENTERPRISE_MONTHLY = os.getenv("STRIPE_PRICE_ENTERPRISE_MONTHLY") or os.getenv("STRIPE_PRICE_ENTERPRISE")
+
+# ANNUAL PRICES (discounted - typically 2 months free)
+STRIPE_PRICE_STARTER_ANNUAL = os.getenv("STRIPE_PRICE_STARTER_ANNUAL")
+STRIPE_PRICE_PRO_ANNUAL = os.getenv("STRIPE_PRICE_PRO_ANNUAL")
+STRIPE_PRICE_ENTERPRISE_ANNUAL = os.getenv("STRIPE_PRICE_ENTERPRISE_ANNUAL")
+
+# Backward compatibility aliases
+STRIPE_PRICE_STARTER = STRIPE_PRICE_STARTER_MONTHLY
+STRIPE_PRICE_PRO = STRIPE_PRICE_PRO_MONTHLY
+STRIPE_PRICE_ENTERPRISE = STRIPE_PRICE_ENTERPRISE_MONTHLY
 
 # Legacy tier support (optional - only needed if supporting old subscriptions)
 STRIPE_PRICE_BEGINNER = os.getenv("STRIPE_PRICE_BEGINNER")  # Maps to starter
 STRIPE_PRICE_DIAMOND = os.getenv("STRIPE_PRICE_DIAMOND")    # Diamond add-on
 STRIPE_METERED_PRICE_DIAMOND = os.getenv("STRIPE_METERED_PRICE_DIAMOND")  # Metered billing
 
+# Build comprehensive price-to-tier mapping (includes both monthly AND annual prices)
+def build_price_to_tier_map() -> dict:
+    """Build mapping from any Stripe price ID to its tier name."""
+    mapping = {}
+    # Monthly prices
+    if STRIPE_PRICE_STARTER_MONTHLY:
+        mapping[STRIPE_PRICE_STARTER_MONTHLY] = "starter"
+    if STRIPE_PRICE_PRO_MONTHLY:
+        mapping[STRIPE_PRICE_PRO_MONTHLY] = "pro"
+    if STRIPE_PRICE_ENTERPRISE_MONTHLY:
+        mapping[STRIPE_PRICE_ENTERPRISE_MONTHLY] = "enterprise"
+    # Annual prices
+    if STRIPE_PRICE_STARTER_ANNUAL:
+        mapping[STRIPE_PRICE_STARTER_ANNUAL] = "starter"
+    if STRIPE_PRICE_PRO_ANNUAL:
+        mapping[STRIPE_PRICE_PRO_ANNUAL] = "pro"
+    if STRIPE_PRICE_ENTERPRISE_ANNUAL:
+        mapping[STRIPE_PRICE_ENTERPRISE_ANNUAL] = "enterprise"
+    # Legacy prices
+    if STRIPE_PRICE_BEGINNER:
+        mapping[STRIPE_PRICE_BEGINNER] = "starter"
+    if STRIPE_PRICE_DIAMOND:
+        mapping[STRIPE_PRICE_DIAMOND] = "diamond"
+    return mapping
+
+PRICE_TO_TIER_MAP = build_price_to_tier_map()
+
+def get_price_for_tier(tier: str, interval: str = "monthly") -> Optional[str]:
+    """Get the Stripe price ID for a tier and billing interval."""
+    if interval == "annual":
+        prices = {
+            "starter": STRIPE_PRICE_STARTER_ANNUAL,
+            "pro": STRIPE_PRICE_PRO_ANNUAL,
+            "enterprise": STRIPE_PRICE_ENTERPRISE_ANNUAL,
+        }
+    else:  # monthly (default)
+        prices = {
+            "starter": STRIPE_PRICE_STARTER_MONTHLY,
+            "beginner": STRIPE_PRICE_BEGINNER or STRIPE_PRICE_STARTER_MONTHLY,
+            "pro": STRIPE_PRICE_PRO_MONTHLY,
+            "enterprise": STRIPE_PRICE_ENTERPRISE_MONTHLY,
+            "diamond": STRIPE_PRICE_DIAMOND,
+        }
+    return prices.get(tier)
+
 # Log warnings for missing required price IDs
 _missing_prices = []
-if not STRIPE_PRICE_STARTER:
-    _missing_prices.append("STRIPE_PRICE_STARTER")
-if not STRIPE_PRICE_PRO:
-    _missing_prices.append("STRIPE_PRICE_PRO")
-if not STRIPE_PRICE_ENTERPRISE:
-    _missing_prices.append("STRIPE_PRICE_ENTERPRISE")
+if not STRIPE_PRICE_STARTER_MONTHLY:
+    _missing_prices.append("STRIPE_PRICE_STARTER_MONTHLY (or STRIPE_PRICE_STARTER)")
+if not STRIPE_PRICE_PRO_MONTHLY:
+    _missing_prices.append("STRIPE_PRICE_PRO_MONTHLY (or STRIPE_PRICE_PRO)")
+if not STRIPE_PRICE_ENTERPRISE_MONTHLY:
+    _missing_prices.append("STRIPE_PRICE_ENTERPRISE_MONTHLY (or STRIPE_PRICE_ENTERPRISE)")
 
 if _missing_prices:
-    logger.warning(f"[STRIPE] Missing price IDs (checkout will fail): {', '.join(_missing_prices)}")
+    logger.warning(f"[STRIPE] Missing MONTHLY price IDs (checkout will fail): {', '.join(_missing_prices)}")
+
+# Check annual prices (optional but recommended)
+_missing_annual = []
+if not STRIPE_PRICE_STARTER_ANNUAL:
+    _missing_annual.append("STRIPE_PRICE_STARTER_ANNUAL")
+if not STRIPE_PRICE_PRO_ANNUAL:
+    _missing_annual.append("STRIPE_PRICE_PRO_ANNUAL")
+if not STRIPE_PRICE_ENTERPRISE_ANNUAL:
+    _missing_annual.append("STRIPE_PRICE_ENTERPRISE_ANNUAL")
+
+if _missing_annual:
+    logger.info(f"[STRIPE] Annual pricing not configured (optional): {', '.join(_missing_annual)}")
 
 # ============================================================================
 # TIER LIMITS AND MAPPING
@@ -6051,6 +6108,7 @@ class TierUpgradeRequest(BaseModel):
     username: Optional[str] = None
     tier: str
     has_diamond: bool = False
+    interval: str = "monthly"  # "monthly" or "annual"
 
 @app.get("/tier")
 async def get_tier(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
@@ -6171,7 +6229,14 @@ async def get_tier(request: Request, db: Session = Depends(get_db)) -> dict[str,
     }
 
 @app.post("/set-tier/{username}/{tier}")
-async def set_tier(username: str, tier: str, request: Request, has_diamond: bool = Query(False), db: Session = Depends(get_db)):
+async def set_tier(
+    username: str,
+    tier: str,
+    request: Request,
+    has_diamond: bool = Query(False),
+    interval: str = Query("monthly", description="Billing interval: 'monthly' or 'annual'"),
+    db: Session = Depends(get_db)
+):
     await verify_csrf_token(request)
 
     # Security: Validate session user matches path username to prevent privilege escalation
@@ -6182,7 +6247,11 @@ async def set_tier(username: str, tier: str, request: Request, has_diamond: bool
         logger.warning(f"Tier bypass attempt: session user {session_username} tried to modify {username}")
         raise HTTPException(status_code=403, detail="Cannot modify another user's tier")
 
-    logger.debug(f"Set-tier request for {username}, tier: {tier}, has_diamond: {has_diamond}")
+    # Validate interval parameter
+    if interval not in ["monthly", "annual"]:
+        raise HTTPException(status_code=400, detail="Invalid billing interval. Use 'monthly' or 'annual'")
+
+    logger.debug(f"Set-tier request for {username}, tier: {tier}, interval: {interval}, has_diamond: {has_diamond}")
 
     user = db.query(User).filter(User.username == username).first()
     if not user:
@@ -6211,46 +6280,55 @@ async def set_tier(username: str, tier: str, request: Request, has_diamond: bool
         with open(lock_file, "w") as f:
             f.write(str(os.getpid()))
         
-        # Price mapping with both old and new tier names
-        price_map = {
-            "starter": STRIPE_PRICE_STARTER,
-            "beginner": STRIPE_PRICE_BEGINNER,  # Legacy
-            "pro": STRIPE_PRICE_PRO,
-            "enterprise": STRIPE_PRICE_ENTERPRISE,
-            "diamond": STRIPE_PRICE_DIAMOND  # Legacy
-        }
-        
-        price_id = price_map.get(tier)
+        # Get price ID based on tier and billing interval (monthly/annual)
+        price_id = get_price_for_tier(tier, interval)
+
+        # If annual price not configured, fall back to monthly
+        if not price_id and interval == "annual":
+            logger.warning(f"[STRIPE] Annual price not configured for {tier}, falling back to monthly")
+            price_id = get_price_for_tier(tier, "monthly")
+
         if not price_id:
-            logger.error(f"Invalid price_id for tier {tier}: price_id={price_id}")
-            raise HTTPException(status_code=400, detail="Cannot downgrade or select invalid tier")
-        
-        # Check all required price IDs are set
+            logger.error(f"Invalid price_id for tier {tier} ({interval}): price_id={price_id}")
+            raise HTTPException(status_code=400, detail=f"Cannot select tier '{tier}'. Price not configured.")
+
+        # Check monthly prices are set (required)
         required_prices = {
-            "STRIPE_PRICE_STARTER": STRIPE_PRICE_STARTER,
-            "STRIPE_PRICE_PRO": STRIPE_PRICE_PRO,
-            "STRIPE_PRICE_ENTERPRISE": STRIPE_PRICE_ENTERPRISE
+            "STRIPE_PRICE_STARTER": STRIPE_PRICE_STARTER_MONTHLY,
+            "STRIPE_PRICE_PRO": STRIPE_PRICE_PRO_MONTHLY,
+            "STRIPE_PRICE_ENTERPRISE": STRIPE_PRICE_ENTERPRISE_MONTHLY
         }
         missing_prices = [name for name, value in required_prices.items() if not value]
-        
+
         if missing_prices:
             logger.error(f"Stripe checkout creation failed for {username} to {tier}: Missing Stripe price IDs: {', '.join(missing_prices)}")
             raise HTTPException(status_code=503, detail=f"Payment processing unavailable: Missing Stripe price IDs: {', '.join(missing_prices)}")
         
         line_items: list[dict[str, Any]] = []
-        
+
+        # Build line items using interval-aware pricing
         if tier in ["beginner", "starter", "pro"]:
             line_items.append({"price": price_id, "quantity": 1})
             if has_diamond and tier == "pro" and not user.has_diamond:
-                line_items.append({"price": STRIPE_PRICE_DIAMOND, "quantity": 1})
+                diamond_price = get_price_for_tier("diamond", interval) or STRIPE_PRICE_DIAMOND
+                if diamond_price:
+                    line_items.append({"price": diamond_price, "quantity": 1})
         elif tier in ["diamond", "enterprise"] and user.tier not in ["pro", "diamond", "enterprise"]:
-            line_items.append({"price": STRIPE_PRICE_PRO, "quantity": 1})
-            line_items.append({"price": STRIPE_PRICE_DIAMOND if tier == "diamond" else STRIPE_PRICE_ENTERPRISE, "quantity": 1})
+            # User needs to upgrade from free/starter - include pro tier first
+            pro_price = get_price_for_tier("pro", interval) or STRIPE_PRICE_PRO_MONTHLY
+            if pro_price:
+                line_items.append({"price": pro_price, "quantity": 1})
+            if tier == "diamond":
+                diamond_price = get_price_for_tier("diamond", interval) or STRIPE_PRICE_DIAMOND
+                if diamond_price:
+                    line_items.append({"price": diamond_price, "quantity": 1})
+            else:
+                line_items.append({"price": price_id, "quantity": 1})
         elif tier in ["diamond", "enterprise"] and user.tier == "pro":
-            line_items.append({"price": STRIPE_PRICE_DIAMOND if tier == "diamond" else STRIPE_PRICE_ENTERPRISE, "quantity": 1})
-        
-        logger.debug(f"Creating Stripe checkout session for {username} to {tier}, line_items={line_items}")
-        
+            line_items.append({"price": price_id, "quantity": 1})
+
+        logger.debug(f"Creating Stripe checkout session for {username} to {tier} ({interval}), line_items={line_items}")
+
         # Use dynamic base URL from request to ensure redirects go to current instance
         base_url = f"{request.url.scheme}://{request.url.netloc}"
 
@@ -6260,7 +6338,7 @@ async def set_tier(username: str, tier: str, request: Request, has_diamond: bool
             mode="subscription",
             success_url=f"{base_url}/complete-tier-checkout?session_id={{CHECKOUT_SESSION_ID}}&tier={urllib.parse.quote(tier)}&has_diamond={urllib.parse.quote(str(has_diamond).lower())}&username={urllib.parse.quote(username)}",
             cancel_url=f"{base_url}/ui?username={urllib.parse.quote(username)}",
-            metadata={"username": username, "tier": tier, "has_diamond": str(has_diamond).lower()}
+            metadata={"username": username, "tier": tier, "has_diamond": str(has_diamond).lower(), "billing_interval": interval}
         )
         
         logger.info(f"Redirecting {username} to Stripe checkout for {tier} tier, has_diamond: {has_diamond}")
@@ -6374,32 +6452,32 @@ async def create_tier_checkout(
 
     tier = tier_request.tier
     has_diamond = tier_request.has_diamond
-    
+    interval = tier_request.interval if tier_request.interval in ["monthly", "annual"] else "monthly"
+
     # Map old tier names to new
     tier_mapping = {
         "beginner": "starter",
         "diamond": "enterprise"
     }
     normalized_tier = tier_mapping.get(tier, tier)
-    
+
     if normalized_tier not in level_map and tier not in level_map:
         raise HTTPException(status_code=400, detail=f"Invalid tier: {tier}")
-    
+
     if tier == "diamond" and user.tier != "pro":
         raise HTTPException(status_code=400, detail="Diamond add-on requires Pro tier")
-    
+
     if not STRIPE_API_KEY:
         raise HTTPException(status_code=503, detail="Payment processing unavailable – contact admin")
-    
-    price_map = {
-        "starter": STRIPE_PRICE_STARTER,
-        "beginner": STRIPE_PRICE_BEGINNER,
-        "pro": STRIPE_PRICE_PRO,
-        "enterprise": STRIPE_PRICE_ENTERPRISE,
-        "diamond": STRIPE_PRICE_DIAMOND
-    }
-    
-    price_id = price_map.get(tier)
+
+    # Get price ID based on tier and billing interval (monthly/annual)
+    price_id = get_price_for_tier(tier, interval)
+
+    # If annual price not configured, fall back to monthly
+    if not price_id and interval == "annual":
+        logger.warning(f"[STRIPE] Annual price not configured for {tier}, falling back to monthly")
+        price_id = get_price_for_tier(tier, "monthly")
+
     if not price_id:
         raise HTTPException(status_code=400, detail="Invalid tier for checkout")
     
@@ -6425,10 +6503,11 @@ async def create_tier_checkout(
                 "username": effective_username,
                 "tier": tier,
                 "has_diamond": "true" if has_diamond else "false",  # JSON-compatible boolean
-                "user_id": str(user.id)
+                "user_id": str(user.id),
+                "billing_interval": interval
             }
         )
-        logger.info(f"Stripe session created for {effective_username} → {tier} (diamond: {has_diamond})")
+        logger.info(f"Stripe session created for {effective_username} → {tier} ({interval}) (diamond: {has_diamond})")
         return {"session_url": session.url}
     except Exception as e:
         logger.error(f"Stripe session creation failed for {effective_username}: {str(e)}")
