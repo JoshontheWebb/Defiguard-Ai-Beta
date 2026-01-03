@@ -107,6 +107,316 @@ const DebugTracer = {
 };
 
 // ---------------------------------------------------------------------
+// APP INITIALIZATION MANAGER - Reliable startup with state machine
+// Prevents race conditions and provides recovery from failures
+// ---------------------------------------------------------------------
+const AppInitManager = {
+    // Initialization states
+    STATE: {
+        IDLE: 'idle',
+        STARTING: 'starting',
+        DOM_READY: 'dom_ready',
+        CRITICAL_INIT: 'critical_init',
+        FULL_INIT: 'full_init',
+        READY: 'ready',
+        FAILED: 'failed',
+        RECOVERING: 'recovering'
+    },
+
+    currentState: 'idle',
+    initAttempts: 0,
+    maxInitAttempts: 3,
+    initStartTime: null,
+    criticalElementsReady: false,
+    lastError: null,
+    recoveryTimer: null,
+
+    // Track what's been initialized
+    initialized: {
+        hamburger: false,
+        auth: false,
+        tier: false,
+        websocket: false,
+        eventListeners: false
+    },
+
+    // Transition to new state with logging
+    setState(newState, context = {}) {
+        const oldState = this.currentState;
+        this.currentState = newState;
+        if (DEBUG_MODE) {
+            console.log(`%c[AppInit] ${oldState} → ${newState}`, 'color: #00aaff; font-weight: bold', context);
+        }
+
+        // Dispatch custom event for state changes
+        window.dispatchEvent(new CustomEvent('appInitStateChange', {
+            detail: { oldState, newState, context }
+        }));
+    },
+
+    // Start initialization with tracking
+    start() {
+        if (this.currentState === this.STATE.READY) {
+            debugLog('[AppInit] Already initialized, skipping');
+            return;
+        }
+
+        this.initAttempts++;
+        this.initStartTime = Date.now();
+        this.setState(this.STATE.STARTING, { attempt: this.initAttempts });
+
+        // Set a timeout for initialization - if it takes too long, something is wrong
+        if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+        this.recoveryTimer = setTimeout(() => {
+            if (this.currentState !== this.STATE.READY) {
+                console.warn('[AppInit] Initialization timeout - triggering recovery');
+                this.recover('timeout');
+            }
+        }, 20000); // 20 second timeout
+    },
+
+    // Mark critical elements as ready (hamburger, sidebar, etc.)
+    markCriticalReady() {
+        this.criticalElementsReady = true;
+        this.setState(this.STATE.CRITICAL_INIT);
+    },
+
+    // Mark a component as initialized
+    markInitialized(component) {
+        if (component in this.initialized) {
+            this.initialized[component] = true;
+            debugLog(`[AppInit] Component initialized: ${component}`);
+        }
+
+        // Check if all critical components are ready
+        if (this.initialized.hamburger && this.initialized.eventListeners) {
+            this.setState(this.STATE.FULL_INIT);
+        }
+
+        // Check if fully ready
+        if (Object.values(this.initialized).every(v => v)) {
+            this.complete();
+        }
+    },
+
+    // Mark initialization as complete
+    complete() {
+        if (this.recoveryTimer) {
+            clearTimeout(this.recoveryTimer);
+            this.recoveryTimer = null;
+        }
+
+        const duration = Date.now() - this.initStartTime;
+        this.setState(this.STATE.READY, { duration: `${duration}ms` });
+
+        // Remove any loading indicators
+        const loader = document.getElementById('app-init-loader');
+        if (loader) loader.style.display = 'none';
+
+        // Show main content
+        document.body.classList.add('app-ready');
+        document.body.classList.remove('app-loading', 'app-error');
+    },
+
+    // Handle initialization failure
+    fail(error, component = 'unknown') {
+        this.lastError = error;
+        console.error(`[AppInit] Failure in ${component}:`, error);
+        this.setState(this.STATE.FAILED, { error: error.message, component });
+
+        // Auto-recover if we haven't exceeded attempts
+        if (this.initAttempts < this.maxInitAttempts) {
+            this.recover('error');
+        } else {
+            this.showErrorUI();
+        }
+    },
+
+    // Attempt recovery
+    recover(reason = 'manual') {
+        if (this.currentState === this.STATE.RECOVERING) {
+            debugLog('[AppInit] Already recovering, skipping');
+            return;
+        }
+
+        this.setState(this.STATE.RECOVERING, { reason });
+        debugLog('[AppInit] Recovery triggered:', reason);
+
+        // Reset state
+        Object.keys(this.initialized).forEach(k => {
+            this.initialized[k] = false;
+        });
+
+        // Short delay then retry
+        setTimeout(() => {
+            // Re-initialize critical components
+            HamburgerManager.initialized = false;
+            HamburgerManager.initWithRetry();
+
+            // Re-fetch critical data
+            if (typeof TierCache !== 'undefined') {
+                TierCache.data = null;
+                TierCache.timestamp = 0;
+            }
+
+            // Reconnect WebSocket if available
+            if (typeof WebSocketManager !== 'undefined' && WebSocketManager.wsUrl) {
+                WebSocketManager.reconnect();
+            }
+
+            // Restart initialization
+            this.start();
+        }, 1000);
+    },
+
+    // Show user-friendly error with retry button
+    showErrorUI() {
+        document.body.classList.add('app-error');
+        document.body.classList.remove('app-loading');
+
+        // Check if error UI already exists
+        if (document.getElementById('app-error-overlay')) return;
+
+        const overlay = document.createElement('div');
+        overlay.id = 'app-error-overlay';
+        overlay.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 99999;
+            color: white;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        `;
+        overlay.innerHTML = `
+            <div style="text-align: center; max-width: 400px; padding: 20px;">
+                <div style="font-size: 48px; margin-bottom: 20px;">⚠️</div>
+                <h2 style="margin: 0 0 16px; font-size: 24px;">Loading Issue Detected</h2>
+                <p style="margin: 0 0 24px; color: #aaa; line-height: 1.5;">
+                    Some features didn't load correctly. This is usually temporary.
+                </p>
+                <button id="app-retry-btn" style="
+                    background: linear-gradient(135deg, #9b59b6, #3498db);
+                    border: none;
+                    color: white;
+                    padding: 14px 32px;
+                    border-radius: 8px;
+                    font-size: 16px;
+                    font-weight: 600;
+                    cursor: pointer;
+                    margin-right: 12px;
+                ">🔄 Retry</button>
+                <button id="app-refresh-btn" style="
+                    background: transparent;
+                    border: 1px solid #666;
+                    color: #aaa;
+                    padding: 14px 24px;
+                    border-radius: 8px;
+                    font-size: 16px;
+                    cursor: pointer;
+                ">Hard Refresh</button>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        document.getElementById('app-retry-btn').onclick = () => {
+            overlay.remove();
+            this.initAttempts = 0; // Reset attempts
+            this.recover('user_retry');
+        };
+
+        document.getElementById('app-refresh-btn').onclick = () => {
+            window.location.reload(true);
+        };
+    },
+
+    // Check if app is ready
+    isReady() {
+        return this.currentState === this.STATE.READY;
+    }
+};
+
+// ---------------------------------------------------------------------
+// GLOBAL ERROR BOUNDARY - Catch unhandled errors and promise rejections
+// ---------------------------------------------------------------------
+window.addEventListener('error', (event) => {
+    console.error('[GlobalError] Unhandled error:', event.error);
+
+    // Only trigger recovery if we're still initializing
+    if (AppInitManager.currentState !== AppInitManager.STATE.READY) {
+        AppInitManager.fail(event.error || new Error(event.message), 'global');
+    }
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+    console.error('[GlobalError] Unhandled promise rejection:', event.reason);
+
+    // Only trigger recovery if we're still initializing
+    if (AppInitManager.currentState !== AppInitManager.STATE.READY) {
+        // Check if it's a critical error (network/fetch failures)
+        const reason = event.reason;
+        const isCritical = reason instanceof TypeError ||
+            (reason?.message && (
+                reason.message.includes('fetch') ||
+                reason.message.includes('network') ||
+                reason.message.includes('CSRF')
+            ));
+
+        if (isCritical) {
+            AppInitManager.fail(reason || new Error('Promise rejection'), 'async');
+        }
+    }
+});
+
+// ---------------------------------------------------------------------
+// ENHANCED VISIBILITY/BFCACHE HANDLER - Re-initialize on page restore
+// ---------------------------------------------------------------------
+window.addEventListener('pageshow', (event) => {
+    if (event.persisted) {
+        // Page restored from bfcache (common after Stripe redirect)
+        debugLog('[PageShow] Page restored from bfcache - reinitializing');
+
+        // Only recover if not already ready or if there was an error
+        if (AppInitManager.currentState === AppInitManager.STATE.FAILED ||
+            AppInitManager.currentState === AppInitManager.STATE.IDLE) {
+            AppInitManager.recover('bfcache');
+        } else {
+            // Just reinit hamburger and reconnect websocket
+            HamburgerManager.initWithRetry();
+            if (typeof WebSocketManager !== 'undefined' && WebSocketManager.wsUrl) {
+                WebSocketManager.reconnect();
+            }
+        }
+    }
+});
+
+// Also handle page becoming visible again after being hidden
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && AppInitManager.currentState === AppInitManager.STATE.READY) {
+        debugLog('[Visibility] Page visible again - checking connections');
+
+        // Reconnect WebSocket if needed
+        if (typeof WebSocketManager !== 'undefined' && !WebSocketManager.isConnected()) {
+            WebSocketManager.reconnect();
+        }
+    }
+});
+
+// Handle window focus - user returned to tab
+window.addEventListener('focus', () => {
+    if (AppInitManager.currentState === AppInitManager.STATE.FAILED) {
+        debugLog('[Focus] Window focused with failed state - attempting recovery');
+        AppInitManager.recover('focus');
+    }
+});
+
+// ---------------------------------------------------------------------
 // RESOURCE CLEANUP MANAGER - Prevents memory leaks from intervals/WebSockets
 // ---------------------------------------------------------------------
 const ResourceManager = {
@@ -321,6 +631,7 @@ const HamburgerManager = {
 
         hamburger._hamburgerInitialized = true;
         this.initialized = true;
+        AppInitManager.markInitialized('hamburger');
         debugLog('[Hamburger] Initialized successfully');
         return true;
     },
@@ -2556,6 +2867,12 @@ function waitForDOM(selectors, callback, maxAttempts = 50, interval = 300) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  // ═══════════════════════════════════════════════════════════════════════
+  // START APP INITIALIZATION - Track state for reliable startup
+  // ═══════════════════════════════════════════════════════════════════════
+  AppInitManager.start();
+  AppInitManager.setState(AppInitManager.STATE.DOM_READY);
+
   // Section2: CSRF Token Management
   // Cache token for 10 seconds to reduce latency, but refresh before expiry
   // Backend tokens last 15 minutes, so 10-second cache is safe
@@ -2765,8 +3082,11 @@ document.addEventListener("DOMContentLoaded", () => {
             });
             hamburger._hamburgerInitialized = true;
             HamburgerManager.initialized = true;
+            AppInitManager.markInitialized('hamburger');
             DebugTracer.exit('hamburger_init', _hamburgerStart, { success: true });
           } else {
+            // Already initialized - still mark it
+            AppInitManager.markInitialized('hamburger');
             DebugTracer.exit('hamburger_init', _hamburgerStart, { skipped: 'already_initialized' });
           }
           debugLog('[INIT] Hamburger menu initialized');
@@ -2971,7 +3291,10 @@ document.addEventListener("DOMContentLoaded", () => {
         const wsUrl = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws-audit-log?token=${encodeURIComponent(wsToken)}`;
 
         WebSocketManager.connect(wsUrl, {
-          onConnect: () => logMessage("Connected to audit log"),
+          onConnect: () => {
+            logMessage("Connected to audit log");
+            AppInitManager.markInitialized('websocket');
+          },
           onMessage: (e) => {
             try {
               const data = JSON.parse(e.data);
@@ -2981,6 +3304,8 @@ document.addEventListener("DOMContentLoaded", () => {
           onDisconnect: () => logMessage("Disconnected from audit log (will auto-reconnect)")
         });
       } else {
+        // No WebSocket token - still mark as "initialized" (not required for basic functionality)
+        AppInitManager.markInitialized('websocket');
         debugLog("[AUDIT] Skipping WebSocket connection - no auth token available");
       }
 
@@ -6679,12 +7004,22 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           await fetchTierData();
           await updateAuthStatus();
         }
+
+        // Mark auth and tier as initialized
+        AppInitManager.markInitialized('auth');
+        AppInitManager.markInitialized('tier');
+        AppInitManager.markInitialized('eventListeners');
+
         DebugTracer.exit('init_payment_or_tier', _initPaymentStart, { success: true });
       } catch (initErr) {
         DebugTracer.error('init_payment_or_tier', initErr);
         console.error("[INIT] Error during tier/payment initialization:", initErr);
         DebugTracer.exit('init_payment_or_tier', _initPaymentStart, { error: initErr.message });
-        // Still continue with rest of initialization
+
+        // Mark as initialized anyway so we don't block - the UI can still function
+        AppInitManager.markInitialized('auth');
+        AppInitManager.markInitialized('tier');
+        AppInitManager.markInitialized('eventListeners');
       }
 
       // Calm, efficient auth+tier refresh every 30 seconds (no spam)
