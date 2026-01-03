@@ -5997,8 +5997,46 @@ async def get_tier(request: Request, db: Session = Depends(get_db)) -> dict[str,
 
     user = db.query(User).filter(User.username == session_username).first()
     if not user:
-        logger.warning(f"Tier fetch: User {session_username} not found in database")
-        raise HTTPException(status_code=404, detail="User not found")
+        # Auto-recover: User exists in session but not in DB (ephemeral DB was wiped)
+        # Create user with free tier - they can login again to sync with Stripe
+        logger.warning(f"Tier fetch: User {session_username} not found in database - auto-creating with free tier")
+
+        # Extract email from session or generate placeholder
+        session_email = request.session.get("user", {}).get("email")
+        if not session_email:
+            # Fallback: convert username to email format if needed
+            session_email = session_username if "@" in session_username else f"{session_username}@placeholder.local"
+
+        # Create minimal user record to prevent loading failures
+        user = User(
+            username=session_username,
+            email=session_email,
+            tier="free",
+            audit_history="[]",
+            last_reset=datetime.now(timezone.utc),
+            has_diamond=False
+        )
+
+        try:
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            logger.info(f"[AUTO-RECOVERY] Created user {session_username} with free tier - login again to sync with Stripe")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"[AUTO-RECOVERY] Failed to create user {session_username}: {e}")
+            # Return free tier defaults instead of 404
+            return {
+                "tier": "free",
+                "size_limit": "250KB",
+                "feature_flags": usage_tracker.feature_flags["free"],
+                "api_key": None,
+                "audit_count": 0,
+                "audit_limit": FREE_LIMIT,
+                "has_diamond": False,
+                "username": session_username,
+                "recovery_note": "Session restored with free tier - login again to sync subscription"
+            }
     
     user_tier = user.tier
     
@@ -6233,8 +6271,30 @@ async def create_tier_checkout(
     
     user = db.query(User).filter(User.username == effective_username).first()
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
+        # Auto-recover: User exists in session but not in DB (ephemeral DB was wiped)
+        logger.warning(f"Checkout: User {effective_username} not found in database - auto-creating")
+        session_email = request.session.get("user", {}).get("email")
+        if not session_email:
+            session_email = effective_username if "@" in effective_username else f"{effective_username}@placeholder.local"
+
+        user = User(
+            username=effective_username,
+            email=session_email,
+            tier="free",
+            audit_history="[]",
+            last_reset=datetime.now(timezone.utc),
+            has_diamond=False
+        )
+        try:
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            logger.info(f"[AUTO-RECOVERY] Created user {effective_username} during checkout")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"[AUTO-RECOVERY] Failed to create user {effective_username}: {e}")
+            raise HTTPException(status_code=500, detail="Unable to process upgrade - please try logging in again")
+
     tier = tier_request.tier
     has_diamond = tier_request.has_diamond
     
@@ -6722,8 +6782,30 @@ async def diamond_audit(
 
     user = db.query(User).filter(User.username == session_username).first()
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
+        # Auto-recover: User exists in session but not in DB (ephemeral DB was wiped)
+        logger.warning(f"Diamond-audit: User {session_username} not found in database - auto-creating")
+        session_email = request.session.get("user", {}).get("email")
+        if not session_email:
+            session_email = session_username if "@" in session_username else f"{session_username}@placeholder.local"
+
+        user = User(
+            username=session_username,
+            email=session_email,
+            tier="free",
+            audit_history="[]",
+            last_reset=datetime.now(timezone.utc),
+            has_diamond=False
+        )
+        try:
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            logger.info(f"[AUTO-RECOVERY] Created user {session_username} during diamond-audit")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"[AUTO-RECOVERY] Failed to create user {session_username}: {e}")
+            raise HTTPException(status_code=500, detail="Unable to process audit - please try logging in again")
+
     try:
         code_bytes = await file.read()
         file_size = len(code_bytes)
