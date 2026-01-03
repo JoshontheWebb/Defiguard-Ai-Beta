@@ -574,9 +574,9 @@ app.add_middleware(
     SessionMiddleware,
     secret_key=_secret_key,
     session_cookie="session",
-    max_age=4 * 60 * 60,  # 4 hours (reduced from 2 weeks for security)
-    same_site="lax",
-    https_only=_environment == "production"
+    max_age=2 * 60 * 60,  # 2 hours - shorter for better security
+    same_site="lax",  # Allow redirects from Stripe
+    https_only=True  # Always use HTTPS in production
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -940,7 +940,20 @@ if DATABASE_URL:
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     logger.info(f"[DB] Using PostgreSQL database")
-    engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
+    # PRODUCTION-GRADE POOL CONFIGURATION:
+    # - pool_size: 20 connections for concurrent workers (Render uses 2 workers)
+    # - max_overflow: 30 additional connections during peak load
+    # - pool_timeout: 10s fail-fast to prevent request hanging
+    # - pool_pre_ping: Verify connection is alive before use
+    # - pool_recycle: Recreate connections every 5 minutes to avoid stale connections
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_recycle=300,
+        pool_size=20,
+        max_overflow=30,
+        pool_timeout=10
+    )
 elif os.getenv("RENDER"):
     # Fallback: SQLite on Render (WARNING: Data lost on redeploy!)
     DATABASE_URL = "sqlite:////tmp/users.db"
@@ -1545,6 +1558,17 @@ async def database_health(db: Session = Depends(get_db)):
         # Check persistence flag
         persistence_enabled = ENABLE_TIER_PERSISTENCE
 
+        # Get connection pool statistics (PostgreSQL only)
+        pool_stats = {}
+        if db_type == "PostgreSQL" and hasattr(engine.pool, 'size'):
+            pool_stats = {
+                "pool_size": engine.pool.size(),
+                "checked_in": engine.pool.checkedin(),
+                "checked_out": engine.pool.checkedout(),
+                "overflow": engine.pool.overflow(),
+                "invalid": engine.pool.invalidatedcount() if hasattr(engine.pool, 'invalidatedcount') else 0
+            }
+
         return {
             "status": "healthy",
             "database_type": db_type,
@@ -1552,6 +1576,7 @@ async def database_health(db: Session = Depends(get_db)):
             "user_count": user_count,
             "persistence_enabled": persistence_enabled,
             "database_url_set": bool(os.getenv("DATABASE_URL")),
+            "pool_stats": pool_stats,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
@@ -1559,6 +1584,7 @@ async def database_health(db: Session = Depends(get_db)):
         return {
             "status": "unhealthy",
             "error": str(e),
+            "database_url_set": bool(os.getenv("DATABASE_URL")),
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
@@ -1801,6 +1827,11 @@ async def require_login(request: Request):
 
 @app.get("/callback")
 async def callback(request: Request):
+    """
+    Auth0 callback handler with proper database connection management.
+    CRITICAL: All database operations wrapped in try/finally to prevent connection leaks.
+    """
+    db = None  # Initialize to None - will be set only when needed
     try:
         token = cast(dict[str, Any], await oauth.auth0.authorize_access_token(request))
         userinfo = token.get("userinfo")
@@ -1825,9 +1856,10 @@ async def callback(request: Request):
         request.session["userinfo"] = userinfo
         request.session["id_token"] = token.get("id_token")
 
+        # Get database session - MUST be closed in finally block
         db = next(get_db())
         sub = userinfo.get("sub")
-        
+
         # Extract username
         username = (
             userinfo.get("preferred_username")
@@ -1837,10 +1869,10 @@ async def callback(request: Request):
             or userinfo.get("username")
             or (email.split("@")[0] if email else "user")
         ).strip()[:50]
-        
+
         # Sanitize username
         username = re.sub(r"[^a-zA-Z0-9_.-]", "_", username)
-        
+
         # Find or create user
         user = db.query(User).filter(User.email == email).first()
         if not user:
@@ -1887,10 +1919,19 @@ async def callback(request: Request):
                 last_reset=datetime.now(timezone.utc),
                 has_diamond=False
             )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            logger.info(f"New user created: {username} (tier: {stripe_tier})")
+            try:
+                db.add(user)
+                db.commit()
+                db.refresh(user)
+                logger.info(f"New user created: {username} (tier: {stripe_tier})")
+            except Exception as create_error:
+                db.rollback()
+                # Race condition: another worker may have created the user
+                user = db.query(User).filter(User.email == email).first()
+                if not user:
+                    logger.error(f"[CALLBACK] Failed to create user {username}: {create_error}")
+                    raise
+                logger.info(f"[CALLBACK] User {username} already existed (race condition handled)")
         else:
             if not user.auth0_sub:
                 user.auth0_sub = sub
@@ -1905,7 +1946,7 @@ async def callback(request: Request):
         request.session["user_id"] = user.id
         request.session["username"] = user.username
         request.session["csrf_token"] = secrets.token_urlsafe(32)
-        
+
         # Provider from userinfo - extract and cache immediately
         provider = 'unknown'
         if userinfo:
@@ -1915,21 +1956,29 @@ async def callback(request: Request):
             elif sub and '|' in sub:
                 # Fallback: extract from sub (e.g., "google-oauth2|12345")
                 provider = sub.split('|')[0]
-        
+
         # Cache provider in session to avoid JWT decode spam on subsequent requests
         request.session["auth_provider"] = provider
         request.session["user"] = {"sub": sub, "email": email, "provider": provider}
         logger.info(f"[CALLBACK] Cached auth_provider={provider} for {user.username}")
-        
+
         response = RedirectResponse(url="/ui")
         response.set_cookie("username", str(user.username), httponly=True, secure=True, samesite="lax", max_age=2592000)
         logger.info(f"Auth0 login successful: {user.username}")
         return response
-        
+
     except Exception as e:
         logger.error(f"Auth0 callback error: {e}")
         request.session["auth_error"] = str(e)
         return RedirectResponse(url="/ui")
+    finally:
+        # CRITICAL: Always close database connection to prevent pool exhaustion
+        if db is not None:
+            try:
+                db.close()
+                logger.debug("[CALLBACK] Database connection closed")
+            except Exception as close_error:
+                logger.warning(f"[CALLBACK] Error closing database connection: {close_error}")
 
 @app.get("/me")
 async def me_endpoint(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
