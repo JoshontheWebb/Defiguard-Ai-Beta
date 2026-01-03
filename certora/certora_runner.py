@@ -235,10 +235,15 @@ class CertoraRunner:
             self._cleanup_temp_file(conf_path)
 
     def _extract_job_url(self, output: str) -> Optional[str]:
-        """Extract job URL from Certora CLI output."""
+        """Extract job URL from Certora CLI output.
+
+        IMPORTANT: Certora URLs may include query parameters like ?anonymousKey=...
+        which are REQUIRED for accessing output files. We must capture the full URL.
+        """
         url_patterns = [
-            r"https://prover\.certora\.com/output/[a-zA-Z0-9/_-]+",
-            r"https://prover\.certora\.com/job/[a-zA-Z0-9/_-]+",
+            # Capture full URL including query params (anonymousKey, etc.)
+            r"https://prover\.certora\.com/output/[a-zA-Z0-9/_-]+(?:\?[^\s]*)?",
+            r"https://prover\.certora\.com/job/[a-zA-Z0-9/_-]+(?:\?[^\s]*)?",
             r"Job URL:\s*(https://prover\.certora\.com[^\s]+)",
             r"Report:\s*(https://prover\.certora\.com[^\s]+)",
         ]
@@ -249,6 +254,8 @@ class CertoraRunner:
                 url = match.group(0)
                 if "://" not in url and len(match.groups()) > 0:
                     url = match.group(1)
+                # Log the URL with any query params for debugging
+                logger.info(f"CertoraRunner: Extracted job URL: {url}")
                 return url
 
         return None
@@ -326,16 +333,73 @@ class CertoraRunner:
         try:
             import urllib.request
             import urllib.error
+            from urllib.parse import urlparse, parse_qs, urlencode
 
             # Track what we've tried for debugging
             tried_endpoints = []
 
+            # Extract base URL and query params (anonymousKey is REQUIRED for authenticated access)
+            parsed = urlparse(job_url)
+            query_params = parse_qs(parsed.query)
+            base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            query_string = f"?{parsed.query}" if parsed.query else ""
+
+            logger.info(f"CertoraRunner: Base URL: {base_url}, has query params: {bool(parsed.query)}")
+
+            # PRIORITY 0: Try jobStatus URL (change 'output' to 'jobStatus' in path)
+            # This is available immediately after job submission and shows current status
+            if '/output/' in base_url:
+                job_status_base = base_url.replace('/output/', '/jobStatus/')
+                job_status_url = f"{job_status_base}{query_string}"
+                tried_endpoints.append(job_status_url)
+                try:
+                    logger.info(f"CertoraRunner: Trying jobStatus URL: {job_status_url}")
+                    req = urllib.request.Request(job_status_url, headers={
+                        "Accept": "application/json, text/html",
+                        "User-Agent": "DeFiGuard-AI/1.0"
+                    })
+                    with urllib.request.urlopen(req, timeout=30) as response:
+                        content = response.read().decode()
+                        content_type = response.headers.get('Content-Type', '')
+                        logger.info(f"CertoraRunner: jobStatus response type: {content_type}, length: {len(content)}")
+
+                        # Try to parse as JSON first
+                        if 'json' in content_type or content.strip().startswith('{'):
+                            try:
+                                data = json.loads(content)
+                                logger.info(f"CertoraRunner: jobStatus JSON keys: {list(data.keys())[:10]}")
+                                # Check for completion status
+                                status = str(data.get('status', data.get('jobStatus', ''))).lower()
+                                if status in ['complete', 'done', 'finished', 'succeeded', 'failed', 'error']:
+                                    logger.info(f"CertoraRunner: jobStatus indicates completion: {status}")
+                                    return self._parse_api_results(data)
+                                elif status in ['running', 'pending', 'queued']:
+                                    logger.info(f"CertoraRunner: jobStatus indicates still running: {status}")
+                                    return {"status": "running"}
+                            except json.JSONDecodeError:
+                                pass
+
+                        # Parse HTML for status indicators
+                        if len(content) > 1000:
+                            content_lower = content.lower()
+                            if 'completed' in content_lower or 'finished' in content_lower:
+                                logger.info("CertoraRunner: jobStatus HTML indicates completion")
+                                # Job complete - now try to get actual results
+                            elif 'running' in content_lower or 'pending' in content_lower:
+                                logger.info("CertoraRunner: jobStatus HTML indicates still running")
+                                return {"status": "running"}
+
+                except urllib.error.HTTPError as e:
+                    logger.info(f"CertoraRunner: jobStatus returned HTTP {e.code}")
+                except Exception as e:
+                    logger.info(f"CertoraRunner: Error fetching jobStatus: {e}")
+
             # PRIORITY 1: statsdata.json - This file contains per-rule completion status
             # It's generated after Certora finishes and has explicit success/fail indicators
-            stats_url = f"{job_url}/statsdata.json"
+            stats_url = f"{base_url}/statsdata.json{query_string}"
             tried_endpoints.append(stats_url)
             try:
-                logger.debug(f"CertoraRunner: Trying statsdata.json: {stats_url}")
+                logger.info(f"CertoraRunner: Trying statsdata.json: {stats_url}")
                 req = urllib.request.Request(stats_url, headers={
                     "Accept": "application/json",
                     "User-Agent": "DeFiGuard-AI/1.0"
@@ -350,24 +414,30 @@ class CertoraRunner:
 
             except urllib.error.HTTPError as e:
                 if e.code == 404:
-                    logger.debug(f"CertoraRunner: statsdata.json not found (404) - job may still be running")
+                    logger.info(f"CertoraRunner: statsdata.json not found (404) - job may still be running")
                 else:
-                    logger.debug(f"CertoraRunner: statsdata.json returned {e.code}")
+                    logger.info(f"CertoraRunner: statsdata.json returned HTTP {e.code}")
             except Exception as e:
-                logger.debug(f"CertoraRunner: Error fetching statsdata.json: {e}")
+                logger.info(f"CertoraRunner: Error fetching statsdata.json: {e}")
 
             # PRIORITY 2: Try other JSON endpoints
+            # Certora has multiple possible URL structures for output data
+            # Include query_string for authentication (anonymousKey)
             json_endpoints = [
-                f"{job_url}/jobStatus.json",
-                f"{job_url}/output.json",
-                f"{job_url}/results.json",
-                f"{job_url}/verificationProgress.json",
+                f"{base_url}/jobStatus.json{query_string}",
+                f"{base_url}/output.json{query_string}",
+                f"{base_url}/results.json{query_string}",
+                f"{base_url}/verificationProgress.json{query_string}",
+                # Alternative paths - data might be in subdirectories
+                f"{base_url}/Reports/statsdata.json{query_string}",
+                f"{base_url}/data/statsdata.json{query_string}",
+                f"{base_url}/.certora_internal/statsdata.json{query_string}",
             ]
 
             for json_url in json_endpoints:
                 tried_endpoints.append(json_url)
                 try:
-                    logger.debug(f"CertoraRunner: Trying endpoint: {json_url}")
+                    logger.info(f"CertoraRunner: Trying endpoint: {json_url}")
                     req = urllib.request.Request(json_url, headers={
                         "Accept": "application/json",
                         "User-Agent": "DeFiGuard-AI/1.0"
@@ -411,19 +481,21 @@ class CertoraRunner:
 
                 except urllib.error.HTTPError as e:
                     if e.code == 404:
-                        logger.debug(f"CertoraRunner: {json_url} not found (404)")
+                        logger.info(f"CertoraRunner: {json_url} not found (404)")
                     else:
-                        logger.debug(f"CertoraRunner: {json_url} returned {e.code}")
+                        logger.info(f"CertoraRunner: {json_url} returned HTTP {e.code}")
                     continue
                 except Exception as e:
-                    logger.debug(f"CertoraRunner: Error fetching {json_url}: {e}")
+                    logger.info(f"CertoraRunner: Error fetching {json_url}: {e}")
                     continue
 
             # PRIORITY 3: Parse the HTML page as fallback
-            tried_endpoints.append(job_url)
+            # NOTE: Certora uses a React SPA, so server-side HTML fetching only gets the shell
+            html_url = f"{base_url}{query_string}"
+            logger.info(f"CertoraRunner: All JSON endpoints failed, trying HTML page (SPA shell): {html_url}")
+            tried_endpoints.append(html_url)
             try:
-                logger.debug(f"CertoraRunner: Trying HTML page: {job_url}")
-                req = urllib.request.Request(job_url, headers={
+                req = urllib.request.Request(html_url, headers={
                     "Accept": "text/html",
                     "User-Agent": "DeFiGuard-AI/1.0"
                 })
