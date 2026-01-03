@@ -8881,8 +8881,52 @@ async def audit_contract(
             # Have capacity - increment counter and proceed
             active_audit_count += 1
             logger.info(f"[ADMISSION] Capacity available ({active_audit_count}/{MAX_CONCURRENT_AUDITS}), running immediately for {effective_username}")
+
+            # Generate audit_key EARLY so user can save it while audit is processing
+            # This allows users to leave and retrieve results later even if audit takes a long time
+            safe_filename = sanitize_filename(file.filename) if file.filename else "contract.sol"
+            early_contract_hash = compute_contract_hash(code_bytes.decode('utf-8', errors='replace'))
+
+            from sqlalchemy.exc import IntegrityError
+            immediate_audit_key = None
+            immediate_audit_result_id = None
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    immediate_audit_key = generate_audit_key()
+                    audit_result = AuditResult(
+                        user_id=user.id if user else None,
+                        audit_key=immediate_audit_key,
+                        contract_name=safe_filename,
+                        contract_hash=early_contract_hash,
+                        contract_address=contract_address,
+                        file_content=code_bytes,  # Persist for crash recovery
+                        status="processing",  # Mark as processing, will update to completed later
+                        user_tier=current_tier,
+                        notification_email=session_email if current_tier in ["pro", "enterprise"] else None,
+                        api_key_id=validated_api_key_id,
+                    )
+                    db.add(audit_result)
+                    db.commit()
+                    immediate_audit_result_id = audit_result.id
+                    logger.info(f"[AUDIT_KEY] Created early audit key {immediate_audit_key[:20]}... for immediate audit (id={immediate_audit_result_id})")
+                    break
+                except IntegrityError:
+                    db.rollback()
+                    immediate_audit_key = None
+                    logger.warning(f"[AUDIT_KEY] Key collision on attempt {attempt + 1}, retrying...")
+                    if attempt == max_retries - 1:
+                        logger.error("[AUDIT_KEY] Failed to generate unique key after max retries")
+                except Exception as e:
+                    db.rollback()
+                    logger.error(f"[AUDIT_KEY] Failed to save early audit result: {e}")
+                    immediate_audit_key = None
+                    break
+
     else:
         logger.info(f"[ADMISSION] From queue - slot already acquired for {effective_username}")
+        immediate_audit_key = None
+        immediate_audit_result_id = None
     
     # Main audit processing
     try:
@@ -9700,48 +9744,72 @@ For Enterprise tier, also include: "proof_of_concept", "references"
         tier_limits = {"free": FREE_LIMIT, "starter": STARTER_LIMIT, "beginner": STARTER_LIMIT, "pro": PRO_LIMIT, "enterprise": ENTERPRISE_LIMIT, "diamond": ENTERPRISE_LIMIT}
         audit_limit = tier_limits.get(current_tier, FREE_LIMIT)
 
-        # Generate audit key and create AuditResult for immediate execution (not queued)
-        # This ensures all audits get an access key for retrieval
-        immediate_audit_key = None
+        # Update or create AuditResult for immediate execution (not queued)
+        # If we created an early AuditResult (with processing status), update it
+        # Otherwise create a new one (fallback for edge cases)
         if not _from_queue:
-            safe_filename = sanitize_filename(file.filename) if file.filename else "contract.sol"
-            contract_hash = compute_contract_hash(code_bytes.decode('utf-8', errors='replace'))
-
-            from sqlalchemy.exc import IntegrityError
-            max_retries = 5
-            for attempt in range(max_retries):
+            if immediate_audit_result_id:
+                # UPDATE the existing AuditResult created at the start
                 try:
-                    immediate_audit_key = generate_audit_key()
-                    audit_result = AuditResult(
-                        user_id=user.id if user else None,
-                        audit_key=immediate_audit_key,
-                        contract_name=safe_filename,
-                        contract_hash=contract_hash,
-                        contract_address=contract_address,
-                        status="completed",
-                        user_tier=current_tier,
-                        notification_email=session_email if current_tier in ["pro", "enterprise"] else None,
-                        api_key_id=validated_api_key_id,  # Assign to API key if specified
-                        risk_score=str(report.get("risk_score", "N/A")),
-                        issues_count=len(report.get("issues", [])),
-                        pdf_path=pdf_path,
-                        completed_at=datetime.now(timezone.utc)
-                    )
-                    db.add(audit_result)
-                    db.commit()
-                    logger.info(f"[AUDIT_KEY] Created audit key {immediate_audit_key[:20]}... for immediate audit")
-                    break
-                except IntegrityError:
-                    db.rollback()
-                    immediate_audit_key = None
-                    logger.warning(f"[AUDIT_KEY] Key collision on attempt {attempt + 1}, retrying...")
-                    if attempt == max_retries - 1:
-                        logger.error("[AUDIT_KEY] Failed to generate unique key after max retries")
+                    audit_result = db.query(AuditResult).filter(AuditResult.id == immediate_audit_result_id).first()
+                    if audit_result:
+                        audit_result.status = "completed"
+                        audit_result.risk_score = str(report.get("risk_score", "N/A"))
+                        audit_result.issues_count = len(report.get("issues", []))
+                        audit_result.pdf_path = pdf_path
+                        audit_result.completed_at = datetime.now(timezone.utc)
+                        audit_result.file_content = None  # Clear file_content after successful completion
+                        db.commit()
+                        logger.info(f"[AUDIT_KEY] Updated audit key {immediate_audit_key[:20]}... to completed (id={immediate_audit_result_id})")
+                    else:
+                        logger.error(f"[AUDIT_KEY] Could not find AuditResult with id={immediate_audit_result_id}")
+                        immediate_audit_key = None
                 except Exception as e:
-                    db.rollback()
-                    logger.error(f"[AUDIT_KEY] Failed to save audit result: {e}")
-                    immediate_audit_key = None
-                    break
+                    logger.error(f"[AUDIT_KEY] Failed to update audit result: {e}")
+                    try:
+                        db.rollback()
+                    except:
+                        pass
+            else:
+                # Fallback: create new AuditResult if early creation failed
+                safe_filename = sanitize_filename(file.filename) if file.filename else "contract.sol"
+                contract_hash = compute_contract_hash(code_bytes.decode('utf-8', errors='replace'))
+
+                from sqlalchemy.exc import IntegrityError
+                max_retries = 5
+                for attempt in range(max_retries):
+                    try:
+                        immediate_audit_key = generate_audit_key()
+                        audit_result = AuditResult(
+                            user_id=user.id if user else None,
+                            audit_key=immediate_audit_key,
+                            contract_name=safe_filename,
+                            contract_hash=contract_hash,
+                            contract_address=contract_address,
+                            status="completed",
+                            user_tier=current_tier,
+                            notification_email=session_email if current_tier in ["pro", "enterprise"] else None,
+                            api_key_id=validated_api_key_id,
+                            risk_score=str(report.get("risk_score", "N/A")),
+                            issues_count=len(report.get("issues", [])),
+                            pdf_path=pdf_path,
+                            completed_at=datetime.now(timezone.utc)
+                        )
+                        db.add(audit_result)
+                        db.commit()
+                        logger.info(f"[AUDIT_KEY] Created audit key {immediate_audit_key[:20]}... for immediate audit (fallback)")
+                        break
+                    except IntegrityError:
+                        db.rollback()
+                        immediate_audit_key = None
+                        logger.warning(f"[AUDIT_KEY] Key collision on attempt {attempt + 1}, retrying...")
+                        if attempt == max_retries - 1:
+                            logger.error("[AUDIT_KEY] Failed to generate unique key after max retries")
+                    except Exception as e:
+                        db.rollback()
+                        logger.error(f"[AUDIT_KEY] Failed to save audit result: {e}")
+                        immediate_audit_key = None
+                        break
 
         response = {
             "report": report,
