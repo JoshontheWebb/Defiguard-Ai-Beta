@@ -2,7 +2,7 @@
 // GLOBAL DEBUG HELPER – controlled via DEBUG_MODE flag
 // Set to false for production to silence debug logs
 // ---------------------------------------------------------------------
-const DEBUG_MODE = true;  // TEMPORARILY ENABLED FOR DEBUGGING
+const DEBUG_MODE = false;  // Set to true for debugging
 const log = (label, ...args) => {
     if (DEBUG_MODE) console.log(`[${label}]`, ...args, `time=${new Date().toISOString()}`);
 };
@@ -14,7 +14,7 @@ const debugLog = (...args) => { if (DEBUG_MODE) console.log(...args); };
 // This helps identify exactly where UI initialization fails
 // ---------------------------------------------------------------------
 const DebugTracer = {
-    enabled: true,
+    enabled: false,  // Set to true for comprehensive function tracing
     traces: [],
     startTime: Date.now(),
 
@@ -1989,12 +1989,9 @@ document.addEventListener("DOMContentLoaded", () => {
       createKeyConfirm: "#create-key-confirm",
       createKeyCancel: "#create-key-cancel",
       modalUpgradeButton: "#modal-upgrade",
-      modalLogoutButton: "#modal-logout",
-      // Certora Jobs section
-      modalCertoraSection: "#modal-certora-section",
-      certoraJobsTableBody: "#certora-jobs-table-body",
-      certoraUploadBtn: "#certora-upload-btn",
-      certoraUploadInput: "#certora-upload-input"
+      modalLogoutButton: "#modal-logout"
+      // Note: Certora elements (modal-certora-section, certora-jobs-table-body, etc.)
+      // are fetched dynamically when needed since they're only in enterprise/diamond tier HTML
     },
     async (els) => {
       const _waitForDOMStart = DebugTracer.enter('waitForDOM_callback', { url: window.location.href });
@@ -4503,9 +4500,14 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
         modalApiSection, apiKeyCountDisplay, apiKeysTableBody, createApiKeyButton,
         createKeyModal, createKeyModalBackdrop, createKeyModalClose,
         newKeyLabelInput, createKeyConfirm, createKeyCancel,
-        modalUpgradeButton, modalLogoutButton,
-        modalCertoraSection, certoraJobsTableBody, certoraUploadBtn, certoraUploadInput
+        modalUpgradeButton, modalLogoutButton
       } = els;
+
+      // Certora elements fetched dynamically (only present for enterprise/diamond tiers)
+      const modalCertoraSection = document.getElementById("modal-certora-section");
+      const certoraJobsTableBody = document.getElementById("certora-jobs-table-body");
+      const certoraUploadBtn = document.getElementById("certora-upload-btn");
+      const certoraUploadInput = document.getElementById("certora-upload-input");
 
       // Function to populate modal with user data
       const populateSettingsModal = async () => {
@@ -5353,36 +5355,38 @@ Key: ${data.api_key}
         }
       }, 30000);
 
-      // DEBUG: Exit the main callback and generate report
-      DebugTracer.exit('waitForDOM_callback', _waitForDOMStart, { complete: true });
+      // DEBUG: Exit the main callback and generate report (only when debugging enabled)
+      if (DEBUG_MODE || DebugTracer.enabled) {
+        DebugTracer.exit('waitForDOM_callback', _waitForDOMStart, { complete: true });
 
-      // Generate debug report after small delay to ensure all async operations complete
-      setTimeout(() => {
-        console.log('%c════════════════════════════════════════════════════════════', 'color: #ff00ff');
-        console.log('%c🔍 UI INITIALIZATION DEBUG REPORT', 'color: #ff00ff; font-weight: bold; font-size: 14px');
-        console.log('%c════════════════════════════════════════════════════════════', 'color: #ff00ff');
+        // Generate debug report after small delay to ensure all async operations complete
+        setTimeout(() => {
+          console.log('%c════════════════════════════════════════════════════════════', 'color: #ff00ff');
+          console.log('%c🔍 UI INITIALIZATION DEBUG REPORT', 'color: #ff00ff; font-weight: bold; font-size: 14px');
+          console.log('%c════════════════════════════════════════════════════════════', 'color: #ff00ff');
 
-        // Check hamburger state
-        const hamburgerEl = document.getElementById('hamburger');
-        const sidebarEl = document.getElementById('sidebar');
-        console.log('%c📱 HAMBURGER STATE:', 'color: #00aaff; font-weight: bold', {
-          hamburgerExists: !!hamburgerEl,
-          hamburgerInitialized: hamburgerEl?._debugInitialized || false,
-          hamburgerClickable: hamburgerEl ? typeof hamburgerEl.onclick === 'function' || hamburgerEl._debugInitialized : false,
-          sidebarExists: !!sidebarEl,
-          sidebarHasOpenClass: sidebarEl?.classList.contains('open') || false
-        });
+          // Check hamburger state
+          const hamburgerEl = document.getElementById('hamburger');
+          const sidebarEl = document.getElementById('sidebar');
+          console.log('%c📱 HAMBURGER STATE:', 'color: #00aaff; font-weight: bold', {
+            hamburgerExists: !!hamburgerEl,
+            hamburgerInitialized: hamburgerEl?._debugInitialized || false,
+            hamburgerClickable: hamburgerEl ? typeof hamburgerEl.onclick === 'function' || hamburgerEl._debugInitialized : false,
+            sidebarExists: !!sidebarEl,
+            sidebarHasOpenClass: sidebarEl?.classList.contains('open') || false
+          });
 
-        // Test hamburger click
-        if (hamburgerEl) {
-          console.log('%c🧪 Hamburger element found, event listeners attached:', 'color: #00ff00',
-            hamburgerEl._debugInitialized ? 'YES' : 'NO');
-        } else {
-          console.error('%c❌ CRITICAL: Hamburger element NOT FOUND in DOM!', 'color: #ff0000; font-weight: bold');
-        }
+          // Test hamburger click
+          if (hamburgerEl) {
+            console.log('%c🧪 Hamburger element found, event listeners attached:', 'color: #00ff00',
+              hamburgerEl._debugInitialized ? 'YES' : 'NO');
+          } else {
+            console.error('%c❌ CRITICAL: Hamburger element NOT FOUND in DOM!', 'color: #ff0000; font-weight: bold');
+          }
 
-        DebugTracer.report();
-      }, 2000);
+          DebugTracer.report();
+        }, 2000);
+      }
 
     } // Closing brace for waitForDOM callback
   ); // Closing parenthesis for waitForDOM function call
