@@ -25,13 +25,14 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Timeout for job submission (just getting the URL, not waiting for results)
-SUBMISSION_TIMEOUT = 300  # 5 minutes to submit and get URL (generous for network issues)
+# Timeout for job submission WITH wait_for_results=True
+# The CLI will wait for verification to complete, which can take several minutes
+# Certora formal verification is compute-intensive - allow generous timeout
+SUBMISSION_TIMEOUT = 1800  # 30 minutes - CLI waits for results now
 
-# Timeout for polling results (if we choose to wait)
-# Since we now save results to database and can retrieve later, this is just for
-# initial wait time - if it times out, status is "pending" not "failed"
-POLL_TIMEOUT = 1800  # 30 minutes max wait for results (Certora can take a while)
+# Timeout for polling results (fallback if CLI doesn't return results)
+# Since we now use wait_for_results=True, this is rarely needed
+POLL_TIMEOUT = 600  # 10 minutes fallback polling
 
 # How often to poll for results
 POLL_INTERVAL = 20  # Check every 20 seconds
@@ -130,8 +131,10 @@ class CertoraRunner:
             # Write spec to temp file
             spec_path = self._write_temp_file(spec_content, suffix=".spec")
 
-            # Create conf file - NON-BLOCKING MODE (don't wait for results)
-            conf_content = self._create_conf_file(contract_path, spec_path, contract_name, wait_for_results=False)
+            # Create conf file - USE BLOCKING MODE for reliable results
+            # Per Certora 2026 docs: wait_for_results=True makes CLI wait for completion
+            # This is more reliable than manual polling which can fail with 403 auth errors
+            conf_content = self._create_conf_file(contract_path, spec_path, contract_name, wait_for_results=True)
             conf_path = self._write_temp_file(conf_content, suffix=".conf")
 
             logger.info(f"CertoraRunner: Submitting verification for {contract_name}")
@@ -149,33 +152,41 @@ class CertoraRunner:
                 env={**os.environ, "CERTORAKEY": self.api_key}
             )
 
-            logger.info(f"CertoraRunner: Job submission returned {result.returncode}")
+            logger.info(f"CertoraRunner: Job returned with code {result.returncode}")
 
-            # Extract job URL from output (this is available immediately)
+            # Extract job URL from output (always available)
             job_url = self._extract_job_url(result.stdout)
 
+            # With wait_for_results=True, CLI waits for completion and returns results
+            # Try to parse results directly from CLI output first
+            parsed = self._parse_output(result.stdout, result.stderr, result.returncode)
+            parsed["job_url"] = job_url
+
+            # Check if we got actual results from CLI (not just job submission)
+            has_results = (
+                parsed.get("rules_verified", 0) > 0 or
+                parsed.get("rules_violated", 0) > 0 or
+                parsed.get("status") in ["verified", "issues_found", "error"]
+            )
+
+            if has_results:
+                logger.info(f"CertoraRunner: Got results from CLI - verified:{parsed.get('rules_verified')}, violated:{parsed.get('rules_violated')}")
+                return parsed
+
+            # No results in CLI output - check if we got a job URL
             if not job_url:
-                # No job URL means submission failed - log full details for debugging
-                logger.warning(f"CertoraRunner: No job URL found in output")
+                # No job URL and no results means submission failed
+                logger.warning(f"CertoraRunner: No job URL and no results in output")
                 logger.warning(f"CertoraRunner: Return code: {result.returncode}")
                 if result.stdout:
-                    # Log stdout in chunks to see everything
                     stdout_preview = result.stdout[:2000].replace('\n', ' | ')
                     logger.warning(f"CertoraRunner: STDOUT preview: {stdout_preview}")
                 if result.stderr:
                     stderr_preview = result.stderr[:2000].replace('\n', ' | ')
                     logger.warning(f"CertoraRunner: STDERR preview: {stderr_preview}")
-                # Log if there are any common error patterns
-                combined = (result.stdout or '') + (result.stderr or '')
-                if 'error' in combined.lower():
-                    logger.error(f"CertoraRunner: Detected error in output")
-                if 'compilation' in combined.lower():
-                    logger.error(f"CertoraRunner: Compilation issue detected")
-                if 'spec' in combined.lower() and 'error' in combined.lower():
-                    logger.error(f"CertoraRunner: CVL spec error detected")
-                return self._parse_output(result.stdout, result.stderr, result.returncode)
+                return parsed
 
-            logger.info(f"CertoraRunner: Job submitted successfully: {job_url}")
+            logger.info(f"CertoraRunner: Job URL: {job_url}")
 
             # If not waiting for results, return immediately with pending status
             if not wait_for_results:
@@ -190,8 +201,9 @@ class CertoraRunner:
                     "message": "Job submitted to Certora cloud. Results will be available at the job URL."
                 }
 
-            # PHASE 2: Poll for results
-            logger.info(f"CertoraRunner: Polling for results (timeout: {self.poll_timeout}s)")
+            # PHASE 2: Fallback polling (if CLI didn't return results)
+            # This shouldn't happen with wait_for_results=True, but keep as safety net
+            logger.info(f"CertoraRunner: CLI didn't return results, falling back to polling (timeout: {self.poll_timeout}s)")
             poll_result = self._poll_for_results(job_url, self.poll_timeout)
 
             # Merge job URL into result
@@ -933,9 +945,12 @@ class CertoraRunner:
             "files": [f"{contract_path}:{contract_name}"],
             "verify": f"{contract_name}:{spec_path}",
             "msg": f"DeFiGuard AI: {contract_name}",
-            # CRITICAL: "none" returns immediately after job submission
-            # "all" blocks until verification completes (can timeout on slow jobs)
+            # CRITICAL: "all" blocks until verification completes
+            # Per Certora 2026 docs: This makes CLI wait and return results directly
+            # Much more reliable than manual polling which can fail with 403 errors
             "wait_for_results": "all" if wait_for_results else "none",
+            # Simplifies console output for easier programmatic parsing
+            "short_output": True,
             "rule_sanity": "basic",  # Check for tautologies
             "optimistic_loop": True,  # Assume loops terminate
             "loop_iter": "3",  # String per docs: "numbers are also encoded as strings"
