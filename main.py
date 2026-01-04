@@ -9437,7 +9437,10 @@ async def submit_audit_to_queue(
     # Each API key can only be associated with ONE file (identified by contract_hash).
     # Users can re-audit the SAME file multiple times with the same key.
     # Users CANNOT audit DIFFERENT files with the same key.
-    if validated_api_key_id is not None:
+    # ONE FILE PER KEY POLICY - Only for STARTER tier
+    # Starter tier gets 1 API key with 1 file limit (helps them organize)
+    # Pro/Enterprise/Diamond can assign multiple files to the same key
+    if validated_api_key_id is not None and tier == "starter":
         existing_different_file = db.query(AuditResult).filter(
             AuditResult.api_key_id == validated_api_key_id,
             AuditResult.contract_hash != contract_hash,  # Different file
@@ -10032,9 +10035,10 @@ async def audit_contract(
             logger.error(f"Failed to write temp file: {str(e)}")
             raise HTTPException(status_code=500, detail="Failed to save temporary file due to permissions")
 
-        # One-File-Per-Key Policy Enforcement (only for direct calls, not queue-originated)
-        # Each API key can only be associated with ONE file (identified by contract_hash).
-        if validated_api_key_id is not None and not _from_queue:
+        # ONE FILE PER KEY POLICY - Only for STARTER tier
+        # Starter tier gets 1 API key with 1 file limit (helps them organize)
+        # Pro/Enterprise/Diamond can assign multiple files to the same key
+        if validated_api_key_id is not None and not _from_queue and current_tier == "starter":
             early_contract_hash = compute_contract_hash(code_bytes.decode('utf-8', errors='replace'))
             existing_different_file = db.query(AuditResult).filter(
                 AuditResult.api_key_id == validated_api_key_id,
