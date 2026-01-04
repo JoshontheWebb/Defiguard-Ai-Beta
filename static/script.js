@@ -9,10 +9,334 @@ const log = (label, ...args) => {
 // Debug wrapper for console.log calls - only logs in debug mode
 const debugLog = (...args) => { if (DEBUG_MODE) console.log(...args); };
 
-// ---------------------------------------------------------------------
+// =============================================================================
+// INITIALIZATION ORCHESTRATOR v2.0 - Enterprise-grade loading state management
+// =============================================================================
+// This system provides:
+// 1. Explicit initialization phases with dependency ordering
+// 2. Request deduplication to prevent race conditions
+// 3. Circuit breakers to prevent cascading failures
+// 4. Health tracking with diagnostics
+// 5. Centralized event listener management
+// 6. Proper error propagation (no masking)
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// REQUEST DEDUPLICATOR - Prevents concurrent duplicate API calls
+// -----------------------------------------------------------------------------
+const RequestDeduplicator = {
+    pending: new Map(),  // Map<requestKey, Promise>
+    cache: new Map(),    // Map<requestKey, {data, timestamp}>
+
+    /**
+     * Execute a request with deduplication and caching
+     * @param {string} key - Unique identifier for this request
+     * @param {Function} fetcher - Async function that performs the request
+     * @param {number} cacheTTL - Cache TTL in ms (0 = no cache)
+     * @returns {Promise} - The result of the request
+     */
+    async execute(key, fetcher, cacheTTL = 0) {
+        // Check cache first
+        if (cacheTTL > 0) {
+            const cached = this.cache.get(key);
+            if (cached && Date.now() - cached.timestamp < cacheTTL) {
+                debugLog(`[Dedup] Cache hit for ${key}`);
+                return cached.data;
+            }
+        }
+
+        // If there's already a pending request for this key, return it
+        if (this.pending.has(key)) {
+            debugLog(`[Dedup] Coalescing request for ${key}`);
+            return this.pending.get(key);
+        }
+
+        // Create new request
+        const promise = (async () => {
+            try {
+                const result = await fetcher();
+                // Cache successful results
+                if (cacheTTL > 0 && result !== null && result !== undefined) {
+                    this.cache.set(key, { data: result, timestamp: Date.now() });
+                }
+                return result;
+            } finally {
+                this.pending.delete(key);
+            }
+        })();
+
+        this.pending.set(key, promise);
+        return promise;
+    },
+
+    // Invalidate cache for a specific key
+    invalidate(key) {
+        this.cache.delete(key);
+    },
+
+    // Clear all caches
+    clear() {
+        this.cache.clear();
+        // Note: pending requests will complete naturally
+    }
+};
+
+// -----------------------------------------------------------------------------
+// CIRCUIT BREAKER - Prevents cascading failures from repeated failed requests
+// -----------------------------------------------------------------------------
+const CircuitBreaker = {
+    circuits: new Map(),  // Map<circuitName, {state, failures, lastFailure, nextAttempt}>
+
+    STATES: {
+        CLOSED: 'closed',       // Normal operation
+        OPEN: 'open',           // Blocking requests (too many failures)
+        HALF_OPEN: 'half_open'  // Testing if service recovered
+    },
+
+    CONFIG: {
+        failureThreshold: 5,     // Failures before opening circuit
+        resetTimeout: 30000,     // Time before trying again (30s)
+        halfOpenRequests: 1      // Requests to allow in half-open state
+    },
+
+    /**
+     * Execute a request through the circuit breaker
+     * @param {string} name - Circuit identifier
+     * @param {Function} operation - Async operation to execute
+     * @param {Function} fallback - Optional fallback when circuit is open
+     */
+    async execute(name, operation, fallback = null) {
+        let circuit = this.circuits.get(name);
+        if (!circuit) {
+            circuit = { state: this.STATES.CLOSED, failures: 0, lastFailure: 0, nextAttempt: 0 };
+            this.circuits.set(name, circuit);
+        }
+
+        // Check if circuit is open
+        if (circuit.state === this.STATES.OPEN) {
+            if (Date.now() < circuit.nextAttempt) {
+                debugLog(`[Circuit] ${name} is OPEN, using fallback`);
+                if (fallback) return fallback();
+                throw new Error(`Circuit ${name} is open - too many failures`);
+            }
+            // Time to try again
+            circuit.state = this.STATES.HALF_OPEN;
+            debugLog(`[Circuit] ${name} transitioning to HALF_OPEN`);
+        }
+
+        try {
+            const result = await operation();
+            // Success - reset circuit
+            if (circuit.state === this.STATES.HALF_OPEN || circuit.failures > 0) {
+                debugLog(`[Circuit] ${name} reset to CLOSED`);
+            }
+            circuit.state = this.STATES.CLOSED;
+            circuit.failures = 0;
+            return result;
+        } catch (error) {
+            circuit.failures++;
+            circuit.lastFailure = Date.now();
+
+            if (circuit.failures >= this.CONFIG.failureThreshold) {
+                circuit.state = this.STATES.OPEN;
+                circuit.nextAttempt = Date.now() + this.CONFIG.resetTimeout;
+                console.warn(`[Circuit] ${name} opened after ${circuit.failures} failures`);
+            }
+
+            throw error;
+        }
+    },
+
+    // Get circuit health for diagnostics
+    getHealth() {
+        const health = {};
+        for (const [name, circuit] of this.circuits) {
+            health[name] = {
+                state: circuit.state,
+                failures: circuit.failures,
+                lastFailure: circuit.lastFailure ? new Date(circuit.lastFailure).toISOString() : null
+            };
+        }
+        return health;
+    },
+
+    // Reset a specific circuit
+    reset(name) {
+        const circuit = this.circuits.get(name);
+        if (circuit) {
+            circuit.state = this.STATES.CLOSED;
+            circuit.failures = 0;
+        }
+    }
+};
+
+// -----------------------------------------------------------------------------
+// EVENT LISTENER REGISTRY - Prevents duplicate listeners and enables cleanup
+// -----------------------------------------------------------------------------
+const EventListenerRegistry = {
+    listeners: new Map(),  // Map<elementId:eventType, {handler, element}>
+
+    /**
+     * Attach an event listener with deduplication
+     * @param {Element} element - DOM element
+     * @param {string} eventType - Event type (click, keydown, etc.)
+     * @param {Function} handler - Event handler
+     * @param {string} id - Unique identifier for this listener
+     * @param {object} options - addEventListener options
+     */
+    attach(element, eventType, handler, id, options = {}) {
+        if (!element) {
+            debugLog(`[EventRegistry] Cannot attach to null element: ${id}`);
+            return false;
+        }
+
+        const key = `${id}:${eventType}`;
+
+        // Remove existing listener if any
+        if (this.listeners.has(key)) {
+            const existing = this.listeners.get(key);
+            existing.element.removeEventListener(eventType, existing.handler, existing.options);
+            debugLog(`[EventRegistry] Replaced existing listener: ${key}`);
+        }
+
+        // Attach new listener
+        element.addEventListener(eventType, handler, options);
+        this.listeners.set(key, { handler, element, options });
+        debugLog(`[EventRegistry] Attached listener: ${key}`);
+        return true;
+    },
+
+    // Remove a specific listener
+    detach(id, eventType) {
+        const key = `${id}:${eventType}`;
+        if (this.listeners.has(key)) {
+            const { handler, element, options } = this.listeners.get(key);
+            element.removeEventListener(eventType, handler, options);
+            this.listeners.delete(key);
+            return true;
+        }
+        return false;
+    },
+
+    // Remove all listeners for a specific ID
+    detachAll(id) {
+        let removed = 0;
+        for (const [key, { handler, element, options }] of this.listeners) {
+            if (key.startsWith(`${id}:`)) {
+                element.removeEventListener(key.split(':')[1], handler, options);
+                this.listeners.delete(key);
+                removed++;
+            }
+        }
+        return removed;
+    },
+
+    // Check if a listener is attached
+    has(id, eventType) {
+        return this.listeners.has(`${id}:${eventType}`);
+    },
+
+    // Cleanup all listeners
+    cleanup() {
+        for (const [key, { handler, element, options }] of this.listeners) {
+            const eventType = key.split(':')[1];
+            element.removeEventListener(eventType, handler, options);
+        }
+        this.listeners.clear();
+    }
+};
+
+// -----------------------------------------------------------------------------
+// COMPONENT HEALTH TRACKER - Monitors initialization and runtime health
+// -----------------------------------------------------------------------------
+const ComponentHealth = {
+    components: new Map(),
+
+    STATUS: {
+        PENDING: 'pending',
+        INITIALIZING: 'initializing',
+        HEALTHY: 'healthy',
+        DEGRADED: 'degraded',
+        FAILED: 'failed'
+    },
+
+    register(name, dependencies = []) {
+        this.components.set(name, {
+            status: this.STATUS.PENDING,
+            dependencies,
+            error: null,
+            lastCheck: null,
+            initTime: null
+        });
+    },
+
+    setStatus(name, status, error = null) {
+        const component = this.components.get(name);
+        if (component) {
+            component.status = status;
+            component.error = error;
+            component.lastCheck = Date.now();
+            if (status === this.STATUS.HEALTHY) {
+                component.initTime = component.initTime || Date.now();
+            }
+        }
+    },
+
+    getStatus(name) {
+        return this.components.get(name)?.status || this.STATUS.PENDING;
+    },
+
+    areDependenciesMet(name) {
+        const component = this.components.get(name);
+        if (!component) return false;
+
+        for (const dep of component.dependencies) {
+            const depStatus = this.getStatus(dep);
+            if (depStatus !== this.STATUS.HEALTHY && depStatus !== this.STATUS.DEGRADED) {
+                return false;
+            }
+        }
+        return true;
+    },
+
+    getReport() {
+        const report = {};
+        for (const [name, data] of this.components) {
+            report[name] = {
+                status: data.status,
+                error: data.error?.message || null,
+                dependencies: data.dependencies,
+                dependenciesMet: this.areDependenciesMet(name)
+            };
+        }
+        return report;
+    },
+
+    isAllHealthy() {
+        for (const [, data] of this.components) {
+            if (data.status !== this.STATUS.HEALTHY && data.status !== this.STATUS.DEGRADED) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
+// Register all components and their dependencies
+ComponentHealth.register('dom', []);
+ComponentHealth.register('hamburger', ['dom']);
+ComponentHealth.register('sidebar', ['dom']);
+ComponentHealth.register('csrf', []);
+ComponentHealth.register('auth', ['csrf']);
+ComponentHealth.register('tier', ['auth']);
+ComponentHealth.register('websocket', ['auth']);
+ComponentHealth.register('forms', ['dom', 'csrf']);
+ComponentHealth.register('eventListeners', ['dom']);
+
+// -----------------------------------------------------------------------------
 // ADVANCED DEBUG TRACER - Comprehensive function tracing for debugging
 // This helps identify exactly where UI initialization fails
-// ---------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 const DebugTracer = {
     enabled: false,  // Set to true for comprehensive function tracing
     traces: [],
@@ -106,19 +430,21 @@ const DebugTracer = {
     }
 };
 
-// ---------------------------------------------------------------------
-// APP INITIALIZATION MANAGER - Reliable startup with state machine
-// Prevents race conditions and provides recovery from failures
-// ---------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// APP INITIALIZATION MANAGER v2.0 - Robust startup with explicit phases
+// -----------------------------------------------------------------------------
 const AppInitManager = {
     // Initialization states
     STATE: {
         IDLE: 'idle',
         STARTING: 'starting',
         DOM_READY: 'dom_ready',
-        CRITICAL_INIT: 'critical_init',
-        FULL_INIT: 'full_init',
+        PHASE_CRITICAL: 'phase_critical',    // Phase 1: Hamburger, DOM
+        PHASE_AUTH: 'phase_auth',            // Phase 2: CSRF, Auth
+        PHASE_DATA: 'phase_data',            // Phase 3: Tier, Audits
+        PHASE_CONNECTIONS: 'phase_connections', // Phase 4: WebSocket, Polling
         READY: 'ready',
+        DEGRADED: 'degraded',  // Some features unavailable but app works
         FAILED: 'failed',
         RECOVERING: 'recovering'
     },
@@ -130,8 +456,9 @@ const AppInitManager = {
     criticalElementsReady: false,
     lastError: null,
     recoveryTimer: null,
+    phaseTimeouts: new Map(),
 
-    // Track what's been initialized
+    // Track what's been initialized - now with status instead of boolean
     initialized: {
         hamburger: false,
         auth: false,
@@ -139,6 +466,17 @@ const AppInitManager = {
         websocket: false,
         eventListeners: false
     },
+
+    // Track phase completion
+    phases: {
+        critical: false,
+        auth: false,
+        data: false,
+        connections: false
+    },
+
+    // Errors that occurred but didn't block initialization
+    nonCriticalErrors: [],
 
     // Transition to new state with logging
     setState(newState, context = {}) {
@@ -150,13 +488,13 @@ const AppInitManager = {
 
         // Dispatch custom event for state changes
         window.dispatchEvent(new CustomEvent('appInitStateChange', {
-            detail: { oldState, newState, context }
+            detail: { oldState, newState, context, timestamp: Date.now() }
         }));
     },
 
     // Start initialization with tracking
     start() {
-        if (this.currentState === this.STATE.READY) {
+        if (this.currentState === this.STATE.READY || this.currentState === this.STATE.DEGRADED) {
             debugLog('[AppInit] Already initialized, skipping');
             return;
         }
@@ -168,34 +506,78 @@ const AppInitManager = {
         // Set a timeout for initialization - if it takes too long, something is wrong
         if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
         this.recoveryTimer = setTimeout(() => {
-            if (this.currentState !== this.STATE.READY) {
-                console.warn('[AppInit] Initialization timeout - triggering recovery');
-                this.recover('timeout');
+            if (this.currentState !== this.STATE.READY && this.currentState !== this.STATE.DEGRADED) {
+                console.warn('[AppInit] Initialization timeout - entering degraded mode');
+                this.enterDegradedMode('timeout');
             }
         }, 20000); // 20 second timeout
+    },
+
+    // Complete a phase and move to next
+    completePhase(phase) {
+        this.phases[phase] = true;
+        debugLog(`[AppInit] Phase complete: ${phase}`);
+
+        // Update state based on phase
+        if (phase === 'critical') {
+            this.setState(this.STATE.PHASE_AUTH);
+        } else if (phase === 'auth') {
+            this.setState(this.STATE.PHASE_DATA);
+        } else if (phase === 'data') {
+            this.setState(this.STATE.PHASE_CONNECTIONS);
+        } else if (phase === 'connections') {
+            this.complete();
+        }
     },
 
     // Mark critical elements as ready (hamburger, sidebar, etc.)
     markCriticalReady() {
         this.criticalElementsReady = true;
-        this.setState(this.STATE.CRITICAL_INIT);
+        ComponentHealth.setStatus('dom', ComponentHealth.STATUS.HEALTHY);
+        this.setState(this.STATE.PHASE_CRITICAL);
     },
 
     // Mark a component as initialized
-    markInitialized(component) {
+    markInitialized(component, success = true, error = null) {
         if (component in this.initialized) {
-            this.initialized[component] = true;
-            debugLog(`[AppInit] Component initialized: ${component}`);
+            this.initialized[component] = success;
+
+            // Update component health
+            if (success) {
+                ComponentHealth.setStatus(component, ComponentHealth.STATUS.HEALTHY);
+            } else if (error) {
+                ComponentHealth.setStatus(component, ComponentHealth.STATUS.FAILED, error);
+                this.nonCriticalErrors.push({ component, error, timestamp: Date.now() });
+            }
+
+            debugLog(`[AppInit] Component ${success ? 'initialized' : 'failed'}: ${component}`);
         }
 
-        // Check if all critical components are ready
-        if (this.initialized.hamburger && this.initialized.eventListeners) {
-            this.setState(this.STATE.FULL_INIT);
+        // Check if all critical components are ready for each phase
+        this.checkPhaseCompletion();
+    },
+
+    // Check if current phase is complete
+    checkPhaseCompletion() {
+        // Phase 1: Critical (hamburger must work)
+        if (!this.phases.critical && this.initialized.hamburger) {
+            this.completePhase('critical');
         }
 
-        // Check if fully ready
-        if (Object.values(this.initialized).every(v => v)) {
-            this.complete();
+        // Phase 2: Auth
+        if (!this.phases.auth && this.initialized.auth) {
+            this.completePhase('auth');
+        }
+
+        // Phase 3: Data
+        if (!this.phases.data && this.initialized.tier) {
+            this.completePhase('data');
+        }
+
+        // Phase 4: Connections (websocket optional)
+        if (!this.phases.connections && this.initialized.eventListeners) {
+            // WebSocket is optional - don't block on it
+            this.completePhase('connections');
         }
     },
 
@@ -206,8 +588,22 @@ const AppInitManager = {
             this.recoveryTimer = null;
         }
 
+        // Clear any phase timeouts
+        for (const timeout of this.phaseTimeouts.values()) {
+            clearTimeout(timeout);
+        }
+        this.phaseTimeouts.clear();
+
         const duration = Date.now() - this.initStartTime;
-        this.setState(this.STATE.READY, { duration: `${duration}ms` });
+
+        // Check if we should be in degraded mode
+        const hasNonCriticalFailures = this.nonCriticalErrors.length > 0;
+        const finalState = hasNonCriticalFailures ? this.STATE.DEGRADED : this.STATE.READY;
+
+        this.setState(finalState, {
+            duration: `${duration}ms`,
+            nonCriticalErrors: this.nonCriticalErrors.length
+        });
 
         // Remove any loading indicators
         const loader = document.getElementById('app-init-loader');
@@ -216,12 +612,54 @@ const AppInitManager = {
         // Show main content
         document.body.classList.add('app-ready');
         document.body.classList.remove('app-loading', 'app-error');
+
+        // Log final health report
+        if (DEBUG_MODE) {
+            console.log('%c[AppInit] Final Health Report:', 'color: #00ff00', ComponentHealth.getReport());
+        }
+    },
+
+    // Enter degraded mode - app works but some features unavailable
+    enterDegradedMode(reason) {
+        console.warn(`[AppInit] Entering degraded mode: ${reason}`);
+
+        // Mark any uninitialized components as degraded
+        for (const [component, initialized] of Object.entries(this.initialized)) {
+            if (!initialized) {
+                ComponentHealth.setStatus(component, ComponentHealth.STATUS.DEGRADED);
+            }
+        }
+
+        this.setState(this.STATE.DEGRADED, { reason });
+
+        // Still show the UI - don't block on non-critical components
+        document.body.classList.add('app-ready', 'app-degraded');
+        document.body.classList.remove('app-loading');
+
+        // Clear timeouts
+        if (this.recoveryTimer) {
+            clearTimeout(this.recoveryTimer);
+            this.recoveryTimer = null;
+        }
     },
 
     // Handle initialization failure
     fail(error, component = 'unknown') {
         this.lastError = error;
         console.error(`[AppInit] Failure in ${component}:`, error);
+        ComponentHealth.setStatus(component, ComponentHealth.STATUS.FAILED, error);
+
+        // Check if this is a critical component
+        const criticalComponents = ['hamburger', 'dom'];
+        const isCritical = criticalComponents.includes(component);
+
+        if (!isCritical) {
+            // Non-critical failure - record but continue
+            this.nonCriticalErrors.push({ component, error, timestamp: Date.now() });
+            this.markInitialized(component, false, error);
+            return;
+        }
+
         this.setState(this.STATE.FAILED, { error: error.message, component });
 
         // Auto-recover if we haven't exceeded attempts
@@ -246,6 +684,18 @@ const AppInitManager = {
         Object.keys(this.initialized).forEach(k => {
             this.initialized[k] = false;
         });
+        Object.keys(this.phases).forEach(k => {
+            this.phases[k] = false;
+        });
+        this.nonCriticalErrors = [];
+
+        // Reset component health
+        for (const [name] of ComponentHealth.components) {
+            ComponentHealth.setStatus(name, ComponentHealth.STATUS.PENDING);
+        }
+
+        // Clear caches
+        RequestDeduplicator.clear();
 
         // Short delay then retry
         setTimeout(() => {
@@ -338,9 +788,26 @@ const AppInitManager = {
 
     // Check if app is ready
     isReady() {
-        return this.currentState === this.STATE.READY;
+        return this.currentState === this.STATE.READY || this.currentState === this.STATE.DEGRADED;
+    },
+
+    // Get diagnostic information
+    getDiagnostics() {
+        return {
+            state: this.currentState,
+            initAttempts: this.initAttempts,
+            initDuration: this.initStartTime ? Date.now() - this.initStartTime : null,
+            components: this.initialized,
+            phases: this.phases,
+            nonCriticalErrors: this.nonCriticalErrors,
+            componentHealth: ComponentHealth.getReport(),
+            circuitBreakers: CircuitBreaker.getHealth()
+        };
     }
 };
+
+// Expose diagnostics globally for debugging
+window.getAppDiagnostics = () => AppInitManager.getDiagnostics();
 
 // ---------------------------------------------------------------------
 // GLOBAL ERROR BOUNDARY - Catch unhandled errors and promise rejections
@@ -349,7 +816,8 @@ window.addEventListener('error', (event) => {
     console.error('[GlobalError] Unhandled error:', event.error);
 
     // Only trigger recovery if we're still initializing
-    if (AppInitManager.currentState !== AppInitManager.STATE.READY) {
+    if (AppInitManager.currentState !== AppInitManager.STATE.READY &&
+        AppInitManager.currentState !== AppInitManager.STATE.DEGRADED) {
         AppInitManager.fail(event.error || new Error(event.message), 'global');
     }
 });
@@ -358,7 +826,8 @@ window.addEventListener('unhandledrejection', (event) => {
     console.error('[GlobalError] Unhandled promise rejection:', event.reason);
 
     // Only trigger recovery if we're still initializing
-    if (AppInitManager.currentState !== AppInitManager.STATE.READY) {
+    if (AppInitManager.currentState !== AppInitManager.STATE.READY &&
+        AppInitManager.currentState !== AppInitManager.STATE.DEGRADED) {
         // Check if it's a critical error (network/fetch failures)
         const reason = event.reason;
         const isCritical = reason instanceof TypeError ||
@@ -591,9 +1060,12 @@ const AuditStateManager = {
 // ---------------------------------------------------------------------
 // HAMBURGER MENU MANAGER - Ensures mobile menu works after navigation
 // Handles iOS Safari bfcache (back-forward cache) issues
+// Uses EventListenerRegistry to prevent duplicate listeners
 // ---------------------------------------------------------------------
 const HamburgerManager = {
     initialized: false,
+    initStartTime: null,
+    MAX_INIT_TIME: 3000,  // Maximum time to attempt initialization (3 seconds)
 
     // Initialize or re-initialize hamburger menu
     init() {
@@ -606,51 +1078,99 @@ const HamburgerManager = {
             return false;
         }
 
-        // Check if already initialized
-        if (hamburger._hamburgerInitialized) {
-            debugLog('[Hamburger] Already initialized');
-            return true;
-        }
-
-        // Add click handler
-        hamburger.addEventListener('click', () => {
+        // Use EventListenerRegistry to prevent duplicate listeners
+        // This handles the case where init() is called multiple times
+        const clickHandler = () => {
             sidebar.classList.toggle('open');
             hamburger.classList.toggle('open');
             document.body.classList.toggle('sidebar-open');
             mainContent.style.marginLeft = sidebar.classList.contains('open') ? '270px' : '';
-        });
+        };
 
-        // Add keyboard support
-        hamburger.setAttribute('tabindex', '0');
-        hamburger.addEventListener('keydown', (e) => {
+        const keyHandler = (e) => {
             if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
                 hamburger.click();
             }
-        });
+        };
 
+        // Attach with deduplication - replaces any existing listeners
+        EventListenerRegistry.attach(hamburger, 'click', clickHandler, 'hamburger');
+        EventListenerRegistry.attach(hamburger, 'keydown', keyHandler, 'hamburger');
+
+        // Set tabindex for keyboard accessibility
+        hamburger.setAttribute('tabindex', '0');
+
+        // Mark as initialized
         hamburger._hamburgerInitialized = true;
         this.initialized = true;
+        ComponentHealth.setStatus('hamburger', ComponentHealth.STATUS.HEALTHY);
         AppInitManager.markInitialized('hamburger');
         debugLog('[Hamburger] Initialized successfully');
         return true;
     },
 
-    // Retry initialization with delay (for iOS timing issues)
-    initWithRetry(maxRetries = 5, delay = 100) {
+    // Retry initialization with delay and ABSOLUTE TIMEOUT
+    // This prevents infinite retry loops
+    initWithRetry(maxRetries = 10, delay = 100) {
+        // If already initialized, just return
+        if (this.initialized && EventListenerRegistry.has('hamburger', 'click')) {
+            debugLog('[Hamburger] Already initialized, skipping');
+            return;
+        }
+
+        this.initStartTime = Date.now();
         let attempts = 0;
+
         const tryInit = () => {
-            attempts++;
-            if (this.init()) {
+            // Check absolute timeout
+            if (Date.now() - this.initStartTime > this.MAX_INIT_TIME) {
+                console.error('[Hamburger] Initialization timed out after', this.MAX_INIT_TIME, 'ms');
+                ComponentHealth.setStatus('hamburger', ComponentHealth.STATUS.FAILED,
+                    new Error('Hamburger initialization timeout'));
+                // Don't fail the whole app - just mark hamburger as failed
+                // User can still use the app, just navigation won't work
+                AppInitManager.markInitialized('hamburger', false,
+                    new Error('Initialization timeout'));
                 return;
             }
+
+            attempts++;
+            if (this.init()) {
+                return;  // Success!
+            }
+
             if (attempts < maxRetries) {
-                setTimeout(tryInit, delay * attempts); // Exponential backoff
+                // Exponential backoff with jitter to prevent thundering herd
+                const jitter = Math.random() * 50;
+                const backoff = Math.min(delay * attempts + jitter, 500);
+                setTimeout(tryInit, backoff);
             } else {
                 console.warn('[Hamburger] Failed to initialize after', maxRetries, 'attempts');
+                ComponentHealth.setStatus('hamburger', ComponentHealth.STATUS.FAILED,
+                    new Error('Max retries exceeded'));
+                AppInitManager.markInitialized('hamburger', false,
+                    new Error('Failed after max retries'));
             }
         };
+
         tryInit();
+    },
+
+    // Force re-initialization (for recovery scenarios)
+    reinit() {
+        // Remove existing listeners
+        EventListenerRegistry.detachAll('hamburger');
+
+        // Reset state
+        this.initialized = false;
+        const hamburger = document.getElementById('hamburger');
+        if (hamburger) {
+            hamburger._hamburgerInitialized = false;
+        }
+
+        // Re-initialize
+        this.initWithRetry();
     }
 };
 
@@ -3158,58 +3678,34 @@ document.addEventListener("DOMContentLoaded", () => {
       });
 
       // =====================================================
-      // HAMBURGER MENU - Initialize FIRST before async operations
-      // This ensures navigation works even if other init fails
+      // HAMBURGER MENU - Verify initialization
+      // Primary init happens in DOMContentLoaded via HamburgerManager.initWithRetry()
+      // This just verifies it succeeded and does a final attempt if needed
       // =====================================================
-      const _hamburgerStart = DebugTracer.enter('hamburger_init');
+      const _hamburgerStart = DebugTracer.enter('hamburger_verify');
       try {
-        if (hamburger && sidebar && mainContent) {
-          // Check if event listeners are already attached (prevent duplicates)
-          // Use same flag as HamburgerManager to prevent duplicate event listeners
-          if (!hamburger._hamburgerInitialized) {
-            hamburger.addEventListener("click", () => {
-              DebugTracer.snapshot('hamburger_click', {
-                sidebarOpen: sidebar.classList.contains('open'),
-                hamburgerOpen: hamburger.classList.contains('open')
-              });
-              sidebar.classList.toggle("open");
-              hamburger.classList.toggle("open");
-              document.body.classList.toggle('sidebar-open');
-              mainContent.style.marginLeft = sidebar.classList.contains("open") ? "270px" : "";
-            });
-            hamburger.setAttribute("tabindex", "0");
-            hamburger.addEventListener("keydown", (e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                hamburger.click();
-              }
-            });
-            hamburger._hamburgerInitialized = true;
-            HamburgerManager.initialized = true;
-            AppInitManager.markInitialized('hamburger');
-            DebugTracer.exit('hamburger_init', _hamburgerStart, { success: true });
-          } else {
-            // Already initialized - still mark it
-            AppInitManager.markInitialized('hamburger');
-            DebugTracer.exit('hamburger_init', _hamburgerStart, { skipped: 'already_initialized' });
-          }
-          debugLog('[INIT] Hamburger menu initialized');
+        // Check if hamburger was already initialized by HamburgerManager
+        if (HamburgerManager.initialized && EventListenerRegistry.has('hamburger', 'click')) {
+          debugLog('[INIT] Hamburger already initialized by HamburgerManager');
+          DebugTracer.exit('hamburger_verify', _hamburgerStart, { status: 'already_initialized' });
+        } else if (hamburger && sidebar && mainContent) {
+          // Fallback: If HamburgerManager hasn't initialized yet, do it now
+          debugLog('[INIT] Hamburger not yet initialized, running fallback init');
+          HamburgerManager.init();  // This uses EventListenerRegistry internally
+          DebugTracer.exit('hamburger_verify', _hamburgerStart, { status: 'fallback_init' });
         } else {
-          DebugTracer.exit('hamburger_init', _hamburgerStart, {
-            failed: true,
+          // Elements missing - log for debugging
+          DebugTracer.exit('hamburger_verify', _hamburgerStart, {
+            status: 'elements_missing',
             hamburger: !!hamburger,
             sidebar: !!sidebar,
             mainContent: !!mainContent
           });
-          console.warn('[INIT] Hamburger elements missing:', {
-            hamburger: !!hamburger,
-            sidebar: !!sidebar,
-            mainContent: !!mainContent
-          });
+          console.warn('[INIT] Hamburger elements missing - navigation may not work');
         }
       } catch (e) {
-        DebugTracer.error('hamburger_init', e);
-        console.error('[INIT] Hamburger init error:', e);
+        DebugTracer.error('hamburger_verify', e);
+        console.error('[INIT] Hamburger verification error:', e);
       }
 
       // Real-time audit log with persistence
@@ -7115,6 +7611,13 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
       // This ensures users see their upgraded tier immediately after Stripe payment
       // ═══════════════════════════════════════════════════════════════════════
       const _initPaymentStart = DebugTracer.enter('init_payment_or_tier');
+
+      // Track individual component success/failure
+      let authSuccess = false;
+      let tierSuccess = false;
+      let authError = null;
+      let tierError = null;
+
       try {
         const urlParams = new URLSearchParams(window.location.search);
         const hasPaymentRedirect = urlParams.has("upgrade") || urlParams.has("session_id");
@@ -7131,38 +7634,85 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           DebugTracer.snapshot('init_path', { path: 'payment_redirect' });
           await handlePostPaymentRedirect();
           // handlePostPaymentRedirect already calls fetchTierData() and updateAuthStatus()
+          authSuccess = true;
+          tierSuccess = true;
         } else {
-          // Normal page load - fetch tier data normally
+          // Normal page load - fetch tier and auth separately to track individual failures
           DebugTracer.snapshot('init_path', { path: 'normal_load' });
-          await fetchTierData();
-          await updateAuthStatus();
+
+          // Fetch tier data with individual error handling
+          try {
+            await CircuitBreaker.execute('tier-api', async () => {
+              await fetchTierData();
+            });
+            tierSuccess = true;
+          } catch (e) {
+            tierError = e;
+            console.warn("[INIT] Tier fetch failed, continuing with defaults:", e.message);
+          }
+
+          // Fetch auth status with individual error handling
+          try {
+            await CircuitBreaker.execute('auth-api', async () => {
+              await updateAuthStatus();
+            });
+            authSuccess = true;
+          } catch (e) {
+            authError = e;
+            console.warn("[INIT] Auth status failed, continuing:", e.message);
+          }
         }
 
-        // Mark auth and tier as initialized
-        AppInitManager.markInitialized('auth');
-        AppInitManager.markInitialized('tier');
-        AppInitManager.markInitialized('eventListeners');
-
-        DebugTracer.exit('init_payment_or_tier', _initPaymentStart, { success: true });
+        DebugTracer.exit('init_payment_or_tier', _initPaymentStart, {
+          success: authSuccess && tierSuccess,
+          authSuccess,
+          tierSuccess
+        });
       } catch (initErr) {
         DebugTracer.error('init_payment_or_tier', initErr);
         console.error("[INIT] Error during tier/payment initialization:", initErr);
         DebugTracer.exit('init_payment_or_tier', _initPaymentStart, { error: initErr.message });
 
-        // Mark as initialized anyway so we don't block - the UI can still function
-        AppInitManager.markInitialized('auth');
-        AppInitManager.markInitialized('tier');
-        AppInitManager.markInitialized('eventListeners');
+        // Capture the error for reporting
+        if (!authError) authError = initErr;
+        if (!tierError) tierError = initErr;
       }
 
-      // Calm, efficient auth+tier refresh every 30 seconds (no spam)
+      // Mark components with their actual status (success or failure)
+      // This properly tracks what failed instead of masking errors
+      AppInitManager.markInitialized('auth', authSuccess, authError);
+      AppInitManager.markInitialized('tier', tierSuccess, tierError);
+      AppInitManager.markInitialized('eventListeners', true);  // Event listeners always succeed at this point
+
+      // Calm, efficient auth+tier refresh every 30 seconds with circuit breaker
+      // If server is down, circuit breaker prevents flooding failed requests
       if (window.authTierInterval) clearInterval(window.authTierInterval);
+
+      let refreshErrorCount = 0;
+      const MAX_REFRESH_ERRORS = 5;  // Stop refreshing after 5 consecutive errors
+
       window.authTierInterval = setInterval(async () => {
         try {
-          await updateAuthStatus();
-          await fetchTierData();
+          // Use circuit breaker to prevent thundering herd on failing APIs
+          await CircuitBreaker.execute('auth-refresh', async () => {
+            await updateAuthStatus();
+          }, () => null);  // Fallback: silently skip if circuit is open
+
+          await CircuitBreaker.execute('tier-refresh', async () => {
+            await fetchTierData();
+          }, () => null);  // Fallback: silently skip if circuit is open
+
+          refreshErrorCount = 0;  // Reset on success
         } catch (e) {
-          console.error("[REFRESH] Error during periodic refresh:", e);
+          refreshErrorCount++;
+          console.warn(`[REFRESH] Error during periodic refresh (${refreshErrorCount}/${MAX_REFRESH_ERRORS}):`, e.message);
+
+          // Stop refreshing after too many failures to prevent log spam
+          if (refreshErrorCount >= MAX_REFRESH_ERRORS) {
+            console.warn("[REFRESH] Too many errors, stopping periodic refresh. User can reload page to retry.");
+            clearInterval(window.authTierInterval);
+            window.authTierInterval = null;
+          }
         }
       }, 30000);
 
