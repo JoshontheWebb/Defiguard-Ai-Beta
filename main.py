@@ -1216,6 +1216,12 @@ def generate_audit_key() -> str:
     return f"dga_{secrets.token_urlsafe(32)}"
 
 
+def generate_api_key() -> str:
+    """Generate a unique API key for Pro/Enterprise users."""
+    import secrets
+    return f"dgk_{secrets.token_urlsafe(32)}"
+
+
 # ============================================================================
 # EMAIL NOTIFICATION SYSTEM
 # ============================================================================
@@ -2104,9 +2110,9 @@ async def regenerate_api_key(
                 detail="API key regeneration is only available for Pro and Enterprise tiers"
             )
         
-        # Generate new API key (cryptographically secure)
-        new_api_key = secrets.token_urlsafe(32)
-        
+        # Generate new API key (cryptographically secure, with dgk_ prefix)
+        new_api_key = generate_api_key()
+
         # Update user's API key in database
         user.api_key = new_api_key
         db.commit()
@@ -2237,9 +2243,9 @@ async def create_api_key(
                 detail="Pro tier is limited to 5 active API keys. Upgrade to Enterprise for unlimited keys."
             )
         
-        # Generate new API key (cryptographically secure)
-        new_key = secrets.token_urlsafe(32)
-        
+        # Generate new API key (cryptographically secure, with dgk_ prefix)
+        new_key = generate_api_key()
+
         # Create APIKey record
         api_key_obj = APIKey(
             user_id=user.id,
@@ -2917,7 +2923,7 @@ async def ensure_starter_api_key(user, db: Session) -> Optional[APIKey]:
         limits = get_api_key_limits("starter")
         new_key = APIKey(
             user_id=user.id,
-            key=secrets.token_urlsafe(32),
+            key=generate_api_key(),
             label="My Audits",
             is_starter_key=True,
             max_audits=limits["max_audits_per_key"]
@@ -4832,7 +4838,7 @@ class UsageTracker:
             user.last_reset = datetime.now()
             
             if normalized_tier == "pro" and not user.api_key:
-                user.api_key = cast(Optional[str], secrets.token_urlsafe(32))
+                user.api_key = cast(Optional[str], generate_api_key())
             
             if tier == "diamond":
                 user.tier = "pro"
@@ -7319,9 +7325,9 @@ async def complete_tier_checkout(
         user.tier = normalized_tier
         user.has_diamond = has_diamond if normalized_tier == "pro" else False
 
-        # Generate API key for pro/enterprise tiers
+        # Generate API key for pro/enterprise tiers (with dgk_ prefix)
         if normalized_tier in ["pro", "enterprise"] and not user.api_key:
-            user.api_key = cast(Optional[str], secrets.token_urlsafe(32))
+            user.api_key = cast(Optional[str], generate_api_key())
             logger.info(f"[PAYMENT] Generated API key for {username}")
 
         # Handle diamond add-on
@@ -7519,9 +7525,9 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
                     user.tier = normalized_tier
                     user.has_diamond = has_diamond if normalized_tier == "pro" else False
 
-                # Generate API key for pro/enterprise
+                # Generate API key for pro/enterprise (with dgk_ prefix)
                 if normalized_tier in ["pro", "enterprise"] and not user.api_key:
-                    user.api_key = cast(Optional[str], secrets.token_urlsafe(32))
+                    user.api_key = cast(Optional[str], generate_api_key())
                     logger.info(f"[WEBHOOK] Generated API key for {username}")
 
                 usage_tracker.set_tier(normalized_tier, has_diamond, username, db)
