@@ -3772,8 +3772,25 @@ async def broadcast_audit_log(username: str, message: str):
 
     delivered_locally = False
 
+    # DEBUG: Log all active connections to help diagnose username mismatches
+    active_users = list(active_audit_websockets.keys())
+    logger.debug(f"[AUDIT_LOG] Active WebSocket users: {active_users}, looking for: '{username}'")
+
     # ALWAYS try local delivery first (immediate for same-worker connections)
+    # Try exact match first, then case-insensitive match
     ws = active_audit_websockets.get(username)
+    matched_username = username
+
+    if ws is None:
+        # Try case-insensitive match (usernames may have different casing)
+        username_lower = username.lower()
+        for active_user in active_users:
+            if active_user.lower() == username_lower:
+                ws = active_audit_websockets.get(active_user)
+                matched_username = active_user
+                logger.info(f"[AUDIT_LOG] Case-insensitive match: '{username}' -> '{matched_username}'")
+                break
+
     if ws and ws.application_state == WebSocketState.CONNECTED:
         try:
             await ws.send_json({"type": "audit_log", "message": message})
@@ -3782,6 +3799,12 @@ async def broadcast_audit_log(username: str, message: str):
         except Exception as e:
             logger.error(f"[AUDIT_LOG] ❌ Local send failed for '{username}': {e}")
             active_audit_websockets.pop(username, None)
+    else:
+        # Log why delivery failed
+        if ws is None:
+            logger.warning(f"[AUDIT_LOG] ⚠️ No WebSocket found for '{username}' (active: {active_users})")
+        elif ws.application_state != WebSocketState.CONNECTED:
+            logger.warning(f"[AUDIT_LOG] ⚠️ WebSocket for '{username}' not connected (state: {ws.application_state})")
 
     # ALSO use Redis pub/sub for cross-worker messaging (if available)
     if redis_pubsub_client:
