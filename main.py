@@ -991,10 +991,10 @@ if DATABASE_URL:
     @event.listens_for(engine, "invalidate")
     def receive_invalidate(dbapi_conn, connection_record, exception):
         """Log when connections are invalidated."""
-        if exception:
+        if exception and str(exception).strip() not in ('', '()'):
             logger.warning(f"[DB] Connection invalidated due to: {exception}")
         else:
-            logger.debug("[DB] Connection invalidated (manual)")
+            logger.info("[DB] Stale connection invalidated and will be replaced")
 
 elif os.getenv("RENDER"):
     # Fallback: SQLite on Render (WARNING: Data lost on redeploy!)
