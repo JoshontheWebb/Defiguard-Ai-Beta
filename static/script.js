@@ -6178,7 +6178,7 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
       // Flag to prevent double submission
       let isSubmitting = false;
 
-      const handleSubmit = (e) => {
+      const handleSubmit = async (e) => {
         e.preventDefault();
 
         // Prevent double submission
