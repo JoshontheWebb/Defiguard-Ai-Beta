@@ -6179,12 +6179,14 @@ window.showCertoraIssueModal = (index) => {
   const category = issue.category || 'Formal Verification';
   const description = issue.description || issue.reason || 'No additional details available';
   const fix = issue.fix || '';
+  const exploitScenario = issue.exploit_scenario || '';
+  const affectedFunctions = issue.affected_functions || [];
 
   modalTitle.textContent = `[${severity}] ${ruleName}`;
 
   let modalContent = `
     <section>
-      <div class="severity-header" style="display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-4);">
+      <div class="severity-header" style="display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-4); flex-wrap: wrap;">
         <span class="severity-badge ${severity.toLowerCase()}" style="font-size: 1rem; padding: var(--space-2) var(--space-4);">${severity}</span>
         <span class="proven-badge" style="background: var(--error); color: white; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); font-weight: 600;">PROVEN</span>
         <span class="rule-category" style="background: var(--accent-purple); color: white; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm);">${escapeHtml(category)}</span>
@@ -6200,7 +6202,20 @@ window.showCertoraIssueModal = (index) => {
       <h3>🔒 What This Means</h3>
       <p>The Certora Prover has <strong>mathematically proven</strong> that this property can be violated. Unlike static analysis warnings, this is a <em>definitive finding</em> - not a false positive. The prover explored all possible execution paths and found at least one that violates the expected behavior.</p>
     </section>
+  `;
 
+  // Add exploit scenario - prefer AI-generated, fall back to generic
+  if (exploitScenario) {
+    modalContent += `
+    <section>
+      <h3>⚠️ Exploit Scenario</h3>
+      <div style="background: rgba(var(--error-rgb), 0.1); padding: var(--space-4); border-radius: var(--radius-md); border-left: 3px solid var(--error);">
+        <p>${escapeHtml(exploitScenario)}</p>
+      </div>
+    </section>
+    `;
+  } else {
+    modalContent += `
     <section>
       <h3>⚠️ Exploit Scenario</h3>
       <p>Based on the formal verification result for <code>${escapeHtml(ruleName)}</code>:</p>
@@ -6210,7 +6225,22 @@ window.showCertoraIssueModal = (index) => {
         <li>This could lead to loss of funds, locked assets, or unauthorized actions</li>
       </ul>
     </section>
+    `;
+  }
 
+  // Add affected functions if available
+  if (affectedFunctions && affectedFunctions.length > 0) {
+    modalContent += `
+    <section>
+      <h3>📍 Affected Functions</h3>
+      <div style="display: flex; flex-wrap: wrap; gap: var(--space-2);">
+        ${affectedFunctions.map(fn => `<code style="background: var(--bg-secondary); padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm);">${escapeHtml(fn)}</code>`).join('')}
+      </div>
+    </section>
+    `;
+  }
+
+  modalContent += `
     <section>
       <h3>💰 Potential Impact</h3>
       <p><strong>${severity === 'CRITICAL' ? 'Critical: Immediate risk of fund loss or contract compromise' :
@@ -6219,13 +6249,30 @@ window.showCertoraIssueModal = (index) => {
     </section>
   `;
 
-  // Add recommended fix if available
+  // Add recommended fix if available - with code formatting
   if (fix) {
+    // Check if fix contains code (has function, require, etc.)
+    const hasCode = fix.includes('function ') || fix.includes('require(') || fix.includes('modifier ') || fix.includes('//');
     modalContent += `
       <section>
         <h3>✅ Recommended Fix</h3>
         <div class="rule-fix" style="background: var(--bg-secondary); padding: var(--space-4); border-radius: var(--radius-md); border-left: 3px solid var(--success);">
-          <p>${escapeHtml(fix)}</p>
+          ${hasCode ? `<pre style="margin: 0; white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.9em; overflow-x: auto;"><code>${escapeHtml(fix)}</code></pre>` : `<p>${escapeHtml(fix)}</p>`}
+        </div>
+      </section>
+    `;
+  } else {
+    // Provide generic fix guidance when no specific fix is available
+    modalContent += `
+      <section>
+        <h3>⚠️ Fix Required</h3>
+        <div class="rule-fix" style="background: rgba(var(--warning-rgb), 0.1); padding: var(--space-4); border-radius: var(--radius-md); border-left: 3px solid var(--warning);">
+          <p>A specific code fix was not generated. Manual review is required to:</p>
+          <ol style="margin: var(--space-2) 0 0; padding-left: var(--space-5);">
+            <li>Identify which code paths cause the violation</li>
+            <li>Add proper validation or state guards</li>
+            <li>Re-run formal verification to confirm the fix</li>
+          </ol>
         </div>
       </section>
     `;
@@ -6234,13 +6281,14 @@ window.showCertoraIssueModal = (index) => {
   // Add general fix guidance
   modalContent += `
     <section>
-      <h3>🔧 How to Fix</h3>
+      <h3>🔧 Remediation Steps</h3>
       <div style="background: var(--bg-secondary); padding: var(--space-4); border-radius: var(--radius-md);">
         <ol style="margin: 0; padding-left: var(--space-5);">
           <li style="margin-bottom: var(--space-2);"><strong>Review the rule:</strong> Understand what property <code>${escapeHtml(ruleName)}</code> was checking</li>
           <li style="margin-bottom: var(--space-2);"><strong>Identify the vulnerable code:</strong> Look for state-changing functions that may violate this property</li>
-          <li style="margin-bottom: var(--space-2);"><strong>Add proper validation:</strong> Implement require() statements or modifiers to enforce the property</li>
-          <li style="margin-bottom: var(--space-2);"><strong>Re-run verification:</strong> After fixes, run Certora again to confirm the property now holds</li>
+          <li style="margin-bottom: var(--space-2);"><strong>Apply the fix:</strong> Implement the recommended fix or add proper require() statements</li>
+          <li style="margin-bottom: var(--space-2);"><strong>Test thoroughly:</strong> Write unit tests covering edge cases</li>
+          <li style="margin-bottom: var(--space-2);"><strong>Re-verify:</strong> Run Certora again to confirm the property now holds</li>
         </ol>
       </div>
     </section>
@@ -6496,7 +6544,7 @@ window.showCertoraIssueModal = (index) => {
               <div class="certora-rules-list">
           `;
 
-          certoraResults.forEach(result => {
+          certoraResults.forEach((result, i) => {
             // Map status to icon
             let ruleIcon, ruleClass;
             switch(result.status) {

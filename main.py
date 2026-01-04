@@ -4245,8 +4245,13 @@ AUDIT_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "rule": {"type": "string"},
-                    "status": {"type": "string"},
-                    "description": {"type": "string"}
+                    "status": {"type": "string", "enum": ["verified", "violated", "timeout", "error", "pending", "skipped"]},
+                    "severity": {"type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]},
+                    "description": {"type": "string"},
+                    "fix": {"type": "string", "description": "Specific code fix or remediation for violations"},
+                    "category": {"type": "string"},
+                    "exploit_scenario": {"type": "string"},
+                    "affected_functions": {"type": "array", "items": {"type": "string"}}
                 },
                 "required": ["rule", "status"]
             }
@@ -4313,7 +4318,19 @@ Use the FORMAL VERIFICATION section above to enhance your analysis:
 2. VIOLATED PROPERTIES: These are PROVEN BUGS - treat as CRITICAL.
    - Formal verification found actual issues
    - Report these as HIGH or CRITICAL severity
-   - These are not false positives - they are mathematically proven
+   - These are NOT false positives - they are mathematically proven
+
+   ** CRITICAL: For each violated property, you MUST include it in the
+   ** "certora_results" array with:
+   **   - "status": "violated"
+   **   - "severity": "HIGH" or "CRITICAL"
+   **   - "fix": Specific, actionable code fix (actual Solidity code when possible)
+   **   - "category": Category like "State Integrity", "Access Control", etc.
+   **   - "exploit_scenario": How an attacker could exploit this
+   **   - "affected_functions": List of function names affected
+   **
+   ** The "fix" field must contain ACTUAL CODE or precise instructions, NOT
+   ** generic advice like "review the code" or "add validation".
 
 3. UNVERIFIED PROPERTIES: These could NOT be proven safe.
    - The verification engine timed out, had errors, or is pending
@@ -10951,26 +10968,80 @@ For Enterprise tier, also include: "proof_of_concept", "references"
 
             # Add Enterprise/Diamond extras (Certora formal verification)
             if tier_for_flags in ["enterprise", "diamond"] or getattr(user, "has_diamond", False):
-                # Use pre-computed certora_results from Phase 4
-                audit_json["certora_results"] = certora_results
-                audit_json["formal_verification"] = certora_results
+                # MERGE STRATEGY: AI-enhanced results take priority over raw results
+                # The AI should have populated certora_results with fixes, severity, etc.
+                ai_certora = audit_json.get("certora_results", [])
+
+                # Build a lookup of AI-enhanced results by rule name
+                ai_results_by_rule = {}
+                for r in ai_certora:
+                    if isinstance(r, dict) and r.get("rule"):
+                        ai_results_by_rule[r.get("rule", "").lower()] = r
+
+                # Merge: Start with raw Certora results, enhance with AI data
+                merged_certora = []
+                for raw_result in certora_results:
+                    rule_name = raw_result.get("rule", "").lower()
+                    ai_enhanced = ai_results_by_rule.get(rule_name, {})
+
+                    # Merge: AI data takes priority, fall back to raw
+                    merged = {
+                        "rule": raw_result.get("rule") or ai_enhanced.get("rule", "Verification Check"),
+                        "status": raw_result.get("status") or ai_enhanced.get("status", "unknown"),
+                        "severity": ai_enhanced.get("severity") or raw_result.get("severity", "HIGH"),
+                        "description": ai_enhanced.get("description") or raw_result.get("description", ""),
+                        "fix": ai_enhanced.get("fix") or raw_result.get("fix", ""),
+                        "category": ai_enhanced.get("category") or raw_result.get("category", "Formal Verification"),
+                        "exploit_scenario": ai_enhanced.get("exploit_scenario", ""),
+                        "affected_functions": ai_enhanced.get("affected_functions", []),
+                        "proven": True if raw_result.get("status") in ["violated", "issues_found"] else False
+                    }
+                    merged_certora.append(merged)
+
+                # Also add any AI-generated results not in raw (edge case)
+                raw_rules = {r.get("rule", "").lower() for r in certora_results}
+                for ai_result in ai_certora:
+                    if ai_result.get("rule", "").lower() not in raw_rules:
+                        ai_result["proven"] = ai_result.get("status") in ["violated", "issues_found"]
+                        merged_certora.append(ai_result)
+
+                audit_json["certora_results"] = merged_certora
+                audit_json["formal_verification"] = merged_certora
 
                 # INTEGRATE CERTORA VIOLATIONS INTO MAIN ISSUES LIST
-                # This ensures formally proven bugs appear in the main vulnerability table
-                if certora_results:
+                # Only add violations that aren't already in issues (avoid duplicates)
+                if merged_certora:
                     existing_issues = audit_json.get("issues", [])
-                    for cv_result in certora_results:
+                    existing_types = {i.get("type", "").lower() for i in existing_issues}
+
+                    for cv_result in merged_certora:
                         if cv_result.get("status") in ["violated", "issues_found"]:
-                            # Convert Certora violation to standard issue format
+                            rule_name = cv_result.get("rule", "Formal Verification Issue")
+                            issue_type = f"[PROVEN] {rule_name}"
+
+                            # Skip if already in issues (AI may have included it)
+                            if issue_type.lower() in existing_types or f"formal_verification_violation".lower() in existing_types:
+                                # Find and enhance existing issue
+                                for existing in existing_issues:
+                                    if rule_name.lower() in existing.get("type", "").lower():
+                                        existing["proven"] = True
+                                        existing["confidence"] = "Mathematically Proven"
+                                        if cv_result.get("fix") and not existing.get("fix"):
+                                            existing["fix"] = cv_result.get("fix")
+                                continue
+
+                            # Add new formal verification issue
                             formal_issue = {
-                                "type": f"[PROVEN] {cv_result.get('rule', 'Formal Verification Issue')}",
+                                "type": issue_type,
                                 "severity": cv_result.get("severity", "HIGH"),
-                                "description": cv_result.get("description", "Formal verification detected a violation"),
-                                "fix": cv_result.get("fix", "Review the code section related to this property"),
+                                "description": cv_result.get("description") or "Formal verification detected a violation",
+                                "fix": cv_result.get("fix") or "Review and fix the code section related to this property. The formal verification prover found that this rule can be violated under certain conditions.",
                                 "category": cv_result.get("category", "Formal Verification"),
                                 "source": "Certora Prover",
-                                "proven": True,  # Flag as mathematically proven
-                                "confidence": "Mathematically Proven"  # Not just high confidence
+                                "proven": True,
+                                "confidence": "Mathematically Proven",
+                                "exploit_scenario": cv_result.get("exploit_scenario", ""),
+                                "affected_functions": cv_result.get("affected_functions", [])
                             }
                             existing_issues.append(formal_issue)
 
