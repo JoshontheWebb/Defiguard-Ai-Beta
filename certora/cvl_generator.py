@@ -31,6 +31,21 @@ class SolidityFunction:
     mutability: str      # view, pure, payable, or empty
     is_constructor: bool = False
 
+    # Types that CVL doesn't handle well
+    UNSUPPORTED_TYPES = {'string', 'bytes', 'bytes memory', 'bytes calldata', 'string memory', 'string calldata'}
+
+    def has_unsupported_types(self) -> bool:
+        """Check if function has types that CVL doesn't support well."""
+        # Check parameters
+        for param_type, _ in self.params:
+            if any(unsup in param_type.lower() for unsup in ['string', 'bytes']):
+                return True
+        # Check returns
+        for ret_type in self.returns:
+            if any(unsup in ret_type.lower() for unsup in ['string', 'bytes']):
+                return True
+        return False
+
     def to_cvl_declaration(self) -> str:
         """Convert to CVL methods block declaration."""
         # Format parameters
@@ -342,16 +357,30 @@ class SolidityParser:
     def get_all_external_signatures(self) -> List[str]:
         """Get all externally callable function signatures for CVL methods block."""
         signatures = []
+        skipped = []
 
-        # Add explicit functions
+        # Add explicit functions (skip those with unsupported types)
         for func in self.functions:
+            if func.has_unsupported_types():
+                skipped.append(func.name)
+                continue
             signatures.append(func.to_cvl_declaration())
 
-        # Add auto-generated getters for public variables
+        # Add auto-generated getters for public variables (skip string/bytes)
         for var in self.variables:
+            # Skip variables with unsupported types
+            if any(unsup in var.var_type.lower() for unsup in ['string', 'bytes']):
+                skipped.append(var.name)
+                continue
+            if var.is_mapping and any(unsup in var.mapping_value_type.lower() for unsup in ['string', 'bytes']):
+                skipped.append(var.name)
+                continue
             getter = var.to_cvl_getter()
             if getter:
                 signatures.append(getter)
+
+        if skipped:
+            logger.info(f"SolidityParser: Skipped {len(skipped)} items with unsupported CVL types: {skipped[:5]}...")
 
         return signatures
 
