@@ -2532,7 +2532,9 @@ async def lookup_audits_by_api_key(
         risk scores, and expiration info. Full access keys are never shown.
     """
     try:
-        await verify_csrf_token(request)
+        # Note: No CSRF verification needed - API key serves as the credential
+        # CSRF protects session-based auth, not API key auth
+        # Rate limiting provides protection against abuse
 
         # Rate limiting to prevent brute force
         client_ip = request.client.host if request.client else "unknown"
@@ -2683,7 +2685,7 @@ async def retrieve_full_access_key(
         The full access key (only returned once, should be copied immediately)
     """
     try:
-        await verify_csrf_token(request)
+        # Note: No CSRF verification needed - API key serves as the credential
 
         # Rate limiting - stricter for full key retrieval
         client_ip = request.client.host if request.client else "unknown"
@@ -2777,7 +2779,7 @@ async def delete_audit_by_api_key(
     for Starter tier users.
     """
     try:
-        await verify_csrf_token(request)
+        # Note: No CSRF verification needed - API key serves as the credential
 
         # Rate limiting
         client_ip = request.client.host if request.client else "unknown"
