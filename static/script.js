@@ -6098,6 +6098,170 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
   
   debugLog(`[DEBUG] Modal opened for issue ${index}`);
 };
+
+// Show Certora formal verification issue details in modal (Enterprise only)
+window.showCertoraIssueModal = (index) => {
+  const issue = window.currentCertoraIssues?.[index];
+  if (!issue) {
+    console.error('[ERROR] Certora issue not found:', index);
+    return;
+  }
+
+  // Create or reuse modal
+  let modal = document.getElementById('certora-issue-modal');
+  let backdrop = document.getElementById('certora-issue-modal-backdrop');
+
+  if (!modal) {
+    backdrop = document.createElement('div');
+    backdrop.id = 'certora-issue-modal-backdrop';
+    backdrop.className = 'modal-backdrop';
+    backdrop.style.display = 'none';
+    document.body.appendChild(backdrop);
+
+    modal = document.createElement('div');
+    modal.id = 'certora-issue-modal';
+    modal.className = 'issue-details-modal';
+    modal.innerHTML = `
+      <div class="modal-header">
+        <h2 id="certora-modal-title">Formal Verification Details</h2>
+        <div style="display: flex; gap: var(--space-3); align-items: center;">
+          <button class="btn btn-secondary btn-sm" id="copy-certora-modal-content" style="padding: var(--space-2) var(--space-4);">
+            📋 Copy All
+          </button>
+          <button class="modal-close" id="certora-modal-close">&times;</button>
+        </div>
+      </div>
+      <div class="modal-body" id="certora-modal-body">
+      </div>
+    `;
+    document.body.appendChild(modal);
+
+    // Close handlers
+    document.getElementById('certora-modal-close').addEventListener('click', () => {
+      modal.style.display = 'none';
+      backdrop.style.display = 'none';
+      document.body.style.overflow = '';
+    });
+
+    backdrop.addEventListener('click', () => {
+      modal.style.display = 'none';
+      backdrop.style.display = 'none';
+      document.body.style.overflow = '';
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && modal.style.display === 'block') {
+        modal.style.display = 'none';
+        backdrop.style.display = 'none';
+        document.body.style.overflow = '';
+      }
+    });
+
+    // Copy handler
+    document.getElementById('copy-certora-modal-content').addEventListener('click', () => {
+      const modalBody = document.getElementById('certora-modal-body');
+      const textContent = modalBody.innerText;
+      navigator.clipboard.writeText(textContent).then(() => {
+        const btn = document.getElementById('copy-certora-modal-content');
+        const orig = btn.innerHTML;
+        btn.innerHTML = '✅ Copied!';
+        btn.style.background = 'var(--success)';
+        setTimeout(() => { btn.innerHTML = orig; btn.style.background = ''; }, 2000);
+      });
+    });
+  }
+
+  const modalBody = document.getElementById('certora-modal-body');
+  const modalTitle = document.getElementById('certora-modal-title');
+
+  const severity = (issue.severity || 'HIGH').toUpperCase();
+  const ruleName = issue.rule || 'Verification Check';
+  const category = issue.category || 'Formal Verification';
+  const description = issue.description || issue.reason || 'No additional details available';
+  const fix = issue.fix || '';
+
+  modalTitle.textContent = `[${severity}] ${ruleName}`;
+
+  let modalContent = `
+    <section>
+      <div class="severity-header" style="display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-4);">
+        <span class="severity-badge ${severity.toLowerCase()}" style="font-size: 1rem; padding: var(--space-2) var(--space-4);">${severity}</span>
+        <span class="proven-badge" style="background: var(--error); color: white; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); font-weight: 600;">PROVEN</span>
+        <span class="rule-category" style="background: var(--accent-purple); color: white; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm);">${escapeHtml(category)}</span>
+      </div>
+    </section>
+
+    <section>
+      <h3>📝 Description</h3>
+      <p>${escapeHtml(description)}</p>
+    </section>
+
+    <section>
+      <h3>🔒 What This Means</h3>
+      <p>The Certora Prover has <strong>mathematically proven</strong> that this property can be violated. Unlike static analysis warnings, this is a <em>definitive finding</em> - not a false positive. The prover explored all possible execution paths and found at least one that violates the expected behavior.</p>
+    </section>
+
+    <section>
+      <h3>⚠️ Exploit Scenario</h3>
+      <p>Based on the formal verification result for <code>${escapeHtml(ruleName)}</code>:</p>
+      <ul>
+        <li>An attacker or unexpected state transition can trigger the violation</li>
+        <li>The contract may behave differently than intended under certain conditions</li>
+        <li>This could lead to loss of funds, locked assets, or unauthorized actions</li>
+      </ul>
+    </section>
+
+    <section>
+      <h3>💰 Potential Impact</h3>
+      <p><strong>${severity === 'CRITICAL' ? 'Critical: Immediate risk of fund loss or contract compromise' :
+         severity === 'HIGH' ? 'High: Significant risk to contract security or functionality' :
+         'Medium-High: Notable risk that should be addressed before production'}</strong></p>
+    </section>
+  `;
+
+  // Add recommended fix if available
+  if (fix) {
+    modalContent += `
+      <section>
+        <h3>✅ Recommended Fix</h3>
+        <div class="rule-fix" style="background: var(--bg-secondary); padding: var(--space-4); border-radius: var(--radius-md); border-left: 3px solid var(--success);">
+          <p>${escapeHtml(fix)}</p>
+        </div>
+      </section>
+    `;
+  }
+
+  // Add general fix guidance
+  modalContent += `
+    <section>
+      <h3>🔧 How to Fix</h3>
+      <div style="background: var(--bg-secondary); padding: var(--space-4); border-radius: var(--radius-md);">
+        <ol style="margin: 0; padding-left: var(--space-5);">
+          <li style="margin-bottom: var(--space-2);"><strong>Review the rule:</strong> Understand what property <code>${escapeHtml(ruleName)}</code> was checking</li>
+          <li style="margin-bottom: var(--space-2);"><strong>Identify the vulnerable code:</strong> Look for state-changing functions that may violate this property</li>
+          <li style="margin-bottom: var(--space-2);"><strong>Add proper validation:</strong> Implement require() statements or modifiers to enforce the property</li>
+          <li style="margin-bottom: var(--space-2);"><strong>Re-run verification:</strong> After fixes, run Certora again to confirm the property now holds</li>
+        </ol>
+      </div>
+    </section>
+
+    <section>
+      <h3>📚 References</h3>
+      <ul>
+        <li><a href="https://docs.certora.com/" target="_blank" rel="noopener">Certora Documentation</a></li>
+        <li><a href="https://github.com/Certora/Examples" target="_blank" rel="noopener">Certora Examples Repository</a></li>
+        <li><a href="https://www.certora.com/blog" target="_blank" rel="noopener">Certora Blog - Best Practices</a></li>
+      </ul>
+    </section>
+  `;
+
+  modalBody.innerHTML = modalContent;
+
+  // Show modal
+  modal.style.display = 'block';
+  backdrop.style.display = 'block';
+  document.body.style.overflow = 'hidden';
+};
         predictionsList.innerHTML = report.predictions.length === 0
           ? "<li>No predictions available.</li>"
           : report.predictions.map(p => `<li tabindex="0">Scenario: ${escapeHtml(p.scenario || 'N/A')} | Impact: ${escapeHtml(p.impact || 'N/A')}</li>`).join('');
@@ -6238,6 +6402,9 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           if (!certoraResults || certoraResults.length === 0) {
             return `<div class="certora-empty"><p>🔒 No formal verification results available.</p></div>`;
           }
+
+          // Store Certora results globally for modal access
+          window.currentCertoraIssues = certoraResults;
 
           const verified = certoraResults.filter(r => r.status === 'verified').length;
           const violated = certoraResults.filter(r => r.status === 'violated' || r.status === 'issues_found').length;
@@ -6394,6 +6561,11 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
                     <div class="rule-fix">
                       <strong>🔧 Recommended Fix:</strong> ${escapeHtml(fix)}
                     </div>
+                  ` : ''}
+                  ${isViolation ? `
+                    <button class="expand-btn certora-analysis-btn" onclick="showCertoraIssueModal(${i})" style="background: var(--gradient-accent-reverse); margin-top: var(--space-3);">
+                      🔬 Full Analysis
+                    </button>
                   ` : ''}
                 </div>
               </div>
