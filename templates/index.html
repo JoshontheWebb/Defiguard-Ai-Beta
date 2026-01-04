@@ -1202,6 +1202,27 @@
                         <!-- Populated by JavaScript -->
                     </div>
                 </div>
+
+                <!-- API Key Lookup (Pro/Enterprise) -->
+                <div class="api-key-lookup-section" style="border: 2px dashed var(--accent-teal); border-radius: var(--radius-lg); padding: var(--space-6); text-align: center; background: linear-gradient(135deg, rgba(14, 165, 233, 0.05), rgba(168, 85, 247, 0.05)); margin-top: var(--space-4);">
+                    <div style="margin-bottom: var(--space-3);">
+                        <span style="font-size: 2rem;">🗂️</span>
+                    </div>
+                    <p style="margin: 0 0 12px 0; color: var(--text-secondary);">
+                        Have an <strong>API Key</strong>? View all your saved audits:
+                    </p>
+                    <div style="display: flex; gap: var(--space-2); max-width: 400px; margin: 0 auto;">
+                        <input type="text" id="settings-api-key-input" placeholder="dgk_..."
+                               style="flex: 1; font-family: 'JetBrains Mono', monospace; padding: var(--space-3); background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-md); color: var(--text-primary);"
+                               aria-label="API Key">
+                        <button id="settings-api-key-lookup-btn" class="btn btn-primary" style="min-width: 120px;">
+                            📋 Look Up
+                        </button>
+                    </div>
+                    <small style="display: block; margin-top: var(--space-3); color: var(--text-tertiary);">
+                        API Keys (Pro/Enterprise) store multiple audits. Enter your key to see all saved results.
+                    </small>
+                </div>
             </div>
 
             <!-- Theme Selection -->
