@@ -2032,7 +2032,7 @@ rule onlyOwnerCanRenounce(env e) {{
                 paused_var = v
                 break
 
-        if (has_pause or has_unpause) and (paused_var or "paused" in func_names):
+        if (has_pause or has_unpause) and (paused_var or "paused" in all_func_names):
             detected_patterns.append("Pausable")
             paused_getter = paused_var.name if paused_var else "paused"
             rules.append(f"""
