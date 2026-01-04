@@ -1192,6 +1192,10 @@ class AuditResult(Base):
     # Link to in-memory job_id for real-time updates
     job_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
 
+    # Expiration for result retention policy (tier-based)
+    # After this date, results are no longer retrievable
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+
     # API Key assignment (Pro/Enterprise feature)
     # Allows users to organize audits by project/client via named API keys
     api_key_id: Mapped[Optional[int]] = mapped_column(
@@ -1563,6 +1567,10 @@ def run_migrations():
             "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS is_starter_key BOOLEAN DEFAULT FALSE",
             # Add api_key_id to audit_results if it doesn't exist
             "ALTER TABLE audit_results ADD COLUMN IF NOT EXISTS api_key_id INTEGER REFERENCES api_keys(id)",
+            # Add expires_at for result retention policy
+            "ALTER TABLE audit_results ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP",
+            # Create index for efficient expired audit cleanup
+            "CREATE INDEX IF NOT EXISTS ix_audit_results_expires_at ON audit_results(expires_at)",
         ]
     else:
         # SQLite doesn't support IF NOT EXISTS for columns - need to check pragma
@@ -2497,6 +2505,354 @@ async def unlink_audit_from_api_key(
         raise HTTPException(status_code=500, detail="Failed to unlink audit")
 
 
+@app.post("/api/audits/lookup-by-key")
+async def lookup_audits_by_api_key(
+    request: Request,
+    body: dict = Body(...),
+    db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """
+    Look up all audit access keys stored under an API key.
+
+    This endpoint allows users to retrieve their access keys by providing
+    their API key string (dgk_...). Does NOT require authentication -
+    the API key itself serves as the credential.
+
+    Request body:
+        api_key: The full API key string (dgk_...)
+
+    Returns:
+        List of audits with masked access keys, contract names, status,
+        risk scores, and expiration info. Full access keys are never shown.
+    """
+    try:
+        await verify_csrf_token(request)
+
+        # Rate limiting to prevent brute force
+        client_ip = request.client.host if request.client else "unknown"
+        rate_key = f"audit_lookup:{client_ip}"
+
+        # Strict rate limit: 10 requests per minute per IP
+        if not await rate_limiter.is_allowed(rate_key, 10, 60):
+            retry_after = await rate_limiter.get_retry_after(rate_key, 60)
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many lookup attempts. Try again in {retry_after} seconds.",
+                headers={"Retry-After": str(retry_after)}
+            )
+
+        # Extract and validate API key
+        api_key_string = body.get("api_key", "").strip()
+
+        if not api_key_string:
+            raise HTTPException(status_code=400, detail="API key is required")
+
+        if not api_key_string.startswith("dgk_"):
+            raise HTTPException(status_code=400, detail="Invalid API key format. Keys start with 'dgk_'")
+
+        if len(api_key_string) < 20:
+            raise HTTPException(status_code=400, detail="Invalid API key format")
+
+        # Look up the API key
+        api_key = db.query(APIKey).filter(
+            APIKey.key == api_key_string,
+            APIKey.is_active == True
+        ).first()
+
+        if not api_key:
+            # Don't reveal whether key exists or is inactive
+            raise HTTPException(status_code=404, detail="API key not found or inactive")
+
+        # Update last used timestamp
+        api_key.last_used_at = datetime.now(timezone.utc)
+
+        # Get the user's tier for retention info
+        user = db.query(User).filter(User.id == api_key.user_id).first()
+        user_tier = user.tier if user else "free"
+        retention_days = get_audit_retention_days(user_tier)
+
+        # Get all audits linked to this API key
+        now = datetime.now(timezone.utc)
+        audits = db.query(AuditResult).filter(
+            AuditResult.api_key_id == api_key.id
+        ).order_by(AuditResult.created_at.desc()).all()
+
+        # Build response with masked access keys
+        audit_list = []
+        for audit in audits:
+            # Check if audit has expired
+            is_expired = False
+            expires_at_str = None
+            time_remaining = None
+
+            if audit.expires_at:
+                expires_at_str = audit.expires_at.isoformat()
+                if audit.expires_at.tzinfo is None:
+                    # Assume UTC if no timezone
+                    audit_expires_utc = audit.expires_at.replace(tzinfo=timezone.utc)
+                else:
+                    audit_expires_utc = audit.expires_at
+
+                is_expired = now > audit_expires_utc
+
+                if not is_expired:
+                    # Calculate time remaining
+                    remaining = audit_expires_utc - now
+                    days_left = remaining.days
+                    hours_left = remaining.seconds // 3600
+                    if days_left > 0:
+                        time_remaining = f"{days_left} day{'s' if days_left != 1 else ''}"
+                    elif hours_left > 0:
+                        time_remaining = f"{hours_left} hour{'s' if hours_left != 1 else ''}"
+                    else:
+                        time_remaining = "Less than 1 hour"
+
+            # Mask the access key (show first 8 and last 4 chars)
+            masked_key = None
+            if audit.audit_key:
+                if len(audit.audit_key) > 16:
+                    masked_key = f"{audit.audit_key[:8]}...{audit.audit_key[-4:]}"
+                else:
+                    masked_key = "****"
+
+            audit_list.append({
+                "id": audit.id,
+                "access_key_masked": masked_key,
+                "contract_name": audit.contract_name or "Unknown Contract",
+                "status": audit.status,
+                "risk_score": audit.risk_score,
+                "issues_count": audit.issues_count,
+                "critical_count": audit.critical_count,
+                "high_count": audit.high_count,
+                "created_at": audit.created_at.isoformat() if audit.created_at else None,
+                "completed_at": audit.completed_at.isoformat() if audit.completed_at else None,
+                "expires_at": expires_at_str,
+                "is_expired": is_expired,
+                "time_remaining": time_remaining,
+                "has_pdf": bool(audit.pdf_path)
+            })
+
+        db.commit()  # Save the last_used_at update
+
+        logger.info(f"[AUDIT_LOOKUP] API key {api_key_string[:12]}... retrieved {len(audit_list)} audits")
+
+        return {
+            "success": True,
+            "api_key_label": api_key.label,
+            "api_key_preview": f"{api_key_string[:8]}...{api_key_string[-4:]}",
+            "total_audits": len(audit_list),
+            "audits": audit_list,
+            "retention_info": {
+                "tier": user_tier,
+                "retention_days": retention_days,
+                "policy_description": f"Results are retained for {retention_days} day{'s' if retention_days != 1 else ''}"
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[AUDIT_LOOKUP] Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to look up audits")
+
+
+@app.post("/api/audits/retrieve-full-key")
+async def retrieve_full_access_key(
+    request: Request,
+    body: dict = Body(...),
+    db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """
+    Retrieve the full access key for a specific audit.
+
+    Requires both the API key (for authorization) and the audit ID.
+    This allows users to copy the full access key for an audit
+    they've already looked up.
+
+    Request body:
+        api_key: The full API key string (dgk_...)
+        audit_id: The audit ID to retrieve the key for
+
+    Returns:
+        The full access key (only returned once, should be copied immediately)
+    """
+    try:
+        await verify_csrf_token(request)
+
+        # Rate limiting - stricter for full key retrieval
+        client_ip = request.client.host if request.client else "unknown"
+        rate_key = f"key_retrieve:{client_ip}"
+
+        # Very strict: 20 requests per minute per IP
+        if not await rate_limiter.is_allowed(rate_key, 20, 60):
+            retry_after = await rate_limiter.get_retry_after(rate_key, 60)
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many key retrieval attempts. Try again in {retry_after} seconds.",
+                headers={"Retry-After": str(retry_after)}
+            )
+
+        # Extract parameters
+        api_key_string = body.get("api_key", "").strip()
+        audit_id = body.get("audit_id")
+
+        if not api_key_string:
+            raise HTTPException(status_code=400, detail="API key is required")
+
+        if not audit_id:
+            raise HTTPException(status_code=400, detail="Audit ID is required")
+
+        if not api_key_string.startswith("dgk_"):
+            raise HTTPException(status_code=400, detail="Invalid API key format")
+
+        # Look up the API key
+        api_key = db.query(APIKey).filter(
+            APIKey.key == api_key_string,
+            APIKey.is_active == True
+        ).first()
+
+        if not api_key:
+            raise HTTPException(status_code=404, detail="API key not found or inactive")
+
+        # Find the audit and verify it belongs to this API key
+        audit = db.query(AuditResult).filter(
+            AuditResult.id == audit_id,
+            AuditResult.api_key_id == api_key.id
+        ).first()
+
+        if not audit:
+            raise HTTPException(status_code=404, detail="Audit not found or not linked to this API key")
+
+        # Check expiration
+        now = datetime.now(timezone.utc)
+        if audit.expires_at:
+            if audit.expires_at.tzinfo is None:
+                audit_expires_utc = audit.expires_at.replace(tzinfo=timezone.utc)
+            else:
+                audit_expires_utc = audit.expires_at
+
+            if now > audit_expires_utc:
+                raise HTTPException(
+                    status_code=410,
+                    detail="This audit has expired. Results are no longer available."
+                )
+
+        logger.info(f"[KEY_RETRIEVE] Full access key retrieved for audit {audit_id} via API key {api_key_string[:12]}...")
+
+        return {
+            "success": True,
+            "audit_id": audit_id,
+            "access_key": audit.audit_key,
+            "contract_name": audit.contract_name,
+            "warning": "Store this key securely. It provides access to your audit results."
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[KEY_RETRIEVE] Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve access key")
+
+
+@app.delete("/api/audits/delete-by-key")
+async def delete_audit_by_api_key(
+    request: Request,
+    body: dict = Body(...),
+    db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """
+    Delete an audit and its cached results using the API key.
+
+    Request body:
+        api_key: The full API key string (dgk_...)
+        audit_id: The audit ID to delete
+
+    This permanently removes the audit results and frees up the slot
+    for Starter tier users.
+    """
+    try:
+        await verify_csrf_token(request)
+
+        # Rate limiting
+        client_ip = request.client.host if request.client else "unknown"
+        rate_key = f"audit_delete:{client_ip}"
+
+        # Moderate limit: 30 deletions per minute
+        if not await rate_limiter.is_allowed(rate_key, 30, 60):
+            retry_after = await rate_limiter.get_retry_after(rate_key, 60)
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many deletion requests. Try again in {retry_after} seconds.",
+                headers={"Retry-After": str(retry_after)}
+            )
+
+        # Extract parameters
+        api_key_string = body.get("api_key", "").strip()
+        audit_id = body.get("audit_id")
+
+        if not api_key_string:
+            raise HTTPException(status_code=400, detail="API key is required")
+
+        if not audit_id:
+            raise HTTPException(status_code=400, detail="Audit ID is required")
+
+        if not api_key_string.startswith("dgk_"):
+            raise HTTPException(status_code=400, detail="Invalid API key format")
+
+        # Look up the API key
+        api_key = db.query(APIKey).filter(
+            APIKey.key == api_key_string,
+            APIKey.is_active == True
+        ).first()
+
+        if not api_key:
+            raise HTTPException(status_code=404, detail="API key not found or inactive")
+
+        # Find the audit and verify it belongs to this API key
+        audit = db.query(AuditResult).filter(
+            AuditResult.id == audit_id,
+            AuditResult.api_key_id == api_key.id
+        ).first()
+
+        if not audit:
+            raise HTTPException(status_code=404, detail="Audit not found or not linked to this API key")
+
+        contract_name = audit.contract_name
+
+        # Delete associated PDF file if exists
+        if audit.pdf_path and os.path.exists(audit.pdf_path):
+            try:
+                os.remove(audit.pdf_path)
+                logger.info(f"[AUDIT_DELETE] Deleted PDF file: {audit.pdf_path}")
+            except Exception as e:
+                logger.warning(f"[AUDIT_DELETE] Could not delete PDF file: {e}")
+
+        # Delete the audit record
+        db.delete(audit)
+
+        # Decrement the audit count on the API key
+        if api_key.audit_count > 0:
+            api_key.audit_count -= 1
+
+        db.commit()
+
+        logger.info(f"[AUDIT_DELETE] Deleted audit {audit_id} ({contract_name}) via API key {api_key_string[:12]}...")
+
+        return {
+            "success": True,
+            "message": f"Audit '{contract_name}' has been permanently deleted",
+            "audit_id": audit_id,
+            "new_audit_count": api_key.audit_count
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[AUDIT_DELETE] Error: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete audit")
+
+
 def get_api_key_limits(tier: str) -> dict[str, Any]:
     """Get API key limits based on user tier."""
     limits = {
@@ -2507,6 +2863,35 @@ def get_api_key_limits(tier: str) -> dict[str, Any]:
         "diamond": {"max_keys": None, "max_audits_per_key": None}
     }
     return limits.get(tier, limits["free"])
+
+
+def get_audit_retention_days(tier: str) -> int:
+    """
+    Get audit result retention period in days based on user tier.
+
+    Retention Policy:
+    - Free: 24 hours (1 day) - Incentive to upgrade
+    - Starter: 7 days - Basic storage
+    - Pro: 30 days - Professional use
+    - Enterprise: 90 days - Compliance needs
+    - Diamond: 180 days - Premium long-term storage
+
+    Returns the number of days results should be retained.
+    """
+    retention = {
+        "free": 1,
+        "starter": 7,
+        "pro": 30,
+        "enterprise": 90,
+        "diamond": 180
+    }
+    return retention.get(tier, 1)  # Default to 1 day
+
+
+def calculate_expiration(tier: str) -> datetime:
+    """Calculate expiration datetime based on tier retention policy."""
+    days = get_audit_retention_days(tier)
+    return datetime.now(timezone.utc) + timedelta(days=days)
 
 
 async def ensure_starter_api_key(user, db: Session) -> Optional[APIKey]:
@@ -6226,31 +6611,82 @@ async def serve_static(file_path: str):
 async def download_report(
     report_filename: str,
     request: Request,
+    access_key: Optional[str] = Query(None, description="Access key for unauthenticated download"),
+    db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_authenticated_user)
 ):
     """
     Protected PDF report download endpoint.
-    Only allows authenticated users to download their own reports.
-    """
-    # Require authentication
-    if not current_user:
-        raise HTTPException(status_code=401, detail="Authentication required to download reports")
 
+    Allows download via:
+    1. Authentication - logged-in users can download their own reports
+    2. Access Key - anyone with a valid access key can download the associated report
+
+    The access key approach enables sharing reports and downloading without login.
+    """
     # Validate filename format (prevent path traversal)
     if not report_filename.endswith('.pdf') or '..' in report_filename or '/' in report_filename:
         raise HTTPException(status_code=400, detail="Invalid report filename")
-
-    # Check if the report belongs to this user (filename contains username)
-    # Format: audit_report_{username}_{timestamp}.pdf
-    if f"_{current_user.username}_" not in report_filename:
-        logger.warning(f"[REPORT] User {current_user.username} attempted to access report: {report_filename}")
-        raise HTTPException(status_code=403, detail="You can only download your own reports")
 
     # Build full path
     report_path = os.path.join(DATA_DIR, report_filename)
 
     if not os.path.isfile(report_path):
         raise HTTPException(status_code=404, detail="Report not found")
+
+    # Method 1: Access Key validation (allows unauthenticated access to specific report)
+    if access_key:
+        # Validate access key format
+        if not access_key.startswith("dga_"):
+            raise HTTPException(status_code=400, detail="Invalid access key format")
+
+        # Look up the audit by access key
+        audit_result = db.query(AuditResult).filter(
+            AuditResult.audit_key == access_key
+        ).first()
+
+        if not audit_result:
+            raise HTTPException(status_code=404, detail="Access key not found or expired")
+
+        # Check expiration
+        if audit_result.expires_at:
+            now = datetime.now(timezone.utc)
+            if audit_result.expires_at.tzinfo is None:
+                audit_expires_utc = audit_result.expires_at.replace(tzinfo=timezone.utc)
+            else:
+                audit_expires_utc = audit_result.expires_at
+
+            if now > audit_expires_utc:
+                raise HTTPException(
+                    status_code=410,
+                    detail="This audit has expired. Results are no longer available."
+                )
+
+        # Verify the PDF belongs to this audit
+        if not audit_result.pdf_path or os.path.basename(audit_result.pdf_path) != report_filename:
+            logger.warning(f"[REPORT] Access key {access_key[:20]}... attempted to access wrong report: {report_filename}")
+            raise HTTPException(status_code=403, detail="This report is not associated with your access key")
+
+        logger.info(f"[REPORT] Serving PDF via access key: {report_filename} (key: {access_key[:16]}...)")
+        return FileResponse(
+            report_path,
+            media_type="application/pdf",
+            filename=report_filename,
+            headers={"Content-Disposition": f"attachment; filename={report_filename}"}
+        )
+
+    # Method 2: Authentication-based access (original behavior)
+    if not current_user:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required to download reports. Alternatively, provide an access key."
+        )
+
+    # Check if the report belongs to this user (filename contains username)
+    # Format: audit_report_{username}_{timestamp}.pdf
+    if f"_{current_user.username}_" not in report_filename:
+        logger.warning(f"[REPORT] User {current_user.username} attempted to access report: {report_filename}")
+        raise HTTPException(status_code=403, detail="You can only download your own reports")
 
     logger.info(f"[REPORT] Serving PDF report: {report_filename} to {current_user.username}")
     return FileResponse(
@@ -9020,7 +9456,8 @@ async def submit_audit_to_queue(
                     user_tier=tier,
                     notification_email=user_email if tier in ["pro", "enterprise"] else None,
                     job_id=job.job_id,
-                    api_key_id=validated_api_key_id  # Assign to API key if specified
+                    api_key_id=validated_api_key_id,  # Assign to API key if specified
+                    expires_at=calculate_expiration(tier)  # Tier-based retention
                 )
                 db.add(audit_result)
                 db.commit()
@@ -9124,13 +9561,62 @@ async def retrieve_audit_by_key(
     if not audit_result:
         raise HTTPException(status_code=404, detail="Audit not found. The key may be invalid or expired.")
 
+    # Check if audit has expired (tier-based retention policy)
+    if audit_result.expires_at:
+        now = datetime.now(timezone.utc)
+        if audit_result.expires_at.tzinfo is None:
+            # Assume UTC if no timezone info
+            audit_expires_utc = audit_result.expires_at.replace(tzinfo=timezone.utc)
+        else:
+            audit_expires_utc = audit_result.expires_at
+
+        if now > audit_expires_utc:
+            # Calculate how long ago it expired for the message
+            expired_ago = now - audit_expires_utc
+            if expired_ago.days > 0:
+                expired_msg = f"expired {expired_ago.days} day{'s' if expired_ago.days != 1 else ''} ago"
+            elif expired_ago.seconds >= 3600:
+                hours = expired_ago.seconds // 3600
+                expired_msg = f"expired {hours} hour{'s' if hours != 1 else ''} ago"
+            else:
+                expired_msg = "recently expired"
+
+            raise HTTPException(
+                status_code=410,
+                detail=f"This audit has {expired_msg}. Results are no longer available. "
+                       f"Upgrade your tier for longer retention periods."
+            )
+
     # Build response based on status
+    # Include expiration info in response
+    expires_at_str = None
+    time_remaining = None
+    if audit_result.expires_at:
+        expires_at_str = audit_result.expires_at.isoformat()
+        now = datetime.now(timezone.utc)
+        if audit_result.expires_at.tzinfo is None:
+            audit_expires_utc = audit_result.expires_at.replace(tzinfo=timezone.utc)
+        else:
+            audit_expires_utc = audit_result.expires_at
+
+        remaining = audit_expires_utc - now
+        days_left = remaining.days
+        hours_left = remaining.seconds // 3600
+        if days_left > 0:
+            time_remaining = f"{days_left} day{'s' if days_left != 1 else ''}"
+        elif hours_left > 0:
+            time_remaining = f"{hours_left} hour{'s' if hours_left != 1 else ''}"
+        else:
+            time_remaining = "Less than 1 hour"
+
     response = {
         "audit_key": audit_result.audit_key,
         "status": audit_result.status,
         "contract_name": audit_result.contract_name,
         "created_at": audit_result.created_at.isoformat() if audit_result.created_at else None,
-        "user_tier": audit_result.user_tier
+        "user_tier": audit_result.user_tier,
+        "expires_at": expires_at_str,
+        "time_remaining": time_remaining
     }
 
     if audit_result.status == "queued":
@@ -9715,7 +10201,8 @@ async def audit_contract(
                             user_tier=current_tier,
                             notification_email=session_email if current_tier in ["pro", "enterprise"] else None,
                             job_id=job.job_id,
-                            api_key_id=validated_api_key_id  # Assign to API key if specified
+                            api_key_id=validated_api_key_id,  # Assign to API key if specified
+                            expires_at=calculate_expiration(current_tier)  # Tier-based retention
                         )
                         db.add(audit_result)
                         db.commit()
@@ -9782,6 +10269,7 @@ async def audit_contract(
                         user_tier=current_tier,
                         notification_email=session_email if current_tier in ["pro", "enterprise"] else None,
                         api_key_id=validated_api_key_id,
+                        expires_at=calculate_expiration(current_tier)  # Tier-based retention
                     )
                     db.add(audit_result)
                     db.commit()
@@ -10699,7 +11187,8 @@ For Enterprise tier, also include: "proof_of_concept", "references"
                             low_count=low_count,
                             full_report=json.dumps(report),  # CRITICAL: Save for access key retrieval
                             pdf_path=pdf_path,
-                            completed_at=datetime.now(timezone.utc)
+                            completed_at=datetime.now(timezone.utc),
+                            expires_at=calculate_expiration(current_tier)  # Tier-based retention
                         )
                         db.add(audit_result)
                         db.commit()

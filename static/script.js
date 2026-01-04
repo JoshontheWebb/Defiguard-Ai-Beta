@@ -1689,13 +1689,21 @@ window.retrieveAuditByKey = async function(auditKey) {
 
         // Display results based on status
         if (data.status === 'completed' && data.report) {
+            // Add access key to PDF URL for authenticated download
+            let pdfUrlWithKey = data.pdf_url;
+            if (pdfUrlWithKey && auditKey) {
+                // Append access key as query parameter for secure download
+                const separator = pdfUrlWithKey.includes('?') ? '&' : '?';
+                pdfUrlWithKey = `${pdfUrlWithKey}${separator}access_key=${encodeURIComponent(auditKey)}`;
+            }
+
             // Build the same structure that handleAuditResponse expects
             const auditData = {
                 report: data.report,
                 risk_score: data.risk_score || data.report.risk_score,
                 tier: data.user_tier,
                 audit_key: data.audit_key,
-                pdf_url: data.pdf_url
+                pdf_url: pdfUrlWithKey  // URL now includes access key
             };
 
             console.log('[AUDIT_RETRIEVE] Calling handleAuditResponse with:', auditData);
@@ -1964,6 +1972,441 @@ window.showUnlinkedAuditWarning = function() {
         document.addEventListener('keydown', handleEscape);
     });
 };
+
+// ---------------------------------------------------------------------
+// API KEY AUDIT LOOKUP SYSTEM
+// Look up all audits stored under an API key (dgk_...)
+// ---------------------------------------------------------------------
+
+// State for storing the current API key during lookup session
+let currentLookupApiKey = null;
+
+// Look up audits by API key
+window.lookupAuditsByApiKey = async function(apiKeyString) {
+    if (!apiKeyString || !apiKeyString.trim()) {
+        ToastNotification.show('Please enter an API key', 'warning');
+        return null;
+    }
+
+    apiKeyString = apiKeyString.trim();
+
+    // Validate format
+    if (!apiKeyString.startsWith('dgk_')) {
+        ToastNotification.show('Invalid API key format. Keys start with "dgk_"', 'error');
+        return null;
+    }
+
+    if (apiKeyString.length < 20) {
+        ToastNotification.show('API key seems too short. Please check and try again.', 'error');
+        return null;
+    }
+
+    try {
+        // Show loading state
+        const lookupBtn = document.getElementById('settings-api-key-lookup-btn');
+        const originalText = lookupBtn ? lookupBtn.textContent : '';
+        if (lookupBtn) {
+            lookupBtn.disabled = true;
+            lookupBtn.textContent = '⏳ Loading...';
+        }
+
+        const response = await fetch('/api/audits/lookup-by-key', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': window.csrfToken || ''
+            },
+            body: JSON.stringify({ api_key: apiKeyString })
+        });
+
+        // Restore button
+        if (lookupBtn) {
+            lookupBtn.disabled = false;
+            lookupBtn.textContent = originalText;
+        }
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to look up audits');
+        }
+
+        const data = await response.json();
+
+        // Store the API key for subsequent operations
+        currentLookupApiKey = apiKeyString;
+
+        // Show the results modal
+        showApiKeyAuditsModal(data);
+
+        return data;
+    } catch (error) {
+        console.error('API key lookup error:', error);
+        ToastNotification.show(error.message || 'Failed to look up audits', 'error');
+        return null;
+    }
+};
+
+// Show modal with all audits under an API key
+function showApiKeyAuditsModal(data) {
+    // Remove existing modal if present
+    let modal = document.getElementById('api-key-audits-modal');
+    if (modal) {
+        modal.remove();
+    }
+
+    // Create modal
+    modal = document.createElement('div');
+    modal.id = 'api-key-audits-modal';
+    modal.className = 'modal-backdrop';
+    modal.style.cssText = 'display: flex; z-index: 100001;';
+
+    const audits = data.audits || [];
+    const hasAudits = audits.length > 0;
+
+    // Build audit list HTML
+    let auditListHtml = '';
+    if (hasAudits) {
+        auditListHtml = audits.map(audit => {
+            const statusIcon = audit.status === 'completed' ? '✅' :
+                               audit.status === 'processing' ? '⏳' :
+                               audit.status === 'queued' ? '📋' :
+                               audit.status === 'failed' ? '❌' : '❓';
+
+            const riskColor = audit.risk_score >= 80 ? '#e74c3c' :
+                              audit.risk_score >= 60 ? '#f39c12' :
+                              audit.risk_score >= 40 ? '#f1c40f' : '#27ae60';
+
+            const expirationHtml = audit.is_expired ?
+                '<span style="color: #e74c3c; font-size: 12px;">⚠️ Expired</span>' :
+                audit.time_remaining ?
+                    `<span style="color: var(--text-tertiary); font-size: 12px;">⏱️ ${audit.time_remaining} left</span>` :
+                    '';
+
+            return `
+                <div class="audit-item" data-audit-id="${audit.id}" style="
+                    background: var(--glass-bg);
+                    border: 1px solid var(--glass-border);
+                    border-radius: var(--radius-md);
+                    padding: 16px;
+                    margin-bottom: 12px;
+                    ${audit.is_expired ? 'opacity: 0.6;' : ''}
+                ">
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
+                        <div>
+                            <span style="font-size: 16px; margin-right: 8px;">${statusIcon}</span>
+                            <strong style="color: var(--text-primary);">${escapeHtml(audit.contract_name)}</strong>
+                        </div>
+                        ${audit.risk_score !== null ? `
+                            <span style="
+                                background: ${riskColor};
+                                color: white;
+                                padding: 4px 10px;
+                                border-radius: 12px;
+                                font-size: 12px;
+                                font-weight: 600;
+                            ">Risk: ${audit.risk_score}</span>
+                        ` : ''}
+                    </div>
+                    <div style="display: flex; flex-wrap: wrap; gap: 12px; color: var(--text-tertiary); font-size: 13px; margin-bottom: 12px;">
+                        <span>📅 ${audit.created_at ? new Date(audit.created_at).toLocaleDateString() : 'Unknown'}</span>
+                        ${audit.issues_count !== null ? `<span>🔍 ${audit.issues_count} issues</span>` : ''}
+                        ${audit.critical_count > 0 ? `<span style="color: #e74c3c;">🚨 ${audit.critical_count} critical</span>` : ''}
+                        ${expirationHtml}
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <code style="
+                            flex: 1;
+                            padding: 8px 12px;
+                            background: var(--bg-tertiary);
+                            border-radius: var(--radius-sm);
+                            font-size: 12px;
+                            color: var(--text-secondary);
+                            overflow: hidden;
+                            text-overflow: ellipsis;
+                        ">${escapeHtml(audit.access_key_masked || '****')}</code>
+                        ${!audit.is_expired ? `
+                            <button class="btn btn-sm copy-key-btn" data-audit-id="${audit.id}" style="min-width: 80px;">
+                                📋 Copy
+                            </button>
+                            <button class="btn btn-sm view-audit-btn" data-audit-id="${audit.id}" style="min-width: 80px;">
+                                👁️ View
+                            </button>
+                        ` : ''}
+                        <button class="btn btn-sm btn-danger delete-audit-btn" data-audit-id="${audit.id}" data-contract-name="${escapeHtml(audit.contract_name)}" style="min-width: 80px;">
+                            🗑️ Delete
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    } else {
+        auditListHtml = `
+            <div style="text-align: center; padding: 40px; color: var(--text-tertiary);">
+                <span style="font-size: 48px; display: block; margin-bottom: 16px;">📭</span>
+                <p>No audits found under this API key.</p>
+                <p style="font-size: 14px; margin-top: 8px;">Submit an audit with this API key selected to start saving results.</p>
+            </div>
+        `;
+    }
+
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width: 700px; max-height: 85vh; display: flex; flex-direction: column;">
+            <div class="modal-header" style="background: linear-gradient(135deg, var(--accent-teal), var(--accent-purple));">
+                <h3 style="color: white; margin: 0;">🗂️ Your Saved Audits</h3>
+                <button class="modal-close" id="close-api-audits-modal" style="color: white;">×</button>
+            </div>
+            <div class="modal-body" style="flex: 1; overflow-y: auto; padding: 20px;">
+                <!-- API Key Info -->
+                <div style="
+                    background: linear-gradient(135deg, rgba(14, 165, 233, 0.1), rgba(168, 85, 247, 0.1));
+                    border: 1px solid var(--glass-border);
+                    border-radius: var(--radius-md);
+                    padding: 16px;
+                    margin-bottom: 20px;
+                ">
+                    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                        <div>
+                            <span style="color: var(--text-tertiary); font-size: 13px;">API Key:</span>
+                            <code style="margin-left: 8px; color: var(--accent-teal);">${escapeHtml(data.api_key_preview)}</code>
+                            ${data.api_key_label ? `<span style="margin-left: 8px; color: var(--text-secondary);">(${escapeHtml(data.api_key_label)})</span>` : ''}
+                        </div>
+                        <div>
+                            <span style="color: var(--text-tertiary); font-size: 13px;">Total Audits:</span>
+                            <strong style="margin-left: 8px; color: var(--text-primary);">${data.total_audits}</strong>
+                        </div>
+                    </div>
+                    ${data.retention_info ? `
+                        <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--glass-border);">
+                            <span style="font-size: 12px; color: var(--text-tertiary);">
+                                📌 ${escapeHtml(data.retention_info.policy_description)} (${escapeHtml(data.retention_info.tier)} tier)
+                            </span>
+                        </div>
+                    ` : ''}
+                </div>
+
+                <!-- Audits List -->
+                <div id="api-audits-list">
+                    ${auditListHtml}
+                </div>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    // Event Listeners
+    document.getElementById('close-api-audits-modal').addEventListener('click', () => {
+        modal.remove();
+        currentLookupApiKey = null;
+    });
+
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+            modal.remove();
+            currentLookupApiKey = null;
+        }
+    });
+
+    // Handle Copy Key buttons
+    modal.querySelectorAll('.copy-key-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const auditId = btn.dataset.auditId;
+            await copyFullAccessKey(auditId);
+        });
+    });
+
+    // Handle View Audit buttons
+    modal.querySelectorAll('.view-audit-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const auditId = btn.dataset.auditId;
+            await viewAuditFromApiKey(auditId);
+            modal.remove();
+        });
+    });
+
+    // Handle Delete buttons
+    modal.querySelectorAll('.delete-audit-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const auditId = btn.dataset.auditId;
+            const contractName = btn.dataset.contractName;
+            await deleteAuditByApiKey(auditId, contractName);
+        });
+    });
+}
+
+// Copy full access key for an audit
+async function copyFullAccessKey(auditId) {
+    if (!currentLookupApiKey) {
+        ToastNotification.show('Session expired. Please look up your API key again.', 'error');
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/audits/retrieve-full-key', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': window.csrfToken || ''
+            },
+            body: JSON.stringify({
+                api_key: currentLookupApiKey,
+                audit_id: parseInt(auditId)
+            })
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to retrieve access key');
+        }
+
+        const data = await response.json();
+
+        // Copy to clipboard
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(data.access_key);
+            ToastNotification.show(`Access key copied for "${data.contract_name}"!`, 'success');
+        } else {
+            // Fallback for older browsers
+            const textArea = document.createElement('textarea');
+            textArea.value = data.access_key;
+            textArea.style.position = 'fixed';
+            textArea.style.opacity = '0';
+            document.body.appendChild(textArea);
+            textArea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textArea);
+            ToastNotification.show(`Access key copied for "${data.contract_name}"!`, 'success');
+        }
+    } catch (error) {
+        console.error('Copy access key error:', error);
+        ToastNotification.show(error.message || 'Failed to copy access key', 'error');
+    }
+}
+
+// View audit results from API key lookup
+async function viewAuditFromApiKey(auditId) {
+    if (!currentLookupApiKey) {
+        ToastNotification.show('Session expired. Please look up your API key again.', 'error');
+        return;
+    }
+
+    try {
+        // First get the full access key
+        const response = await fetch('/api/audits/retrieve-full-key', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': window.csrfToken || ''
+            },
+            body: JSON.stringify({
+                api_key: currentLookupApiKey,
+                audit_id: parseInt(auditId)
+            })
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to retrieve access key');
+        }
+
+        const data = await response.json();
+
+        // Now retrieve the audit results using the access key
+        await window.retrieveAuditByKey(data.access_key);
+    } catch (error) {
+        console.error('View audit error:', error);
+        ToastNotification.show(error.message || 'Failed to view audit', 'error');
+    }
+}
+
+// Delete an audit via API key
+async function deleteAuditByApiKey(auditId, contractName) {
+    if (!currentLookupApiKey) {
+        ToastNotification.show('Session expired. Please look up your API key again.', 'error');
+        return;
+    }
+
+    // Confirm deletion
+    const confirmed = confirm(
+        `Are you sure you want to permanently delete "${contractName}"?\n\n` +
+        `This will:\n` +
+        `• Remove the audit results\n` +
+        `• Delete any associated PDF report\n` +
+        `• Free up your audit slot (Starter tier)\n\n` +
+        `This action cannot be undone.`
+    );
+
+    if (!confirmed) return;
+
+    try {
+        const response = await fetch('/api/audits/delete-by-key', {
+            method: 'DELETE',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': window.csrfToken || ''
+            },
+            body: JSON.stringify({
+                api_key: currentLookupApiKey,
+                audit_id: parseInt(auditId)
+            })
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to delete audit');
+        }
+
+        const data = await response.json();
+
+        // Remove the audit item from the modal
+        const auditItem = document.querySelector(`.audit-item[data-audit-id="${auditId}"]`);
+        if (auditItem) {
+            auditItem.style.transition = 'all 0.3s ease';
+            auditItem.style.opacity = '0';
+            auditItem.style.transform = 'translateX(20px)';
+            setTimeout(() => auditItem.remove(), 300);
+        }
+
+        ToastNotification.show(data.message || 'Audit deleted successfully', 'success');
+
+        // Check if list is now empty
+        setTimeout(() => {
+            const remainingAudits = document.querySelectorAll('.audit-item');
+            if (remainingAudits.length === 0) {
+                const listContainer = document.getElementById('api-audits-list');
+                if (listContainer) {
+                    listContainer.innerHTML = `
+                        <div style="text-align: center; padding: 40px; color: var(--text-tertiary);">
+                            <span style="font-size: 48px; display: block; margin-bottom: 16px;">📭</span>
+                            <p>No audits remaining under this API key.</p>
+                        </div>
+                    `;
+                }
+            }
+        }, 350);
+    } catch (error) {
+        console.error('Delete audit error:', error);
+        ToastNotification.show(error.message || 'Failed to delete audit', 'error');
+    }
+}
+
+// Initialize API Key lookup button handler
+function initApiKeyLookup() {
+    const lookupBtn = document.getElementById('settings-api-key-lookup-btn');
+    const apiKeyInput = document.getElementById('settings-api-key-input');
+
+    if (lookupBtn && apiKeyInput) {
+        lookupBtn.addEventListener('click', () => {
+            window.lookupAuditsByApiKey(apiKeyInput.value);
+        });
+
+        apiKeyInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                window.lookupAuditsByApiKey(apiKeyInput.value);
+            }
+        });
+    }
+}
 
 // ---------------------------------------------------------------------
 // TOAST NOTIFICATION SYSTEM - For background job notifications
@@ -7415,6 +7858,35 @@ document.getElementById('copy-all-modal-content').addEventListener('click', () =
           window.location.href = "/logout";
         });
       }
+
+      // ============================================================================
+      // SETTINGS AUDIT RETRIEVAL HANDLERS
+      // ============================================================================
+
+      // Access Key retrieval (dga_...)
+      const settingsAuditKeyInput = document.getElementById('settings-audit-key-input');
+      const settingsRetrieveBtn = document.getElementById('settings-retrieve-btn');
+
+      if (settingsRetrieveBtn && settingsAuditKeyInput) {
+        settingsRetrieveBtn.addEventListener('click', async () => {
+          const key = settingsAuditKeyInput.value.trim();
+          if (key) {
+            closeSettingsModal();
+            await window.retrieveAuditByKey(key);
+          } else {
+            ToastNotification.show('Please enter an Access Key', 'warning');
+          }
+        });
+
+        settingsAuditKeyInput.addEventListener('keypress', (e) => {
+          if (e.key === 'Enter') {
+            settingsRetrieveBtn.click();
+          }
+        });
+      }
+
+      // API Key lookup (dgk_...) - view all audits under an API key
+      initApiKeyLookup();
 
       // ============================================================================
       // THEME SYSTEM - Color theme management
