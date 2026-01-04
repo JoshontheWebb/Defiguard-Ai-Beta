@@ -2971,6 +2971,12 @@ document.addEventListener("DOMContentLoaded", () => {
   AppInitManager.start();
   AppInitManager.setState(AppInitManager.STATE.DOM_READY);
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // CRITICAL: Initialize hamburger menu IMMEDIATELY - don't wait for other elements
+  // This ensures navigation works even if other initialization is slow
+  // ═══════════════════════════════════════════════════════════════════════
+  HamburgerManager.initWithRetry();
+
   // Section2: CSRF Token Management
   // Cache token for 10 seconds to reduce latency, but refresh before expiry
   // Backend tokens last 15 minutes, so 10-second cache is safe
