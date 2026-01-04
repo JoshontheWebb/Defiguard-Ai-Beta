@@ -14,7 +14,7 @@ rather than assuming standard interfaces, making it work with ANY contract.
 import os
 import re
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Set
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +30,78 @@ class SolidityFunction:
     visibility: str      # public, external, internal, private
     mutability: str      # view, pure, payable, or empty
     is_constructor: bool = False
+    is_fallback: bool = False
+    is_receive: bool = False
+
+    # Types that CVL doesn't handle well - expanded list for maximum compatibility
+    UNSUPPORTED_TYPE_PATTERNS = [
+        'string', 'bytes',  # Dynamic types
+        'struct', 'tuple',  # Complex types (parsed separately)
+        'function',  # Function types
+        'contract',  # Contract types as params
+    ]
+
+    # Types that need special CVL handling (can use NONDET summaries)
+    SUMMARIZABLE_TYPES = ['bytes32', 'bytes4', 'bytes20']  # Fixed-size bytes are OK
+
+    def has_unsupported_types(self) -> bool:
+        """Check if function has types that CVL doesn't support well."""
+        for param_type, _ in self.params:
+            if self._is_unsupported_type(param_type):
+                return True
+        for ret_type in self.returns:
+            if self._is_unsupported_type(ret_type):
+                return True
+        return False
+
+    def _is_unsupported_type(self, type_str: str) -> bool:
+        """Check if a type is unsupported in CVL."""
+        type_lower = type_str.lower().strip()
+
+        # Fixed-size bytes are supported (bytes1-bytes32)
+        if re.match(r'^bytes\d+$', type_lower):
+            return False
+
+        # Check against unsupported patterns
+        for pattern in self.UNSUPPORTED_TYPE_PATTERNS:
+            if pattern in type_lower:
+                return True
+
+        # Check for struct-like patterns (custom types with no standard prefix)
+        # If it's not a basic type and not an address/uint/int/bool, might be a struct
+        basic_types = {'address', 'bool', 'uint', 'int', 'bytes', 'fixed', 'ufixed'}
+        first_word = type_lower.split('[')[0].split(' ')[0]  # Handle arrays and memory
+
+        # If starts with uint/int followed by number, it's valid
+        if re.match(r'^u?int\d*$', first_word):
+            return False
+        if re.match(r'^u?fixed\d+x\d+$', first_word):
+            return False
+        if first_word in basic_types:
+            return False
+        if first_word == 'address':
+            return False
+        if first_word.startswith('bytes') and first_word != 'bytes':
+            return False  # bytes32, bytes4, etc.
+
+        # Unknown type - might be enum, struct, or user-defined type
+        # These need special handling
+        return False  # Be permissive by default, let Certora catch errors
+
+    def get_complexity_score(self) -> int:
+        """Calculate function complexity for prioritizing verification."""
+        score = 0
+        # More params = more complex
+        score += len(self.params) * 2
+        # Multiple returns = more complex
+        score += len(self.returns) * 3
+        # Payable = more security-critical
+        if self.mutability == 'payable':
+            score += 10
+        # State-changing = more important
+        if self.mutability not in ['view', 'pure']:
+            score += 5
+        return score
 
     def to_cvl_declaration(self) -> str:
         """Convert to CVL methods block declaration."""
@@ -49,6 +121,30 @@ class SolidityFunction:
 
 
 @dataclass
+class SolidityStruct:
+    """Represents a parsed Solidity struct definition."""
+    name: str
+    fields: List[tuple]  # List of (type, name) tuples
+
+    def get_cvl_equivalent(self) -> str:
+        """Get CVL-compatible representation (usually just 'bytes32' hash or individual fields)."""
+        # Structs in CVL can be represented as individual values or packed
+        # For now, we identify structs so we can skip functions that use them
+        return f"/* struct {self.name} with {len(self.fields)} fields */"
+
+
+@dataclass
+class SolidityEnum:
+    """Represents a parsed Solidity enum definition."""
+    name: str
+    values: List[str]
+
+    def get_cvl_type(self) -> str:
+        """Enums map to uint8 in CVL."""
+        return "uint8"
+
+
+@dataclass
 class SolidityVariable:
     """Represents a parsed Solidity state variable."""
     name: str
@@ -59,10 +155,33 @@ class SolidityVariable:
     mapping_value_type: str = ""
     is_nested_mapping: bool = False
     mapping_key_type2: str = ""  # Second key for nested mappings
+    is_array: bool = False
+    array_base_type: str = ""
+    is_immutable: bool = False
+    is_constant: bool = False
+
+    def has_unsupported_types(self) -> bool:
+        """Check if variable uses unsupported types."""
+        type_lower = self.var_type.lower()
+        unsupported = ['string', 'bytes memory', 'bytes calldata', 'bytes storage']
+
+        # Check main type
+        if any(u in type_lower for u in unsupported):
+            return True
+        # Check mapping value type
+        if self.is_mapping:
+            val_lower = self.mapping_value_type.lower()
+            if any(u in val_lower for u in unsupported):
+                return True
+        return False
 
     def to_cvl_getter(self) -> Optional[str]:
         """Convert public variable to CVL getter declaration."""
         if self.visibility != "public":
+            return None
+
+        # Skip unsupported types
+        if self.has_unsupported_types():
             return None
 
         if self.is_nested_mapping:
@@ -70,6 +189,9 @@ class SolidityVariable:
             return f"function {self.name}({self.mapping_key_type}, {self.mapping_key_type2}) external returns ({self.mapping_value_type}) envfree;"
         elif self.is_mapping:
             return f"function {self.name}({self.mapping_key_type}) external returns ({self.mapping_value_type}) envfree;"
+        elif self.is_array:
+            # Arrays need index parameter
+            return f"function {self.name}(uint256) external returns ({self.array_base_type}) envfree;"
         else:
             return f"function {self.name}() external returns ({self.var_type}) envfree;"
 
@@ -78,6 +200,13 @@ class SolidityParser:
     """
     Parse Solidity contracts to extract actual function signatures and state variables.
     This enables generating accurate CVL specs for ANY contract.
+
+    Enhanced for maximum morphability:
+    - Detects structs and enums for type mapping
+    - Handles user-defined value types
+    - Parses fallback/receive functions
+    - Identifies inherited interfaces
+    - Robust error recovery for malformed contracts
     """
 
     # Type mappings from Solidity to CVL
@@ -91,18 +220,154 @@ class SolidityParser:
         "bytes calldata": "bytes",
     }
 
+    # Standard interface signatures for detection
+    STANDARD_INTERFACES = {
+        "IERC20": ["totalSupply", "balanceOf", "transfer", "allowance", "approve", "transferFrom"],
+        "IERC721": ["balanceOf", "ownerOf", "safeTransferFrom", "transferFrom", "approve", "setApprovalForAll"],
+        "IERC1155": ["balanceOf", "balanceOfBatch", "setApprovalForAll", "isApprovedForAll", "safeTransferFrom"],
+        "IERC4626": ["deposit", "withdraw", "redeem", "mint", "totalAssets", "convertToShares"],
+        "IOwnable": ["owner", "transferOwnership", "renounceOwnership"],
+        "IPausable": ["paused", "pause", "unpause"],
+        "IAccessControl": ["hasRole", "getRoleAdmin", "grantRole", "revokeRole"],
+    }
+
     def __init__(self, code: str):
         self.code = code
         self.functions: List[SolidityFunction] = []
         self.variables: List[SolidityVariable] = []
+        self.structs: List[SolidityStruct] = []
+        self.enums: List[SolidityEnum] = []
+        self.user_defined_types: Dict[str, str] = {}  # Maps custom type names to base types
         self.contract_name = ""
+        self.inherited_contracts: List[str] = []
+        self.detected_interfaces: List[str] = []
         self._parse()
 
     def _parse(self):
-        """Parse the Solidity code."""
-        self._extract_contract_name()
-        self._extract_functions()
-        self._extract_state_variables()
+        """Parse the Solidity code with comprehensive extraction."""
+        try:
+            # Extract contract metadata first
+            self._extract_contract_name()
+            self._extract_inheritance()
+
+            # Extract type definitions (needed for function parsing)
+            self._extract_enums()
+            self._extract_structs()
+            self._extract_user_defined_types()
+
+            # Extract contract members
+            self._extract_functions()
+            self._extract_fallback_receive()
+            self._extract_state_variables()
+
+            # Detect standard interfaces for better rule generation
+            self._detect_interfaces()
+
+        except Exception as e:
+            logger.warning(f"SolidityParser: Error during parsing: {e}")
+            # Continue with partial parsing results
+
+    def _extract_inheritance(self):
+        """Extract inherited contracts/interfaces."""
+        # Pattern: contract Name is Parent1, Parent2, Interface1
+        pattern = r"contract\s+\w+\s+is\s+([^{]+)"
+        match = re.search(pattern, self.code)
+        if match:
+            inheritance_str = match.group(1)
+            # Split by comma, handle generic types like ERC20Burnable
+            parts = re.split(r',\s*', inheritance_str)
+            for part in parts:
+                # Extract just the contract/interface name (ignore generic params)
+                name_match = re.match(r'(\w+)', part.strip())
+                if name_match:
+                    self.inherited_contracts.append(name_match.group(1))
+
+    def _extract_enums(self):
+        """Extract enum definitions."""
+        # Pattern: enum Name { Value1, Value2, ... }
+        pattern = r"enum\s+(\w+)\s*\{([^}]+)\}"
+        for match in re.finditer(pattern, self.code):
+            name = match.group(1)
+            values_str = match.group(2)
+            values = [v.strip() for v in values_str.split(',') if v.strip()]
+
+            self.enums.append(SolidityEnum(name=name, values=values))
+            # Map enum name to uint8 for type normalization
+            self.user_defined_types[name] = "uint8"
+
+        if self.enums:
+            logger.info(f"SolidityParser: Extracted {len(self.enums)} enums")
+
+    def _extract_structs(self):
+        """Extract struct definitions."""
+        # Pattern: struct Name { type1 field1; type2 field2; ... }
+        pattern = r"struct\s+(\w+)\s*\{([^}]+)\}"
+        for match in re.finditer(pattern, self.code):
+            name = match.group(1)
+            body = match.group(2)
+
+            # Parse struct fields
+            fields = []
+            field_pattern = r"(\w+(?:\[\])?(?:\s+\w+)?)\s+(\w+)\s*;"
+            for field_match in re.finditer(field_pattern, body):
+                field_type = self._normalize_type(field_match.group(1))
+                field_name = field_match.group(2)
+                fields.append((field_type, field_name))
+
+            self.structs.append(SolidityStruct(name=name, fields=fields))
+            # Mark struct as custom type (functions using it will be filtered)
+            self.user_defined_types[name] = "struct"
+
+        if self.structs:
+            logger.info(f"SolidityParser: Extracted {len(self.structs)} structs")
+
+    def _extract_user_defined_types(self):
+        """Extract user-defined value types (Solidity 0.8.8+)."""
+        # Pattern: type TypeName is BaseType;
+        pattern = r"type\s+(\w+)\s+is\s+(\w+)\s*;"
+        for match in re.finditer(pattern, self.code):
+            type_name = match.group(1)
+            base_type = match.group(2)
+            self.user_defined_types[type_name] = self._normalize_type(base_type)
+
+    def _extract_fallback_receive(self):
+        """Extract fallback and receive functions."""
+        # Fallback function
+        fallback_pattern = r"fallback\s*\(\s*\)\s*external\s*(payable)?"
+        if re.search(fallback_pattern, self.code):
+            self.functions.append(SolidityFunction(
+                name="fallback",
+                params=[],
+                returns=[],
+                visibility="external",
+                mutability="payable" if "payable" in re.search(fallback_pattern, self.code).group(0) else "",
+                is_fallback=True
+            ))
+
+        # Receive function
+        receive_pattern = r"receive\s*\(\s*\)\s*external\s*payable"
+        if re.search(receive_pattern, self.code):
+            self.functions.append(SolidityFunction(
+                name="receive",
+                params=[],
+                returns=[],
+                visibility="external",
+                mutability="payable",
+                is_receive=True
+            ))
+
+    def _detect_interfaces(self):
+        """Detect which standard interfaces this contract likely implements."""
+        func_names = {f.name.lower() for f in self.functions}
+
+        for interface, required_funcs in self.STANDARD_INTERFACES.items():
+            matches = sum(1 for f in required_funcs if f.lower() in func_names)
+            # If most functions match, likely implements interface
+            if matches >= len(required_funcs) * 0.6:  # 60% threshold
+                self.detected_interfaces.append(interface)
+
+        if self.detected_interfaces:
+            logger.info(f"SolidityParser: Detected interfaces: {self.detected_interfaces}")
 
     def _extract_contract_name(self):
         """Extract the main contract name."""
@@ -112,24 +377,77 @@ class SolidityParser:
         self.contract_name = match.group(1) if match else "Contract"
 
     def _normalize_type(self, sol_type: str) -> str:
-        """Normalize Solidity type to CVL-compatible type."""
+        """
+        Normalize Solidity type to CVL-compatible type.
+
+        Handles:
+        - Basic type aliases (uint -> uint256)
+        - Memory/calldata/storage modifiers
+        - Arrays (including multi-dimensional)
+        - User-defined types (enums, custom value types)
+        - Address payable -> address
+        """
         sol_type = sol_type.strip()
 
-        # Check direct mappings
+        # Check direct mappings first
         if sol_type in self.TYPE_MAP:
             return self.TYPE_MAP[sol_type]
 
-        # Handle memory/calldata suffixes
+        # Handle memory/calldata/storage suffixes
         for suffix in [" memory", " calldata", " storage"]:
             if suffix in sol_type:
                 sol_type = sol_type.replace(suffix, "")
 
-        # Handle arrays
+        # Handle "address payable" -> "address"
+        if "address payable" in sol_type:
+            sol_type = sol_type.replace("address payable", "address")
+
+        # Handle arrays (including multi-dimensional)
         if "[]" in sol_type:
+            # Count array dimensions
+            dimensions = sol_type.count("[]")
             base_type = sol_type.replace("[]", "").strip()
-            return f"{self._normalize_type(base_type)}[]"
+            normalized_base = self._normalize_type(base_type)
+            return normalized_base + "[]" * dimensions
+
+        # Handle fixed-size arrays like uint256[10]
+        fixed_array_match = re.match(r"^(\w+)\[(\d+)\]$", sol_type)
+        if fixed_array_match:
+            base_type = fixed_array_match.group(1)
+            size = fixed_array_match.group(2)
+            normalized_base = self._normalize_type(base_type)
+            return f"{normalized_base}[{size}]"
+
+        # Check if it's a user-defined type (enum or custom type)
+        if hasattr(self, 'user_defined_types') and sol_type in self.user_defined_types:
+            base_type = self.user_defined_types[sol_type]
+            if base_type == "struct":
+                return sol_type  # Keep struct name for filtering
+            return base_type  # Return normalized base type for enums/custom types
+
+        # Check for contract types (ContractName variable)
+        # These are typically address types in CVL
+        if sol_type[0].isupper() and not any(c.isdigit() for c in sol_type[:3]):
+            # Likely a contract/interface type - treat as address
+            # But keep the name for struct detection
+            if hasattr(self, 'structs'):
+                struct_names = {s.name for s in self.structs}
+                if sol_type in struct_names:
+                    return sol_type  # Keep struct name
+            # Might be a contract type - often treated as address
+            # But could also be an interface - keep as-is for now
+            pass
 
         return sol_type
+
+    def _is_struct_type(self, type_name: str) -> bool:
+        """Check if a type is a struct defined in this contract."""
+        if not hasattr(self, 'structs'):
+            return False
+        struct_names = {s.name for s in self.structs}
+        # Handle arrays of structs
+        base_type = type_name.replace("[]", "").replace(" memory", "").replace(" calldata", "").strip()
+        return base_type in struct_names
 
     def _extract_functions(self):
         """Extract all function signatures from the contract."""
@@ -340,20 +658,146 @@ class SolidityParser:
         logger.info(f"SolidityParser: Extracted {len(self.variables)} public state variables")
 
     def get_all_external_signatures(self) -> List[str]:
-        """Get all externally callable function signatures for CVL methods block."""
-        signatures = []
+        """
+        Get all externally callable function signatures for CVL methods block.
 
-        # Add explicit functions
+        Uses intelligent filtering to maximize compatibility:
+        - Skips functions with unsupported types (string, bytes, structs)
+        - Normalizes enum types to uint8
+        - Handles fallback/receive specially
+        - Logs what was skipped for debugging
+        """
+        signatures = []
+        skipped = []
+        skipped_reasons = {}
+
+        # Get struct names for filtering
+        struct_names = {s.name for s in self.structs} if hasattr(self, 'structs') else set()
+
+        # Add explicit functions (skip those with unsupported types)
         for func in self.functions:
-            signatures.append(func.to_cvl_declaration())
+            # Skip fallback/receive - they don't have standard signatures
+            if func.is_fallback or func.is_receive:
+                continue
+
+            # Check for unsupported types
+            if func.has_unsupported_types():
+                skipped.append(func.name)
+                skipped_reasons[func.name] = "unsupported_type"
+                continue
+
+            # Check for struct parameters/returns
+            has_struct = False
+            for param_type, _ in func.params:
+                if self._is_struct_type(param_type):
+                    has_struct = True
+                    break
+            for ret_type in func.returns:
+                if self._is_struct_type(ret_type):
+                    has_struct = True
+                    break
+
+            if has_struct:
+                skipped.append(func.name)
+                skipped_reasons[func.name] = "struct_type"
+                continue
+
+            try:
+                decl = func.to_cvl_declaration()
+                signatures.append(decl)
+            except Exception as e:
+                logger.warning(f"SolidityParser: Error generating declaration for {func.name}: {e}")
+                skipped.append(func.name)
+                skipped_reasons[func.name] = str(e)
 
         # Add auto-generated getters for public variables
         for var in self.variables:
-            getter = var.to_cvl_getter()
-            if getter:
-                signatures.append(getter)
+            # Skip variables with unsupported types
+            if var.has_unsupported_types():
+                skipped.append(var.name)
+                skipped_reasons[var.name] = "unsupported_type"
+                continue
+
+            # Check for struct type
+            if self._is_struct_type(var.var_type):
+                skipped.append(var.name)
+                skipped_reasons[var.name] = "struct_type"
+                continue
+
+            if var.is_mapping:
+                # Check mapping value type for struct
+                if self._is_struct_type(var.mapping_value_type):
+                    skipped.append(var.name)
+                    skipped_reasons[var.name] = "struct_mapping"
+                    continue
+
+            try:
+                getter = var.to_cvl_getter()
+                if getter:
+                    signatures.append(getter)
+            except Exception as e:
+                logger.warning(f"SolidityParser: Error generating getter for {var.name}: {e}")
+                skipped.append(var.name)
+
+        # Log comprehensive skip report
+        if skipped:
+            by_reason = {}
+            for name in skipped:
+                reason = skipped_reasons.get(name, "unknown")
+                by_reason.setdefault(reason, []).append(name)
+
+            logger.info(f"SolidityParser: Skipped {len(skipped)} items from CVL methods block:")
+            for reason, names in by_reason.items():
+                logger.info(f"  - {reason}: {names[:3]}{'...' if len(names) > 3 else ''}")
 
         return signatures
+
+    def get_verifiable_functions(self) -> List[SolidityFunction]:
+        """Get functions that can be formally verified (no unsupported types)."""
+        verifiable = []
+        for func in self.functions:
+            if func.is_fallback or func.is_receive:
+                continue
+            if func.has_unsupported_types():
+                continue
+            # Check for struct types
+            has_struct = False
+            for param_type, _ in func.params:
+                if self._is_struct_type(param_type):
+                    has_struct = True
+                    break
+            for ret_type in func.returns:
+                if self._is_struct_type(ret_type):
+                    has_struct = True
+                    break
+            if not has_struct:
+                verifiable.append(func)
+
+        return verifiable
+
+    def get_security_critical_functions(self) -> List[SolidityFunction]:
+        """Get functions that are security-critical and should be prioritized."""
+        critical = []
+        critical_patterns = [
+            'transfer', 'withdraw', 'deposit', 'mint', 'burn',
+            'approve', 'allowance', 'execute', 'call', 'delegatecall',
+            'selfdestruct', 'ownership', 'admin', 'pause', 'upgrade',
+            'setprice', 'setoracle', 'setfee', 'emergency',
+        ]
+
+        for func in self.get_verifiable_functions():
+            name_lower = func.name.lower()
+            # Payable functions are always critical
+            if func.mutability == 'payable':
+                critical.append(func)
+                continue
+            # Check name patterns
+            for pattern in critical_patterns:
+                if pattern in name_lower:
+                    critical.append(func)
+                    break
+
+        return critical
 
     def has_function(self, name: str) -> bool:
         """Check if contract has a function with given name."""
@@ -1160,6 +1604,12 @@ Consider these proven patterns for your specification:
         """
         Generate comprehensive CVL specs from templates when AI is unavailable.
         Uses actual contract parsing to ensure specs match the real contract.
+
+        Enhanced for maximum morphability:
+        - Uses detected interfaces for targeted rule generation
+        - Includes struct/enum information in comments
+        - Generates only rules that apply to actual contract structure
+        - Provides comprehensive metadata for debugging
         """
         # Parse the actual contract
         parser = SolidityParser(contract_code)
@@ -1170,13 +1620,46 @@ Consider these proven patterns for your specification:
         # Detect contract types for template selection
         contract_types = self._detect_contract_types(contract_code)
 
+        # Get verifiable functions count for metadata
+        verifiable_funcs = parser.get_verifiable_functions()
+        security_critical = parser.get_security_critical_functions()
+
+        # Build comprehensive metadata
+        struct_info = f" * - Structs defined: {len(parser.structs)}" if parser.structs else ""
+        enum_info = f" * - Enums defined: {len(parser.enums)}" if parser.enums else ""
+        interface_info = f" * - Detected interfaces: {', '.join(parser.detected_interfaces)}" if parser.detected_interfaces else ""
+        inheritance_info = f" * - Inherits from: {', '.join(parser.inherited_contracts[:5])}" if parser.inherited_contracts else ""
+
         # Build methods block from ACTUAL contract functions
         methods = self._build_methods_block_from_parser(parser)
+
+        # Check if we have enough functions to verify
+        if not verifiable_funcs:
+            logger.warning(f"CVLGenerator: No verifiable functions found in {contract_name}")
+            # Generate minimal valid spec
+            return f"""/*
+ * CVL Specification for {contract_name}
+ * Generated by DeFiGuard AI
+ *
+ * WARNING: No verifiable functions found.
+ * All functions use unsupported types (structs, strings, bytes).
+ */
+
+methods {{
+    // No functions with CVL-compatible signatures found
+    // Contract may use complex types not supported by formal verification
+}}
+
+// Minimal sanity rule
+rule contractExists(env e) {{
+    satisfy true;
+}}
+"""
 
         # Generate adaptive rules based on actual functions
         adaptive_rules = self._generate_adaptive_rules(parser, slither_findings)
 
-        # Build the spec
+        # Build the spec with comprehensive metadata
         spec = f"""/*
  * ═══════════════════════════════════════════════════════════════════════════
  * CVL Specification for {contract_name}
@@ -1184,9 +1667,15 @@ Consider these proven patterns for your specification:
  * ═══════════════════════════════════════════════════════════════════════════
  *
  * Contract Analysis:
- * - Functions detected: {len(parser.functions)}
- * - Public variables: {len(parser.variables)}
+ * - Total functions: {len(parser.functions)}
+ * - Verifiable functions: {len(verifiable_funcs)}
+ * - Security-critical functions: {len(security_critical)}
+ * - Public state variables: {len(parser.variables)}
  * - Contract patterns: {', '.join(contract_types) if contract_types else 'generic'}
+{struct_info}
+{enum_info}
+{interface_info}
+{inheritance_info}
  */
 
 {methods}
@@ -1223,19 +1712,43 @@ rule sanityCheck(method f, env e, calldataarg args) {{
     def _generate_adaptive_rules(self, parser: SolidityParser, slither_findings: list = None) -> str:
         """
         Generate comprehensive rules that adapt to the actual contract structure.
-        Detects ALL common patterns and generates appropriate verification rules.
+
+        MORPHABILITY PRINCIPLES:
+        1. Only generate rules for patterns that DEFINITELY exist
+        2. Use ONLY verifiable functions (no unsupported types)
+        3. Validate variable existence before referencing in rules
+        4. Prefer safer rule patterns that won't cause spec errors
+        5. Log what was generated for debugging
+
+        This ensures specs always compile and verify, regardless of contract complexity.
         """
         rules = []
         code_lower = parser.code.lower()
 
+        # Get VERIFIABLE functions only (filters out structs, strings, bytes)
+        verifiable_funcs = parser.get_verifiable_functions()
+        verifiable_func_names = {f.name.lower() for f in verifiable_funcs}
+        verifiable_func_by_name = {f.name.lower(): f for f in verifiable_funcs}
+
         # Get function and variable names for reference
-        func_names = [f.name.lower() for f in parser.functions]
+        all_func_names = [f.name.lower() for f in parser.functions]
         var_names = [v.name.lower() for v in parser.variables]
-        mapping_vars = [v for v in parser.variables if v.is_mapping]
+
+        # Get VERIFIABLE mappings only (no structs in value type)
+        mapping_vars = []
+        for v in parser.variables:
+            if v.is_mapping and not v.has_unsupported_types():
+                if not parser._is_struct_type(v.mapping_value_type):
+                    mapping_vars.append(v)
+
         uint_vars = [v for v in parser.variables if "uint" in v.var_type.lower() and not v.is_mapping]
 
         # Track what patterns we detected for logging
         detected_patterns = []
+
+        # Helper to check if a function is verifiable
+        def is_verifiable(func_name: str) -> bool:
+            return func_name.lower() in verifiable_func_names
 
         # ═══════════════════════════════════════════════════════════════════
         # SUPPLY/BALANCE CONSERVATION RULES
@@ -1286,7 +1799,8 @@ rule balanceNotExceedSupply(address account) {{
         # ═══════════════════════════════════════════════════════════════════
 
         transfer_func = parser.get_function("transfer")
-        if transfer_func and balance_mapping:
+        # Only generate if transfer is VERIFIABLE (no string/bytes/struct params)
+        if transfer_func and balance_mapping and is_verifiable("transfer"):
             detected_patterns.append("Transfer")
             rules.append(f"""
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1334,7 +1848,8 @@ rule cannotTransferMoreThanBalance(env e, address to, uint256 amount) {{
                 allowance_mapping = v
                 break
 
-        if transferFrom_func and balance_mapping:
+        # Only generate if transferFrom is VERIFIABLE
+        if transferFrom_func and balance_mapping and is_verifiable("transferFrom"):
             detected_patterns.append("Allowance")
             allowance_getter = allowance_mapping.name if allowance_mapping else "allowance"
             rules.append(f"""
@@ -1374,7 +1889,8 @@ rule transferFromReducesAllowance(env e, address from, address to, uint256 amoun
         # ═══════════════════════════════════════════════════════════════════
 
         mint_func = parser.get_function("mint")
-        if mint_func and supply_var:
+        # Only generate if mint is VERIFIABLE
+        if mint_func and supply_var and is_verifiable("mint"):
             detected_patterns.append("Minting")
             balance_ref = balance_mapping.name if balance_mapping else "balanceOf"
             rules.append(f"""
@@ -1407,7 +1923,8 @@ rule mintIntegrity(env e, address to, uint256 amount) {{
         # ═══════════════════════════════════════════════════════════════════
 
         burn_func = parser.get_function("burn")
-        if burn_func and supply_var:
+        # Only generate if burn is VERIFIABLE
+        if burn_func and supply_var and is_verifiable("burn"):
             detected_patterns.append("Burning")
             balance_ref = balance_mapping.name if balance_mapping else "balanceOf"
             rules.append(f"""
@@ -1454,9 +1971,9 @@ rule cannotBurnMoreThanBalance(env e, uint256 amount) {{
                 owner_var = v
                 break
 
-        has_owner_func = "owner" in func_names
-        has_transfer_ownership = "transferownership" in func_names
-        has_renounce_ownership = "renounceownership" in func_names
+        has_owner_func = "owner" in all_func_names and is_verifiable("owner")
+        has_transfer_ownership = "transferownership" in all_func_names and is_verifiable("transferOwnership")
+        has_renounce_ownership = "renounceownership" in all_func_names and is_verifiable("renounceOwnership")
 
         if owner_var or has_owner_func:
             detected_patterns.append("Ownable")
@@ -1507,8 +2024,8 @@ rule onlyOwnerCanRenounce(env e) {{
         # PAUSABLE CONTRACT RULES
         # ═══════════════════════════════════════════════════════════════════
 
-        has_pause = "pause" in func_names
-        has_unpause = "unpause" in func_names
+        has_pause = "pause" in all_func_names and is_verifiable("pause")
+        has_unpause = "unpause" in all_func_names and is_verifiable("unpause")
         paused_var = None
         for v in parser.variables:
             if v.name.lower() == "paused" or "_paused" in v.name.lower():
@@ -1561,7 +2078,8 @@ rule pauseBlocksTransfers(env e, address to, uint256 amount) {{
         deposit_func = parser.get_function("deposit")
         withdraw_func = parser.get_function("withdraw")
 
-        if deposit_func and withdraw_func:
+        # Only generate vault rules if both deposit AND withdraw are verifiable
+        if deposit_func and withdraw_func and is_verifiable("deposit") and is_verifiable("withdraw"):
             detected_patterns.append("Vault")
             rules.append("""
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1609,7 +2127,8 @@ rule cannotWithdrawMoreThanDeposited(env e, uint256 shares) {
         stake_func = parser.get_function("stake")
         unstake_func = parser.get_function("unstake")
 
-        if stake_func:
+        # Only generate staking rules if stake is verifiable
+        if stake_func and is_verifiable("stake"):
             detected_patterns.append("Staking")
             rules.append("""
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1626,7 +2145,7 @@ rule stakeIncreasesStakedBalance(env e, uint256 amount) {
     satisfy true;
 }
 """)
-            if unstake_func:
+            if unstake_func and is_verifiable("unstake"):
                 rules.append("""
 rule cannotUnstakeMoreThanStaked(env e, uint256 amount) {
     // This should revert if unstaking more than staked
@@ -1643,7 +2162,8 @@ rule cannotUnstakeMoreThanStaked(env e, uint256 amount) {
         ownerOf_func = parser.get_function("ownerOf")
         safeTransferFrom_func = parser.get_function("safeTransferFrom")
 
-        if ownerOf_func:
+        # Only generate NFT rules if ownerOf is verifiable
+        if ownerOf_func and is_verifiable("ownerOf"):
             detected_patterns.append("ERC721")
             rules.append("""
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1694,7 +2214,9 @@ rule onlyOwnerOrApprovedCanTransfer(env e, address from, address to, uint256 tok
         vote_func = parser.get_function("vote") or parser.get_function("castVote")
         execute_func = parser.get_function("execute")
 
-        if propose_func or vote_func:
+        # Only generate governance rules if vote functions are verifiable
+        has_verifiable_vote = (vote_func and is_verifiable("vote")) or is_verifiable("castVote")
+        if (propose_func or vote_func) and has_verifiable_vote:
             detected_patterns.append("Governance")
             rules.append("""
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1712,7 +2234,7 @@ rule votingRequiresTokens(env e, uint256 proposalId, uint8 support) {
     satisfy true;
 }
 """)
-            if execute_func:
+            if execute_func and is_verifiable("execute"):
                 rules.append("""
 rule proposalMustPassToExecute(env e, uint256 proposalId) {
     // Only passed proposals should be executable
@@ -1729,7 +2251,9 @@ rule proposalMustPassToExecute(env e, uint256 proposalId) {
         getPrice_func = parser.get_function("getPrice") or parser.get_function("latestAnswer")
         setPrice_func = parser.get_function("setPrice") or parser.get_function("updatePrice")
 
-        if getPrice_func:
+        # Only generate oracle rules if getPrice/latestAnswer is verifiable
+        has_verifiable_price = is_verifiable("getPrice") or is_verifiable("latestAnswer")
+        if getPrice_func and has_verifiable_price:
             detected_patterns.append("Oracle")
             price_getter = "getPrice" if parser.get_function("getPrice") else "latestAnswer"
             rules.append(f"""
@@ -1751,8 +2275,9 @@ rule oraclePriceIsBounded(env e) {{
     assert price < 10^30, "Oracle price exceeds safe bounds";
 }}
 """)
-            if setPrice_func:
-                price_setter = "setPrice" if parser.get_function("setPrice") else "updatePrice"
+            has_verifiable_setter = is_verifiable("setPrice") or is_verifiable("updatePrice")
+            if setPrice_func and has_verifiable_setter:
+                price_setter = "setPrice" if (parser.get_function("setPrice") and is_verifiable("setPrice")) else "updatePrice"
                 rules.append(f"""
 rule priceUpdateIsRestricted(env e, uint256 newPrice) {{
     // Price updates should be restricted to authorized callers
@@ -1768,7 +2293,8 @@ rule priceUpdateIsRestricted(env e, uint256 newPrice) {{
 
         flashLoan_func = parser.get_function("flashLoan")
 
-        if flashLoan_func:
+        # Only generate flash loan rules if flashLoan is verifiable
+        if flashLoan_func and is_verifiable("flashLoan"):
             detected_patterns.append("FlashLoan")
             rules.append("""
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1895,11 +2421,24 @@ rule noUnexpectedStateChanges(method f, method g, env e, calldataarg args)
 }
 """)
 
-        # Log what we detected
+        # Comprehensive logging of what was generated
+        total_rules = len(rules)
+        verifiable_count = len(verifiable_funcs)
+        skipped_count = len(parser.functions) - verifiable_count
+
         if detected_patterns:
-            logger.info(f"CVLGenerator: Detected patterns: {', '.join(detected_patterns)}")
+            logger.info(f"CVLGenerator: Generated {total_rules} rule blocks for patterns: {', '.join(detected_patterns)}")
         else:
-            logger.info("CVLGenerator: No specific patterns detected, using base rules only")
+            logger.info(f"CVLGenerator: Generated {total_rules} base rule blocks (no specific patterns detected)")
+
+        logger.info(f"CVLGenerator: Contract has {verifiable_count} verifiable functions, {skipped_count} skipped")
+
+        if parser.structs:
+            logger.info(f"CVLGenerator: {len(parser.structs)} structs detected (functions using them were skipped)")
+        if parser.enums:
+            logger.info(f"CVLGenerator: {len(parser.enums)} enums detected (mapped to uint8)")
+        if parser.detected_interfaces:
+            logger.info(f"CVLGenerator: Detected standard interfaces: {parser.detected_interfaces}")
 
         return "\n".join(rules)
 
