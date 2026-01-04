@@ -1136,6 +1136,9 @@ class CertoraRunner:
             "parse error",
             "solidity error",
             "spec error",
+            "specification error",
+            "found errors",
+            "error always",
             "syntax error",
             "type error",
             "could not compile",
@@ -1225,20 +1228,28 @@ class CertoraRunner:
         """Extract a meaningful error message from output."""
         combined = stdout + "\n" + stderr
 
-        # Look for common error patterns
+        # Look for common error patterns - ordered by specificity
         error_patterns = [
+            # Certora specific errors
+            r"ERROR ALWAYS\s*[-:]\s*([^\n]+)",
+            r"Specification error:\s*([^\n]+)",
+            r"Found errors in[^\n]*:\s*([^\n]+)",
+            # General errors
             r"Error:\s*([^\n]+)",
             r"error\[E\d+\]:\s*([^\n]+)",
             r"(?:Solidity|CVL)\s+error:\s*([^\n]+)",
+            # CVL syntax errors
+            r"line\s+\d+[:\s]+([^\n]+error[^\n]*)",
+            r"(?:unexpected|expected|invalid)[^\n]+",
         ]
 
         for pattern in error_patterns:
             match = re.search(pattern, combined, re.IGNORECASE)
             if match:
-                return match.group(1)[:200]
+                return match.group(1)[:200].strip() if match.lastindex else match.group(0)[:200].strip()
 
-        # Return first non-empty error line
-        for line in stderr.split('\n'):
+        # If no specific pattern matched, look for any line containing "error"
+        for line in combined.split('\n'):
             if 'error' in line.lower() and len(line.strip()) > 10:
                 return line.strip()[:200]
 

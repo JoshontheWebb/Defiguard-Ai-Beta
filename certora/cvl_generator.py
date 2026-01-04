@@ -36,10 +36,9 @@ class SolidityFunction:
         # Format parameters
         param_types = ", ".join(p[0] for p in self.params) if self.params else ""
 
-        # Format return type
+        # Format return type - join all returns with comma, wrap in single parens
         if self.returns:
-            ret_type = self.returns[0] if len(self.returns) == 1 else f"({', '.join(self.returns)})"
-            returns_str = f" returns ({ret_type})"
+            returns_str = f" returns ({', '.join(self.returns)})"
         else:
             returns_str = ""
 

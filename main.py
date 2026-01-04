@@ -715,9 +715,12 @@ else:
 @app.on_event("startup")
 async def startup_redis_pubsub():
     """Initialize Redis pub/sub for cross-worker WebSocket messaging."""
+    logger.info(f"[STARTUP] Worker {WORKER_ID[:8]} initializing Redis pub/sub...")
     if await init_redis_pubsub():
         asyncio.create_task(redis_audit_subscriber())
-        logger.info("[STARTUP] Redis audit subscriber started")
+        logger.info(f"[STARTUP] Worker {WORKER_ID[:8]} Redis audit subscriber started")
+    else:
+        logger.warning(f"[STARTUP] Worker {WORKER_ID[:8]} Redis pub/sub not available")
 
 
 # Background task to poll pending Certora jobs
@@ -3917,7 +3920,7 @@ async def broadcast_audit_log(username: str, message: str):
                 "message": message,
                 "source_worker": WORKER_ID  # For deduplication on same worker
             }))
-            logger.debug(f"[AUDIT_LOG] 📤 Published via Redis for '{username}': {message}")
+            logger.info(f"[AUDIT_LOG] 📤 Published via Redis for '{username}' (worker {WORKER_ID[:8]})")
         except Exception as e:
             logger.warning(f"[AUDIT_LOG] Redis publish failed for '{username}': {e}")
 
@@ -6474,7 +6477,7 @@ async def init_redis_pubsub():
     if redis_url:
         try:
             redis_pubsub_client = await aioredis.from_url(redis_url)
-            logger.info("[REDIS] ✅ Pub/sub client connected for WebSocket messaging")
+            logger.info(f"[REDIS] ✅ Pub/sub client connected (worker {WORKER_ID[:8]})")
             return True
         except Exception as e:
             logger.warning(f"[REDIS] ⚠️ Pub/sub connection failed: {e}")
@@ -6484,12 +6487,13 @@ async def redis_audit_subscriber():
     """Subscribe to audit log messages and deliver to local WebSockets (for cross-worker messaging)."""
     global redis_pubsub_client
     if not redis_pubsub_client:
+        logger.warning(f"[REDIS] No pub/sub client for worker {WORKER_ID[:8]}")
         return
 
     try:
         pubsub = redis_pubsub_client.pubsub()
         await pubsub.subscribe("audit_log_broadcast")
-        logger.info("[REDIS] 📡 Subscribed to audit_log_broadcast channel")
+        logger.info(f"[REDIS] 📡 Worker {WORKER_ID[:8]} subscribed to audit_log_broadcast")
 
         async for message in pubsub.listen():
             if message["type"] == "message":
@@ -6499,16 +6503,29 @@ async def redis_audit_subscriber():
                     msg = data.get("message")
                     source_worker = data.get("source_worker")
 
+                    logger.info(f"[REDIS_SUB] Worker {WORKER_ID[:8]} received message for '{username}' from worker {source_worker[:8] if source_worker else 'unknown'}")
+
                     # Skip if this message came from THIS worker (already delivered locally)
                     if source_worker == WORKER_ID:
-                        logger.debug(f"[REDIS_SUB] Skipping own message for '{username}': {msg}")
                         continue
 
-                    # Deliver to WebSocket if on THIS worker
+                    # Deliver to WebSocket if on THIS worker (case-insensitive match)
                     ws = active_audit_websockets.get(username)
+                    matched_username = username
+                    if ws is None:
+                        # Try case-insensitive match
+                        for active_user in list(active_audit_websockets.keys()):
+                            if active_user.lower() == username.lower():
+                                ws = active_audit_websockets.get(active_user)
+                                matched_username = active_user
+                                break
+
                     if ws and ws.application_state == WebSocketState.CONNECTED:
                         await ws.send_json({"type": "audit_log", "message": msg})
-                        logger.info(f"[REDIS_SUB] ✅ Delivered to '{username}': {msg}")
+                        logger.info(f"[REDIS_SUB] ✅ Delivered to '{matched_username}': {msg[:50]}...")
+                    else:
+                        active_users = list(active_audit_websockets.keys())
+                        logger.debug(f"[REDIS_SUB] No WebSocket for '{username}' on worker {WORKER_ID[:8]} (active: {active_users})")
                 except Exception as e:
                     logger.error(f"[REDIS_SUB] Message handling error: {e}")
     except asyncio.CancelledError:
