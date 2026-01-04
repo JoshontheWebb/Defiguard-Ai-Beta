@@ -58,6 +58,7 @@ def get_onchain_analyzer():
 
 import platform
 import json
+import functools
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -107,9 +108,10 @@ except ImportError:
         SignatureVerificationError = _StripeErrorStub
     stripe_error = _StripeModuleStub()
 
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Float, LargeBinary, text
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Float, LargeBinary, text, event
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.orm import sessionmaker, Session, Mapped, mapped_column
+from sqlalchemy.exc import DisconnectionError, OperationalError as SQLAlchemyOperationalError
 from slither.slither import Slither
 from slither.exceptions import SlitherError
 # Note: OpenAI already imported at line 17 for early client initialization
@@ -954,6 +956,46 @@ if DATABASE_URL:
         max_overflow=30,
         pool_timeout=10
     )
+
+    # Add connection event handlers for PostgreSQL to handle stale connections
+    @event.listens_for(engine, "engine_connect")
+    def receive_engine_connect(conn):
+        """Handle new engine connections - log for debugging."""
+        logger.debug("[DB] New database connection established")
+
+    @event.listens_for(engine, "connect")
+    def receive_connect(dbapi_conn, connection_record):
+        """Configure connection-level settings for PostgreSQL."""
+        # Set a shorter keepalive to detect dead connections faster
+        try:
+            cursor = dbapi_conn.cursor()
+            cursor.execute("SET statement_timeout = '60s'")
+            cursor.close()
+        except Exception as e:
+            logger.warning(f"[DB] Could not set statement_timeout: {e}")
+
+    @event.listens_for(engine, "checkout")
+    def receive_checkout(dbapi_conn, connection_record, connection_proxy):
+        """Verify connection health when checking out from pool."""
+        try:
+            # Quick health check
+            cursor = dbapi_conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+            cursor.close()
+        except Exception as e:
+            logger.warning(f"[DB] Stale connection detected during checkout: {e}")
+            # Raise DisconnectionError to force pool to get a fresh connection
+            raise DisconnectionError("Connection is stale")
+
+    @event.listens_for(engine, "invalidate")
+    def receive_invalidate(dbapi_conn, connection_record, exception):
+        """Log when connections are invalidated."""
+        if exception:
+            logger.warning(f"[DB] Connection invalidated due to: {exception}")
+        else:
+            logger.debug("[DB] Connection invalidated (manual)")
+
 elif os.getenv("RENDER"):
     # Fallback: SQLite on Render (WARNING: Data lost on redeploy!)
     DATABASE_URL = "sqlite:////tmp/users.db"
@@ -1602,11 +1644,72 @@ except Exception as e:
     logger.error(f"[DB] ✗ Migration error (non-fatal): {e}")
 
 def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    """Get database session with automatic retry on connection failure."""
+    max_retries = 3
+    retry_delay = 0.5
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            db = SessionLocal()
+            # Test the connection is alive
+            db.execute(text("SELECT 1"))
+            try:
+                yield db
+            finally:
+                db.close()
+            return  # Success, exit the generator
+        except (SQLAlchemyOperationalError, DisconnectionError) as e:
+            last_error = e
+            logger.warning(f"[DB] Connection attempt {attempt + 1}/{max_retries} failed: {e}")
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+            try:
+                db.close()
+            except:
+                pass
+
+    # If we get here, all retries failed
+    if last_error:
+        logger.error(f"[DB] All connection attempts failed: {last_error}")
+        raise last_error
+
+
+def db_retry(max_attempts: int = 3, delay: float = 0.5):
+    """Decorator for retrying database operations on transient failures."""
+    def decorator(func):
+        @functools.wraps(func)
+        async def async_wrapper(*args, **kwargs):
+            last_error = None
+            for attempt in range(max_attempts):
+                try:
+                    return await func(*args, **kwargs)
+                except (SQLAlchemyOperationalError, DisconnectionError) as e:
+                    last_error = e
+                    logger.warning(f"[DB] Retry {attempt + 1}/{max_attempts} for {func.__name__}: {e}")
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(delay * (attempt + 1))
+            raise last_error
+
+        @functools.wraps(func)
+        def sync_wrapper(*args, **kwargs):
+            last_error = None
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except (SQLAlchemyOperationalError, DisconnectionError) as e:
+                    last_error = e
+                    logger.warning(f"[DB] Retry {attempt + 1}/{max_attempts} for {func.__name__}: {e}")
+                    if attempt < max_attempts - 1:
+                        import time
+                        time.sleep(delay * (attempt + 1))
+            raise last_error
+
+        if asyncio.iscoroutinefunction(func):
+            return async_wrapper
+        return sync_wrapper
+    return decorator
 
 
 @app.get("/health/db")
