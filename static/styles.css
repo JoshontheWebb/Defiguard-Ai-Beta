@@ -3700,6 +3700,146 @@ a:focus-visible {
         grid-template-columns: 1fr;
     }
 }
+
+/* Certora modal - inherits from issue-details-modal */
+#certora-issue-modal {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: var(--bg-secondary);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-lg);
+    width: 90%;
+    max-width: 800px;
+    max-height: 90vh;
+    overflow: hidden;
+    z-index: var(--z-modal);
+    display: none;
+    animation: scaleIn 0.3s ease-out;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+}
+
+#certora-issue-modal .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding: var(--space-6);
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.1) 0%, rgba(217, 70, 239, 0.1) 100%);
+    border-bottom: 1px solid var(--glass-border);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+#certora-issue-modal .modal-header h2 {
+    font-size: var(--text-xl);
+    color: var(--text-primary);
+    margin: 0;
+    flex: 1;
+    padding-right: var(--space-4);
+}
+
+#certora-issue-modal .modal-close {
+    background: transparent;
+    border: none;
+    color: var(--text-tertiary);
+    font-size: var(--text-2xl);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#certora-issue-modal .modal-close:hover {
+    color: var(--error);
+    transform: rotate(90deg);
+}
+
+#certora-issue-modal .modal-body {
+    padding: var(--space-6);
+    max-height: calc(90vh - 120px);
+    overflow-y: auto;
+}
+
+#certora-issue-modal .modal-body section {
+    margin-bottom: var(--space-6);
+    padding: var(--space-5);
+    background: var(--glass-bg);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--glass-border);
+}
+
+#certora-issue-modal .modal-body section:last-child {
+    margin-bottom: 0;
+}
+
+#certora-issue-modal .modal-body section h3 {
+    font-size: var(--text-lg);
+    color: var(--accent-purple);
+    margin: 0 0 var(--space-4) 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+#certora-issue-modal .modal-body section p {
+    margin-bottom: 0;
+    color: var(--text-secondary);
+    line-height: var(--leading-relaxed);
+}
+
+#certora-issue-modal .modal-body section ul,
+#certora-issue-modal .modal-body section ol {
+    color: var(--text-secondary);
+    line-height: var(--leading-relaxed);
+}
+
+#certora-issue-modal .modal-body section code {
+    background: var(--glass-bg);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-sm);
+    color: var(--accent-purple);
+}
+
+#certora-issue-modal .modal-body section a {
+    color: var(--accent-teal);
+    text-decoration: none;
+}
+
+#certora-issue-modal .modal-body section a:hover {
+    text-decoration: underline;
+}
+
+/* Certora analysis button styling */
+.certora-analysis-btn {
+    font-size: var(--text-sm) !important;
+    padding: var(--space-2) var(--space-4) !important;
+    border-radius: var(--radius-md) !important;
+    font-weight: 600 !important;
+    transition: all var(--transition-fast) !important;
+}
+
+.certora-analysis-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(139, 92, 246, 0.4);
+}
+
+@media (max-width: 768px) {
+    #certora-issue-modal {
+        width: 100%;
+        max-width: 100%;
+        height: 100vh;
+        max-height: 100vh;
+        border-radius: 0;
+    }
+}
+
 /* ============================================================================
    ANIMATIONS - Additional keyframes for variety
    ============================================================================ */
